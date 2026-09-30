@@ -2,10 +2,11 @@
 
 crab-student runs Claude Code workers on rented Vast.ai machines. The user's Claude Code starts a
 background launcher (it follows `crab-student guide launch`), which estimates the task and runs
-`crab-student launch`: the CLI picks a machine, rents it, puts the worker's branch on GitHub, uploads
-the machine's files and sets it up in one ssh call. On the machine a watchdog keeps the worker's Claude
-Code alive in tmux, enforces the idle and time limits, saves work and stops the machine. The user
-watches with `crab-student open` (tmux attach over ssh).
+`crab-student launch` (`launch --batch` for several workers at once): the CLI picks a machine, rents
+it, puts the worker's branch on GitHub, uploads the machine's files and sets it up in one ssh call.
+On the machine a watchdog keeps the worker's Claude Code alive in tmux, enforces the idle and time
+limits, saves work and stops the machine. The user watches with `crab-student open` (tmux attach over
+ssh).
 
 - `README.md` is for users. `SPEC.md` is the protocol reference: records, machine files, the ssh
   commands, the onstart and dead-man contract, the stop rules and the safety invariants. Update it
@@ -18,16 +19,16 @@ service: each command runs and exits.
 
 | Module | Owns |
 |---|---|
-| `cli.py` | The parser, every command's handler and all terminal output (tables, status, `list --watch`) |
+| `cli.py` | The parser, every command's handler and all terminal output (tables, status), reading the `=== NAME [flags]` text of `launch --batch` |
 | `core.py` | `CrabError`, paths, settings, worker records and their OS locks, secrets (keyring, file fallback), `run`, formatting |
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
-| `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`), the budget (`plan`) |
-| `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, reports, `pull` |
+| `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`), the plan under the approval price (`plan`), the time limit (`time_limit`) |
+| `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, files read from a branch (the report, the stop note), `pull` |
 | `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code |
-| `launch.py` | `launch`, the approval gate, `bring_up` (rent, boot, repo, upload, setup), `approve`, `decline`, `start`, `extend` |
-| `workers.py` | Views for `list` and `status` (display states), `stop`, `delete` (the safety check), `send`, `report` |
-| `setup.py` | `init`, the skill and permission rules in `~/.claude`, `check_ready`, `guide` |
-| `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`) |
+| `launch.py` | `launch` and `launch_batch` (workers brought up side by side), the approval rule, `bring_up` (rent, boot, repo, upload, setup), `approve` (several names), `decline`, `start`, `extend` |
+| `workers.py` | Views for `list` and `status` (display states), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report` |
+| `setup.py` | `init`, the skill, launcher agent and permission rules in `~/.claude`, `check_ready`, `guide` |
+| `data/SKILL.md`, `data/launcher.md`, `data/launch.md` | The skill and the launcher agent `init` installs, and the launcher's procedure (`guide launch`) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
 library, runs as root): `cs.py` (setup, the watchdog, Claude Code in tmux, and the commands the local
@@ -64,22 +65,31 @@ uv run ruff check src tests && uv run ruff format --check src tests
   only for why, no dead code, no speculative options. ruff (line length 110), `ruff format`.
 - Paths are computed at call time from `Path.home()`. Records change under `core.locked(name)`: take a
   worker's lock once per command (a second lock on the same name in one process would wait on itself).
+- A batch launch brings each worker up in its own thread (progress lines prefixed `[name]`, one failure
+  not stopping the others): whatever the threads share, like the ssh config and known_hosts, is written
+  under a lock in `machine.py`.
 - Machine side: standard library only, Python 3.8 syntax (no `X | Y` at runtime, no dict `|`, no
   `removeprefix`, no `zip(strict=)`), LF line endings. The watchdog never dies of an exception.
 
 ## Safety invariants (keep them)
 
-- **Money.** Every rent and every start of a stopped worker passes the approval gate
-  (`auto_approve_usd`, `max_running_machines`); `extend` passes the budget part. Only `approve` skips it,
-  and it is an ask-rule command. Never add a flag, default or retry that rents more.
+- **Money.** Every launch passes the price check: it rents without asking only a machine that costs
+  `approve_above_usd_per_hour` or less, else it waits (`pending`, exit 3); a failed launch tried again
+  with `start` is planned again under the same check. Only `approve` skips it, and it is an ask-rule
+  command. Restarting a stopped worker and `extend` have no gate: the time limit (twice the estimate, at
+  least 2 hours), the idle stop and the dead-man switch bound what a worker costs. Never add a flag,
+  default or retry that rents more, or rents above the price without `approve`.
 - **Never rent twice.** A rent request is never retried; the label is saved in the record before the
   request; an unknown outcome is resolved only by finding that exact label.
 - **Own machines only.** Act only on instance ids in the records (or an exact label of ours).
 - **Never destroy work.** Code destroys a machine by itself only before its upload, or after its setup
-  failed. `delete` checks for unsaved work first; a machine that cannot be checked needs `--force`.
+  failed. `delete` checks for unsaved work first (a running machine itself; a stopped one from the stop
+  note of its latest stop); a machine that cannot be checked needs `--force`, or starting first if it is
+  stopped.
 - **Stops are bounded.** The watchdog stops the machine at the time limit and when idle, always saving
-  first; the dead-man switch in the onstart command stops it if the watchdog never runs or dies.
+  first (a final save also writes the stop note `delete` reads); the dead-man switch in the onstart
+  command stops it if the watchdog never runs or dies.
 - **Secrets** never go on command lines, into logs, the brief, records or git. They reach the machine
   only inside the upload stream, as 0600 files.
-- **The launcher** can only run `setup.ALLOW` commands; anything that spends beyond the gate, destroys
-  or changes settings is in `setup.ASK`.
+- **The launcher** can only run `setup.ALLOW` commands; anything that approves a pricier machine,
+  destroys or changes settings is in `setup.ASK`.

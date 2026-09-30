@@ -1,10 +1,9 @@
-"""Launching: the plan, the approval gate, bring-up (rent, boot, repo, upload and setup), approve,
-decline, start and extend."""
+"""Launching: the plan, the approval rule, bring-up (rent, boot, repo, upload and setup), several launches at
+once, approve, decline, start and extend."""
 
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import secrets
@@ -12,6 +11,7 @@ import shlex
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,7 +65,6 @@ NO_CREDIT = re.compile(r"credit|insufficient.?(funds|balance)", re.I)
 class LaunchArgs:
     name: str
     req: offers.Req
-    budget: float | None
     brief: str
     repo_path: Path | None
     no_repo: bool
@@ -77,11 +76,13 @@ class LaunchArgs:
 
 class Progress:
     """Progress lines on stderr (so --json keeps stdout to one value). status() rewrites one line on a
-    terminal and prints only changes elsewhere."""
+    terminal and prints only changes elsewhere. A prefix ("[job1] ") marks the lines of one of several
+    launches at once (never rewritten: they share the terminal)."""
 
-    def __init__(self, stream=None):
+    def __init__(self, stream=None, prefix: str = ""):
         self.stream = stream or sys.stderr
-        self.tty = getattr(self.stream, "isatty", lambda: False)()
+        self.prefix = prefix
+        self.tty = not prefix and getattr(self.stream, "isatty", lambda: False)()
         if self.tty and os.name == "nt":
             os.system("")  # (turns on the escape codes that rewrite the status line)
         self.shown: str | None = None
@@ -95,7 +96,7 @@ class Progress:
         if self.tty and self.shown is not None:
             self.stream.write("\n")
         self.shown = None
-        print(core.ascii_text(text), file=self.stream, flush=True)
+        print(core.ascii_text(self.prefix + text), file=self.stream, flush=True)
 
     def status(self, text: str) -> None:
         """One changing line: rewritten in place (with the time so far) on a terminal; elsewhere printed when
@@ -107,7 +108,7 @@ class Progress:
         elif text != self.shown:
             new_part = text.split(" - ")[0] != (self.shown or "").split(" - ")[0]
             if new_part or time.monotonic() - self.printed >= 15:
-                print(f"{text} ({self.elapsed()})", file=self.stream, flush=True)
+                print(f"{self.prefix}{text} ({self.elapsed()})", file=self.stream, flush=True)
                 self.printed = time.monotonic()
         self.shown = text
 
@@ -123,6 +124,34 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     from crab_student import setup
 
     setup.check_ready(fake_claude=a.fake_claude)
+    check_new(a)
+    cfg = core.load_config()
+    repo, repo_line, warnings = plan_repo(a, cfg, f"agent/{a.name}")
+    plan = offers.plan(a.req, cfg, cfg["approve_above_usd_per_hour"])
+    p, limit = plan.primary, offers.time_limit(a.req.hours)
+    out.line(f"Planning {a.name}")
+    out.line(f"  machine  {offers.summary(p)} - ${p['dph_total']:.2f}/hr (offer {p['id']})")
+    if plan.fallbacks:
+        top = max(o["dph_total"] for o in plan.fallbacks)
+        out.line(
+            f"  backups  {len(plan.fallbacks)} more offer{'s' if len(plan.fallbacks) > 1 else ''}, up to ${top:.2f}/hr"
+        )
+    est = core.usd(core.ceil_cents(p["dph_total"] * a.req.hours))
+    out.line(f"  time     about {a.req.hours:g}h (~{est}); it stops after {core.fmt_hours(limit)} at most")
+    out.line(f"  repo     {repo_line}")
+    for w in warnings:
+        out.line(f"Warning: {w}")
+    reason = approval_reason(plan, cfg["approve_above_usd_per_hour"])
+    rec = new_record(a, cfg, plan, repo, reason)
+    if a.dry_run:
+        return result(rec, "dry run", warnings, reason=reason)
+    save_new(rec, a.brief, warnings)
+    if reason:
+        return result(rec, "approval", warnings, reason=reason)
+    return bring_up(a.name, out, warnings)
+
+
+def check_new(a: LaunchArgs) -> None:
     core.check_name(a.name)
     if core.record_path(a.name).exists():
         raise core.CrabError(
@@ -131,62 +160,29 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
             2,
         )
     if not a.brief.strip():
-        raise core.CrabError("the task brief is empty: pass it on stdin or with --brief-file.", 2)
+        raise core.CrabError(f"the task brief for {a.name} is empty.", 2)
     for s in a.secrets:
         if not core.SECRET_NAME_RE.fullmatch(s) or not core.get_secret(core.secret_key(s)):
             raise core.CrabError(
                 f"there is no secret named {s}: run crab-student secret set {s} in a terminal.", 2
             )
-    cfg = core.load_config()
-    branch = f"agent/{a.name}"
-    repo, repo_line, warnings = plan_repo(a, cfg, branch)
-    plan = offers.plan(a.req, cfg, a.budget)
-    p = plan.primary
-    limit = math.floor(plan.budget_usd / p["dph_total"] * 100) / 100
-    out.line(f"Planning {a.name}")
-    out.line(f"  machine  {offers.summary(p)} - ${p['dph_total']:.2f}/hr (offer {p['id']})")
-    if plan.fallbacks:
-        top = max(o["dph_total"] for o in plan.fallbacks)
-        out.line(
-            f"  backups  {len(plan.fallbacks)} more offer{'s' if len(plan.fallbacks) > 1 else ''}, up to ${top:.2f}/hr"
-        )
-    how = f"{cfg['budget_factor']:g} x the {a.req.hours:g}h estimate" if plan.auto_budget else "yours"
-    out.line(f"  budget   {core.usd(plan.budget_usd)} ({how}); stops after {core.fmt_hours(limit)}")
-    out.line(f"  repo     {repo_line}")
-    for w in warnings:
-        out.line(f"Warning: {w}")
-    if a.dry_run:
-        reason = gate(plan.budget_usd, cfg, running_count())
-        rec = {
-            "name": a.name,
-            "offers": [offers.kept(o) for o in plan.offers()],
-            "req": offers.req_dict(a.req),
-            "budget_usd": plan.budget_usd,
-            "limit_hours": limit,
-            "repo": repo,
-            "pending": None,
-            "dph": None,
-        }
-        return result(rec, "dry run", warnings, reason=reason)
-    with core.locked("_gate", wait=120):  # (two launches must not both pass max_running_machines)
-        if core.record_path(a.name).exists():  # (another launch took the name meanwhile)
-            raise core.CrabError(f"a worker named {a.name} already exists. Pick another name.", 2)
-        reason = gate(plan.budget_usd, cfg, running_count())
-        rec = new_record(a, cfg, plan, repo, limit)
-        rec["warnings"] = warnings  # (repeated when a launch waiting for approval goes ahead)
-        if reason:
-            rec.update(phase="pending", pending={"action": "launch", "reason": reason})
-        brief_file(a.name).parent.mkdir(parents=True, exist_ok=True)
-        brief_file(a.name).write_text(a.brief, encoding="utf-8")
-        core.save(rec)
-    if reason:
-        return result(rec, "approval", warnings, reason=reason)
-    return bring_up(a.name, out, warnings)
 
 
-def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[str]]:
+def approval_reason(plan: offers.Plan, cap: float) -> str | None:
+    """Why the user must approve the launch first: nothing that fits costs `cap` $/hr or less."""
+    if not plan.over_cap:
+        return None
+    return (
+        f"it would cost ${plan.primary['dph_total']:.2f}/hr, and no machine that fits costs ${cap:.2f}/hr "
+        "or less (approve_above_usd_per_hour)"
+    )
+
+
+def plan_repo(
+    a: LaunchArgs, cfg: dict, branch: str, snapshots: dict | None = None
+) -> tuple[dict, str, list[str]]:
     """Where the worker's branch starts. Nothing is written anywhere yet (the starting commit is a local,
-    unreferenced object)."""
+    unreferenced object; several launches at once share one through `snapshots`)."""
     if a.no_repo:
         slug = f"{github.login()}/{cfg['workspace_repo']}"
         github.check_workspace(slug, branch)  # (a repo that does not exist yet is created after the rent)
@@ -202,7 +198,10 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
         return repo, f"{slug} (your workspace repo) - {branch}", []
     r = github.local_repo(a.repo_path or Path.cwd())
     github.check_repo(r.slug, branch)
-    sha, carried, untracked, local = github.snapshot(r, commit=not a.dry_run)
+    snapshots = {} if snapshots is None else snapshots
+    if str(r.top) not in snapshots:
+        snapshots[str(r.top)] = github.snapshot(r, commit=not a.dry_run)
+    sha, carried, untracked, local = snapshots[str(r.top)]
     base = (
         github.git(r.top, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "a detached HEAD"
     )
@@ -238,16 +237,15 @@ def _files(paths: list[str], word: str = "file") -> str:
     return f"{len(paths)} {word}{'s' if len(paths) > 1 else ''} ({shown})"
 
 
-def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, limit: float) -> dict:
+def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: str | None) -> dict:
     return {
         "name": a.name,
         "created": core.now_iso(),
-        "phase": "renting",
+        "phase": "pending" if reason else "renting",
         "error": None,
         "req": offers.req_dict(a.req),
-        "budget_usd": plan.budget_usd,
-        "auto_budget": plan.auto_budget,
-        "limit_hours": limit,
+        "limit_hours": offers.time_limit(a.req.hours),
+        "max_dph": cfg["approve_above_usd_per_hour"],  # (the most it may rent at without asking again)
         "model": cfg["model"] if a.model is None else a.model,
         "fake_claude": a.fake_claude,
         "secrets": a.secrets,
@@ -258,11 +256,15 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, limit: f
         "rent": None,
         "instance_id": None,
         "dph": None,
+        "disk_usd_day": None,
         "machine": None,
         "short": None,
         "ssh": None,
         "uploaded": False,
-        "pending": None,
+        "pending": {"reason": reason, "max_dph": plan.top_price()} if reason else None,
+        "last_start": None,
+        "stopped_since": None,
+        "stop_note": None,
         "last_seen": None,
         "image": cfg["image"],
         "idle_minutes": cfg["idle_minutes"],
@@ -270,27 +272,93 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, limit: f
     }
 
 
-def running_count(exclude: str | None = None) -> int:
-    """Machines that are running or may be: launches under way, and finished ones Vast shows running or
-    on their way up."""
-    recs = [r for r in core.all_records() if r["name"] != exclude]
-    if not any(r["phase"] == "ready" for r in recs):
-        return sum(r["phase"] in ("renting", "booting", "setup") for r in recs)
-    insts = {i["id"]: i for i in vast.instances()}
-    return sum(
-        r["phase"] in ("renting", "booting", "setup")
-        or (r["phase"] == "ready" and vast.wants_running(insts.get(r["instance_id"])))
-        for r in recs
+def save_new(rec: dict, brief: str, warnings: list[str]) -> None:
+    with core.locked(rec["name"]):
+        if core.record_path(rec["name"]).exists():  # (another launch took the name meanwhile)
+            raise core.CrabError(f"a worker named {rec['name']} already exists. Pick another name.", 2)
+        rec["warnings"] = warnings  # (repeated when a launch waiting for approval goes ahead)
+        brief_file(rec["name"]).parent.mkdir(parents=True, exist_ok=True)
+        brief_file(rec["name"]).write_text(brief, encoding="utf-8")
+        core.save(rec)
+
+
+# ---- several at once -----------------------------------------------------------------------------
+
+
+def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
+    """Launch several workers at once. Everything is planned first (a problem stops the batch before anything
+    is rented), each worker picks a different machine, and the bring-ups run side by side."""
+    from crab_student import setup
+
+    if len({a.name for a in items}) < len(items):
+        raise core.CrabError("two workers in the batch have the same name.", 2)
+    setup.check_ready(fake_claude=any(a.fake_claude for a in items))
+    for a in items:
+        check_new(a)
+    cfg = core.load_config()
+    cap, taken, found, snapshots, planned = cfg["approve_above_usd_per_hour"], set(), {}, {}, []
+    for a in items:
+        repo, _, warnings = plan_repo(a, cfg, f"agent/{a.name}", snapshots)
+        key = json.dumps(offers.req_dict(a.req), sort_keys=True)
+        if key not in found:  # (one search per kind of machine)
+            found[key] = offers.search(a.req, cfg)
+        plan = offers.plan(a.req, cfg, cap, taken, found[key])
+        taken.add(plan.primary["id"])  # (backups may be another's pick: a taken offer moves on to the next)
+        reason = approval_reason(plan, cap)
+        p = plan.primary
+        out.line(
+            f"{a.name}: {offers.short(p)} at ${p['dph_total']:.2f}/hr, about {a.req.hours:g}h"
+            + (" - needs your approval" if reason else "")
+        )
+        planned.append((a, new_record(a, cfg, plan, repo, reason), warnings, reason))
+    if any(a.dry_run for a in items):
+        return batch_result([result(rec, "dry run", w, reason=r) for _, rec, w, r in planned])
+    for a, rec, warnings, _ in planned:
+        save_new(rec, a.brief, warnings)
+    jobs = [
+        (rec["name"], lambda o, name=rec["name"], w=warnings: bring_up(name, o, w))
+        for _, rec, warnings, reason in planned
+        if not reason
+    ]
+    done = {r["name"]: r for r in side_by_side(jobs, out)}
+    return batch_result(
+        [done.get(rec["name"]) or result(rec, "approval", w, reason=r) for _, rec, w, r in planned]
     )
 
 
-def gate(budget: float | None, cfg: dict, running: int | None) -> str | None:
-    """Why the user's approval is needed (None: it is not). None skips a check."""
-    if budget is not None and budget > cfg["auto_approve_usd"]:
-        return f"budget {core.usd(budget)} is over auto_approve_usd ({core.usd(cfg['auto_approve_usd'])})"
-    if running is not None and running + 1 > cfg["max_running_machines"]:
-        return f"{running} machines are running (max_running_machines is {cfg['max_running_machines']})"
-    return None
+def side_by_side(jobs: list, out: Progress) -> list[dict]:
+    """Run each (name, job) in its own thread, its progress lines marked with its name. A job that fails gives a
+    failed result instead of stopping the others."""
+
+    def run(name: str, job) -> dict:
+        try:
+            return job(Progress(out.stream, prefix=f"[{name}] "))
+        except Exception as e:  # (one worker's trouble, even a bug, must not lose the others' results)
+            return failed(name, e)
+
+    if not jobs:
+        return []
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        return list(pool.map(lambda job: run(*job), jobs))
+
+
+def failed(name: str, e: Exception) -> dict:
+    message, code = (e.message, e.code) if isinstance(e, core.CrabError) else (repr(e), 1)
+    line = f"{name}: launch failed - {message}"
+    return {"name": name, "state": "failed", "result_line": line, "warnings": [], "exit_code": code}
+
+
+def batch_result(results: list[dict]) -> dict:
+    """Several launches' results as one: every line, the warnings once each, and the worst exit code."""
+    codes = [r["exit_code"] for r in results]
+    bad = [c for c in codes if c not in (0, 3)]
+    return {
+        "state": "batch",
+        "results": results,
+        "result_line": "\n".join(r["result_line"] for r in results),
+        "warnings": list(dict.fromkeys(w for r in results for w in r.get("warnings", []))),
+        "exit_code": bad[0] if bad else 3 if 3 in codes else 0,
+    }
 
 
 # ---- bring-up ------------------------------------------------------------------------------------
@@ -304,6 +372,8 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
             raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
         if rec["phase"] == "failed":
             replan(rec, out)
+            if rec["phase"] == "pending":
+                return result(rec, "approval", list(warnings), reason=rec["pending"]["reason"])
         if rec["phase"] == "renting":
             rent_loop(rec, out)
         elif rec["phase"] == "booting" and (why := wait_boot(rec, out, rec["rent"]["at"] + BOOT_TIMEOUT)):
@@ -321,7 +391,7 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
 
 def resume_machine(rec: dict, out: Progress) -> None:
     """A launch cut off during setup: its machine is kept (the worker may already be at work), and may have
-    stopped since; start it again (through the gate) and wait for it."""
+    stopped since; start it again and wait for it."""
     name, inst = rec["name"], vast.instance(rec["instance_id"])
     if inst is None:
         rec.update(phase="failed", error="the machine no longer exists on Vast", instance_id=None, ssh=None)
@@ -330,12 +400,9 @@ def resume_machine(rec: dict, out: Progress) -> None:
             f"{name}'s machine no longer exists on Vast. Try again: crab-student start {name}"
         )
     if not vast.running(inst):
-        with core.locked("_gate", wait=120):
-            if reason := gate(None, core.load_config(), running_count(exclude=name)):
-                raise core.CrabError(f"{name}'s machine needs starting again, but {reason}. Stop another worker "
-                                     "first, or raise max_running_machines.", 3)  # fmt: skip
-            vast.set_state(rec["instance_id"], "running")
+        vast.set_state(rec["instance_id"], "running")
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
+        rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
     if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
         raise core.CrabError(
@@ -344,8 +411,10 @@ def resume_machine(rec: dict, out: Progress) -> None:
 
 
 def replan(rec: dict, out: Progress) -> None:
-    """A failed launch tried again: fresh offers within its budget."""
-    plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), rec["budget_usd"])
+    """A failed launch tried again: fresh offers up to the price it may rent at, else it waits for approval."""
+    cfg = core.load_config()
+    cap = max(rec.get("max_dph") or 0, cfg["approve_above_usd_per_hour"])
+    plan = offers.plan(offers.Req(**rec["req"]), cfg, cap)
     rec.update(
         offers=[offers.kept(o) for o in plan.offers()],
         failed_offers=[],
@@ -355,12 +424,16 @@ def replan(rec: dict, out: Progress) -> None:
         uploaded=False,
         phase="renting",
         error=None,
-        pending=None,  # (a start that waited for approval is happening now)
+        pending=None,
     )
+    if plan.over_cap:
+        rec.update(
+            phase="pending", pending={"reason": approval_reason(plan, cap), "max_dph": plan.top_price()}
+        )
     core.save(rec)
-    out.line(
-        f"Trying {rec['name']} again with {len(rec['offers'])} fresh offer{'s' if len(rec['offers']) > 1 else ''}."
-    )
+    if not plan.over_cap:
+        n = len(rec["offers"])
+        out.line(f"Trying {rec['name']} again with {n} fresh offer{'s' if n > 1 else ''}.")
 
 
 def rent_loop(rec: dict, out: Progress) -> None:
@@ -453,15 +526,16 @@ def rent_body(rec: dict, offer: dict) -> dict:
 
 
 def adopt(rec: dict, iid: int, offer: dict) -> None:
-    limit = math.floor(rec["budget_usd"] / offer["dph_total"] * 100) / 100
+    storage = offer.get("storage_cost")
     rec.update(
         instance_id=iid,
         dph=offer["dph_total"],
+        disk_usd_day=round(storage * rec["req"]["disk_gb"] / 30, 3) if storage else None,
         machine=offer["summary"],
         short=offer["short"],
-        limit_hours=limit,
         phase="booting",
         ssh=None,
+        last_start=time.time(),
     )
     core.save(rec)
     machine.forget_host_key(rec["name"])
@@ -611,42 +685,66 @@ def setup_machine(rec: dict, out: Progress) -> None:
 
 
 def approve(name: str, out: Progress) -> dict:
-    """Do what is waiting for approval, without the gate. A launch plans again with fresh offers, its
-    approved budget as the cap."""
+    return approve_all([name], out)
+
+
+def approve_all(names: list[str], out: Progress) -> dict:
+    """Launch workers waiting for approval, each with fresh offers (a different machine each) up to the price
+    the user approved; one whose price rose meanwhile waits again."""
+    names, taken, results = list(dict.fromkeys(names)), set(), {}
+    for name in names:
+        try:
+            if waiting := _approve_plan(name, taken):
+                results[name] = waiting
+        except core.CrabError as e:
+            if len(names) == 1:
+                raise
+            results[name] = failed(name, e)
+    if len(names) == 1:
+        name = names[0]
+        return results[name] if results else bring_up(name, out, core.load(name).get("warnings", []))
+    go = [n for n in names if n not in results]
+    jobs = [(n, lambda o, n=n: bring_up(n, o, core.load(n).get("warnings", []))) for n in go]
+    results.update({r["name"]: r for r in side_by_side(jobs, out)})
+    return batch_result([results[n] for n in names])
+
+
+def _approve_plan(name: str, taken: set) -> dict | None:
+    """Plan an approved launch again (fresh offers, none in `taken`): None when it may go, else the result
+    saying it waits for approval again."""
     with core.locked(name):
         rec = core.load(name)
         pending = rec.get("pending")
         if not pending:
             raise core.CrabError(f"{name} is not waiting for approval.")
-        if pending["action"] == "launch":
-            repo = rec["repo"]
-            if not repo["workspace"]:
-                github.check_repo(repo["slug"], repo["branch"])
-            plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), rec["budget_usd"])
-            rec.update(
-                offers=[offers.kept(o) for o in plan.offers()], failed_offers=[], rent=None, phase="renting"
-            )
-        rec["pending"] = None
+        repo = rec["repo"]
+        if not repo["workspace"] and not repo["branch_created"]:  # (a new launch: are the checks still true?)
+            github.check_repo(repo["slug"], repo["branch"])
+        plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], taken)
+        if plan.over_cap:  # (prices went up while it waited: ask again)
+            reason = approval_reason(plan, pending["max_dph"])
+            rec["pending"] = {"reason": reason, "max_dph": plan.top_price()}
+            core.save(rec)
+            return result(rec, "approval", rec.get("warnings", []), reason=reason)
+        taken.add(plan.primary["id"])
+        rec.update(
+            offers=[offers.kept(o) for o in plan.offers()],
+            failed_offers=[],
+            rent=None,
+            phase="renting",
+            pending=None,
+            max_dph=pending["max_dph"],
+        )
         core.save(rec)
-    if pending["action"] == "launch":
-        return bring_up(name, out, rec.get("warnings", []))
-    if pending["action"] == "start":
-        return start(name, out, check_gate=False)
-    return extend(name, pending["hours"], check_gate=False)
+    return None
 
 
 def decline(name: str) -> str:
     with core.locked(name):
-        rec = core.load(name)
-        pending = rec.get("pending")
-        if not pending:
+        if not core.load(name).get("pending"):
             raise core.CrabError(f"{name} is not waiting for approval.")
-        if pending["action"] == "launch":
-            core.remove(name)
-            return f"Declined {name}: nothing was rented."
-        rec["pending"] = None
-        core.save(rec)
-        return f"Declined: {name} stays as it was (no {pending['action']})."
+        core.remove(name)
+    return f"Declined {name}: nothing was rented."
 
 
 def _time_up(rec: dict) -> core.CrabError:
@@ -658,15 +756,11 @@ def _time_up(rec: dict) -> core.CrabError:
     )
 
 
-def start(name: str, out: Progress, check_gate: bool = True) -> dict:
+def start(name: str, out: Progress) -> dict:
     """Start a stopped worker again, or continue a launch that was interrupted or failed."""
     rec = core.load(name)
-    cfg = core.load_config()
     if rec["phase"] == "pending":
         raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
-    if rec["phase"] == "failed" and check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
-        with core.locked(name):
-            return _pend(core.load(name), "start", reason)
     if rec["phase"] != "ready":
         return bring_up(name, out)
     with core.locked(name):
@@ -681,13 +775,9 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
             return result(rec, "working", [])
         if ((rec.get("last_seen") or {}).get("used_hours") or 0) >= rec["limit_hours"]:
             raise _time_up(rec)
-        with core.locked("_gate", wait=120):  # (a start and a launch must not both pass the machine limit)
-            if check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
-                return _pend(rec, "start", reason)
-            vast.set_state(rec["instance_id"], "running")
-        if (rec.get("pending") or {}).get("action") == "start":
-            rec["pending"] = None  # (the start that waited for approval is done)
+        vast.set_state(rec["instance_id"], "running")
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
+        rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
         out.line(f"Starting {name}...")
         if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
@@ -708,8 +798,8 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
         return result(rec, "working", [])
 
 
-def extend(name: str, hours: float, check_gate: bool = True) -> dict:
-    """More machine time: the budget grows by hours x $/hr, through the gate."""
+def extend(name: str, hours: float) -> dict:
+    """More machine time: the time limit grows by `hours`."""
     if not hours > 0:
         raise core.CrabError("the hours to add must be more than 0.", 2)
     with core.locked(name):
@@ -718,10 +808,7 @@ def extend(name: str, hours: float, check_gate: bool = True) -> dict:
             raise core.CrabError(
                 f"{name} has not finished launching, so there is no time limit to extend yet."
             )
-        budget = core.ceil_cents(rec["budget_usd"] + hours * rec["dph"])
-        if check_gate and (reason := gate(budget, core.load_config(), None)):
-            return _pend(rec, "extend", reason, hours=hours)
-        rec.update(budget_usd=budget, limit_hours=round(rec["limit_hours"] + hours, 2))
+        rec["limit_hours"] = round(rec["limit_hours"] + hours, 2)
         core.save(rec)
         when = "when it starts again"
         if vast.running(vast.instance(rec["instance_id"])):
@@ -734,15 +821,8 @@ def extend(name: str, hours: float, check_gate: bool = True) -> dict:
                 )
     return {
         **result(rec, "extended", []),
-        "result_line": f"{name}: time limit is now {core.fmt_hours(rec['limit_hours'])} "
-        f"(budget {core.usd(budget)}); the machine gets it {when}.",
+        "result_line": f"{name}: time limit is now {core.fmt_hours(rec['limit_hours'])}; the machine gets it {when}.",
     }
-
-
-def _pend(rec: dict, action: str, reason: str, **extra: float) -> dict:
-    rec["pending"] = {"action": action, "reason": reason, **extra}
-    core.save(rec)
-    return result(rec, "approval", [], reason=reason)
 
 
 # ---- results -------------------------------------------------------------------------------------
@@ -755,18 +835,11 @@ def result(rec: dict, state: str, warnings: list[str], reason: str | None = None
     hours = rec["req"]["hours"]
     est = core.ceil_cents(dph * hours) if dph else None
     name, branch = rec["name"], rec["repo"]["branch"]
-    limit = core.fmt_hours(rec["limit_hours"])
-    cost = f"est. {hours:g}h ~ {core.usd(est)} - budget {core.usd(rec['budget_usd'])} (stops after {limit})"
+    cost = f"est. {hours:g}h ~ {core.usd(est)} (stops after {core.fmt_hours(rec['limit_hours'])})"
     if state == "approval":
-        action = (rec.get("pending") or {}).get("action", "launch")
-        what = {
-            "launch": f"would rent {short} at ${dph:.2f}/hr, {cost}",
-            "start": "would start its machine again",
-            "extend": "would raise its budget",
-        }[action]
         line = (
-            f"{name}: NOT started - needs your approval: {reason} - {what} - approve: crab-student approve {name} "
-            f"(or: crab-student decline {name})"
+            f"{name}: NOT started - needs your approval: {reason} - would rent {short} at ${dph:.2f}/hr, {cost} - "
+            f"approve: crab-student approve {name} (or: crab-student decline {name})"
         )
     elif state == "dry run":
         need = f"needs approval ({reason})" if reason else "no approval needed"
@@ -784,7 +857,6 @@ def result(rec: dict, state: str, warnings: list[str], reason: str | None = None
         "dph": dph,
         "hours": hours,
         "est_usd": est,
-        "budget_usd": rec["budget_usd"],
         "limit_hours": rec["limit_hours"],
         "repo": rec["repo"]["slug"],
         "branch": branch,

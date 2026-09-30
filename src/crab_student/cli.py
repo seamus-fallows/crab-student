@@ -7,23 +7,14 @@ import getpass
 import json
 import math
 import os
+import re
+import shlex
 import shutil
 import sys
-import time
 from dataclasses import asdict
 from pathlib import Path
 
 from crab_student import __version__, core, github, launch, machine, offers, setup, vast, workers
-
-ALERTS = {
-    "needs you": "needs you",
-    "done": "is done",
-    "done*": "is done (not all pushed)",
-    "failed": "failed",
-    "stopped": "stopped",
-    "launch failed": "failed to launch",
-    "gone": "is gone",
-}
 
 
 def say(text: str = "", err: bool = False) -> None:
@@ -40,12 +31,17 @@ def emit(result: dict, as_json: bool) -> None:
 # ---- requirements --------------------------------------------------------------------------------
 
 
-def _req_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--gpus", type=int, default=0, help="number of GPUs (default 0: a CPU task)")
-    p.add_argument("--gpu-ram", type=float, default=0, metavar="GB", help="memory per GPU")
-    p.add_argument("--gpu-models", default="", metavar="LIST", help='allowed GPU models, e.g. "4090,A100"')
-    p.add_argument("--cpus", type=int, default=4, help="CPU cores (default 4)")
-    p.add_argument("--ram", type=float, default=16, metavar="GB", help="system RAM (default 16)")
+def _req_args(p: argparse.ArgumentParser, defaults: bool = True) -> None:
+    """The requirement flags (without their defaults for a batch's worker, so the batch's own apply)."""
+
+    def d(value: object) -> dict:
+        return {"default": value} if defaults else {}
+
+    p.add_argument("--gpus", type=int, **d(0), help="number of GPUs (default 0: a CPU task)")
+    p.add_argument("--gpu-ram", type=float, **d(0), metavar="GB", help="memory per GPU")
+    p.add_argument("--gpu-models", **d(""), metavar="LIST", help='allowed GPU models, e.g. "4090,A100"')
+    p.add_argument("--cpus", type=int, **d(4), help="CPU cores (default 4)")
+    p.add_argument("--ram", type=float, **d(16), metavar="GB", help="system RAM (default 16)")
     p.add_argument("--disk", type=float, metavar="GB", help="disk (default: the disk_gb setting)")
     p.add_argument(
         "--min-down", type=float, metavar="MBPS", help="minimum download speed (default: the setting)"
@@ -89,8 +85,9 @@ def cmd_config(args: argparse.Namespace) -> int:
     elif args.json:
         print(json.dumps(cfg))
     else:
+        width = max(map(len, cfg)) + 2
         for key, value in cfg.items():
-            say(f"{key:<21} {_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
+            say(f"{key:<{width}}{_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
     return 0
 
 
@@ -100,7 +97,8 @@ def _show(value: object) -> str:
 
 def cmd_offers(args: argparse.Namespace) -> int:
     cfg = core.load_config()
-    plan = offers.plan(_req(args, cfg, args.hours), cfg, _money(args.budget))
+    cap = cfg["approve_above_usd_per_hour"]
+    plan = offers.plan(_req(args, cfg, args.hours), cfg, cap)
     shown, backups = plan.ranked[: args.count], {o["id"] for o in plan.fallbacks}
     if args.json:
         print(json.dumps({"offers": shown, "pick": plan.primary["id"], "fallbacks": sorted(backups)}))
@@ -115,10 +113,15 @@ def cmd_offers(args: argparse.Namespace) -> int:
             f"{o.get('inet_down', 0):>5.0f} Mbps  {rel * 100:.1f}%"
         )
     say(f"\n{len(plan.ranked)} machines fit {plan.req.describe()}. * the pick, + its backups.")
+    limit = offers.time_limit(plan.req.hours)
+    at_most = core.usd(core.ceil_cents(plan.primary["dph_total"] * limit))
     say(
-        f"A {plan.req.hours:g}h launch would get a budget of {core.usd(plan.budget_usd)} (it stops after "
-        f"{core.fmt_hours(plan.budget_usd / plan.primary['dph_total'])}). Nothing was rented."
+        f"A {plan.req.hours:g}h launch would stop after {core.fmt_hours(limit)} at most ({at_most}). Nothing was rented."
     )
+    if plan.over_cap:
+        say(
+            f"Every machine that fits costs over ${cap:.2f}/hr, so a launch would ask for your approval first."
+        )
     return 0
 
 
@@ -128,29 +131,37 @@ def _positive(text: str) -> int:
     return int(text)
 
 
-def _money(value: float | None) -> float | None:
-    if value is not None and not (math.isfinite(value) and value > 0):
-        raise core.CrabError("a budget must be a number of dollars above 0.", 2)
-    return value
-
-
 def cmd_launch(args: argparse.Namespace) -> int:
-    cfg = core.load_config()
-    if args.brief_file:
-        try:
-            brief = Path(args.brief_file).read_text(encoding="utf-8")
-        except OSError as e:
-            raise core.CrabError(f"could not read the brief file: {e}", 2) from None
-    elif sys.stdin.isatty():
-        raise core.CrabError("give the task brief on stdin or with --brief-file.", 2)
-    else:
-        brief = sys.stdin.read()
     if args.repo and args.no_repo:
         raise core.CrabError("use either --repo or --no-repo, not both.", 2)
-    a = launch.LaunchArgs(
-        name=args.name,
-        req=_req(args, cfg, args.hours),
-        budget=_money(args.budget),
+    if bool(args.name) == args.batch:
+        raise core.CrabError("give the worker's NAME, or --batch for several workers.", 2)
+    text = _read_brief(args)
+    if args.batch:
+        res = launch.launch_batch(_batch(args, text), launch.Progress())
+    else:
+        if args.hours is None:
+            raise core.CrabError("give the estimated hours with --hours.", 2)
+        res = launch.launch(_launch_args(args, args.name, text), launch.Progress())
+    emit(res, args.json)
+    return res["exit_code"]
+
+
+def _read_brief(args: argparse.Namespace) -> str:
+    if args.brief_file:
+        try:
+            return Path(args.brief_file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise core.CrabError(f"could not read {args.brief_file}: {e}", 2) from None
+    if sys.stdin.isatty():
+        raise core.CrabError("give the task brief on stdin or with --brief-file.", 2)
+    return sys.stdin.read()
+
+
+def _launch_args(args: argparse.Namespace, name: str, brief: str) -> launch.LaunchArgs:
+    return launch.LaunchArgs(
+        name=name,
+        req=_req(args, core.load_config(), args.hours),
         brief=brief,
         repo_path=Path(args.repo).resolve() if args.repo else None,
         no_repo=args.no_repo,
@@ -159,13 +170,44 @@ def cmd_launch(args: argparse.Namespace) -> int:
         fake_claude=args.fake_claude,
         dry_run=args.dry_run,
     )
-    res = launch.launch(a, launch.Progress())
-    emit(res, args.json)
-    return res["exit_code"]
+
+
+class _WorkerParser(argparse.ArgumentParser):
+    def error(self, message: str):
+        raise core.CrabError(f"a '===' line: {message}", 2)
+
+
+def _batch(args: argparse.Namespace, text: str) -> list[launch.LaunchArgs]:
+    """Several workers from one text: each starts with a line `=== NAME [flags]` (flags as for launch, over
+    the batch's own), followed by its brief."""
+    parts = re.split(r"(?m)^=== ", text)
+    if parts[0].strip() or len(parts) < 2:
+        raise core.CrabError("a batch is one or more workers, each starting with a line: === NAME [flags]", 2)
+    own = _WorkerParser(prog="===", add_help=False, argument_default=argparse.SUPPRESS)
+    own.add_argument("name")
+    own.add_argument("--hours", type=float)
+    _req_args(own, defaults=False)
+    own.add_argument("--secret", action="append")
+    own.add_argument("--model")
+    items = []
+    for part in parts[1:]:
+        head, _, brief = part.partition("\n")
+        try:
+            worker = vars(own.parse_args(shlex.split(head)))
+        except ValueError as e:
+            raise core.CrabError(f"a '===' line: {e}", 2) from None
+        secrets = list(dict.fromkeys((args.secret or []) + worker.get("secret", [])))
+        merged = argparse.Namespace(**{**vars(args), **worker, "secret": secrets})
+        if merged.hours is None:
+            raise core.CrabError(
+                f"{worker['name']}: give the estimated hours (--hours) for it or for the batch.", 2
+            )
+        items.append(_launch_args(merged, worker["name"], brief))
+    return items
 
 
 def cmd_approve(args: argparse.Namespace) -> int:
-    res = launch.approve(args.name, launch.Progress())
+    res = launch.approve_all(args.name, launch.Progress())
     emit(res, args.json)
     return res["exit_code"]
 
@@ -256,58 +298,26 @@ def table(views: list[workers.View]) -> list[str]:
         return [
             "No workers yet. Ask Claude Code to run something with crab-student, or see crab-student launch --help."
         ]
-    money = [f"{'-' if v.spent is None else '~' + core.usd(v.spent)} / {core.usd(v.budget)}" for v in views]
     name_w = max(4, *(len(v.name) for v in views)) + 2
-    # STATE fits "launch failed" and TIME "999h59m" with a gap; the last column stays free (a line that fills
+    # STATE fits "interrupted" and TIME "999h59m" with a gap; the last column stays free (a line that fills
     # the terminal wraps on some consoles).
-    rest = name_w + 15 + 2 + 8 + max(14, *(len(m) for m in money)) + 1
+    rest = name_w + 13 + 2 + 8 + 10 + 1
     msg_w = max(20, shutil.get_terminal_size((110, 20)).columns - rest)
-    lines = [f"{'NAME':<{name_w}}{'STATE':<15}{'MESSAGE':<{msg_w + 2}}{'TIME':<8}SPENT / BUDGET"]
-    for v, m in zip(views, money, strict=True):
+    lines = [f"{'NAME':<{name_w}}{'STATE':<13}{'MESSAGE':<{msg_w + 2}}{'TIME':<8}SPENT"]
+    for v in views:
         msg = v.message if len(v.message) <= msg_w else v.message[: msg_w - 3] + "..."
-        lines.append(f"{v.name:<{name_w}}{v.state:<15}{msg:<{msg_w + 2}}{core.fmt_hours(v.used_h):<8}{m}")
+        spent = "-" if v.spent is None else "~" + core.usd(v.spent)
+        lines.append(f"{v.name:<{name_w}}{v.state:<13}{msg:<{msg_w + 2}}{core.fmt_hours(v.used_h):<8}{spent}")
     return lines
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    if args.watch:
-        return watch(args.interval)
     views = workers.views()
     if args.json:
         print(json.dumps([asdict(v) for v in views]))
     else:
         say("\n".join(table(views)))
     return 0
-
-
-def watch(interval: float) -> int:
-    """list, redrawn every `interval` seconds, with an alert (and a bell) when a worker needs the user,
-    finishes, fails or stops."""
-    if os.name == "nt":
-        os.system("")  # (turns on the escape codes that clear the screen)
-    before: dict[str, str] | None = None
-    alerts: list[str] = []
-    try:
-        while True:
-            views, bell = workers.views(), False
-            for v in views:
-                if before is not None and before.get(v.name) != v.state and v.state in ALERTS:
-                    alerts.append(f"[{time.strftime('%H:%M')}] {v.name} {ALERTS[v.state]}: {v.message}")
-                    bell = True
-            before = {v.name: v.state for v in views}
-            screen = [
-                f"crab-student - every {interval:g} s - Ctrl-C to quit - {time.strftime('%H:%M:%S')}",
-                "",
-                *table(views),
-                *(["", *alerts[-8:]] if alerts else []),
-            ]
-            sys.stdout.write(
-                "\033[2J\033[H" + core.ascii_text("\n".join(screen)) + "\n" + ("\a" if bell else "")
-            )
-            sys.stdout.flush()
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -344,10 +354,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"  time      {core.fmt_hours(v.used_h)} used of {core.fmt_hours(v.limit_h)}{left}{idle}; idle stop "
             f"after {rec.get('idle_minutes', 60)} min"
         )
-        say(
-            f"  money     ~{core.usd(v.spent)} spent of the {core.usd(v.budget)} budget (storage while stopped is "
-            "not counted)"
+        say(f"  money     ~{core.usd(v.spent)} so far at ${v.dph:.2f}/hr" if v.dph else "  money     -")
+    if v.stopped_h is not None:
+        disk = (
+            f"; its disk costs about ${v.disk_usd_day:.2f}/day until you delete it" if v.disk_usd_day else ""
         )
+        say(f"  stopped   {core.fmt_hours(v.stopped_h)} ago{disk}")
     if rec["phase"] == "ready":
         say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
         say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
@@ -405,33 +417,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _req_args(c)
     c.add_argument("--hours", type=float, default=1.0, help="the task's estimated hours (default 1)")
-    c.add_argument("--budget", type=float, metavar="USD")
     c.add_argument("--count", type=_positive, default=10, help="how many to show (default 10)")
     c = cmd(
         "launch", cmd_launch, "start a worker on a rented machine (the task brief on stdin)", json_flag=True
     )
-    c.add_argument("name", help="3-40 characters: a-z, 0-9 and -")
-    c.add_argument("--hours", type=float, required=True, help="estimated machine hours, setup included")
+    c.add_argument("name", nargs="?", help="3-40 characters: a-z, 0-9 and -")
+    c.add_argument("--hours", type=float, help="estimated machine hours, setup included")
     _req_args(c)
     c.add_argument(
-        "--budget", type=float, metavar="USD", help="the most it may cost (default: about 2x the estimate)"
+        "--batch", action="store_true", help="several workers: each starts with a line === NAME [flags]"
     )
-    c.add_argument("--brief-file", metavar="PATH", help="the task brief (else read from stdin)")
+    c.add_argument("--brief-file", metavar="PATH", help="the task brief or batch (else read from stdin)")
     c.add_argument("--repo", metavar="PATH", help="your repo (default: the current folder)")
     c.add_argument("--no-repo", action="store_true", help="work in your private workspace repo instead")
     c.add_argument("--secret", action="append", metavar="NAME", help="a stored secret to give the worker")
     c.add_argument("--model", help="the Claude model for the worker (default: the model setting)")
     c.add_argument("--fake-claude", action="store_true", help="run a stand-in for Claude Code (tests)")
     c.add_argument("--dry-run", action="store_true", help="plan only: rent nothing")
-    for name, func, text in (
-        ("approve", cmd_approve, "do what is waiting for your approval"),
-        ("start", cmd_start, "start a stopped worker, or continue an interrupted launch"),
-    ):
-        cmd(name, func, text, json_flag=True).add_argument("name")
-    cmd("decline", cmd_decline, "drop what is waiting for your approval").add_argument("name")
-    c = cmd("list", cmd_list, "every worker at a glance", json_flag=True)
-    c.add_argument("--watch", action="store_true", help="keep it on screen and alert on changes")
-    c.add_argument("--interval", type=float, default=30, help=argparse.SUPPRESS)
+    cmd("approve", cmd_approve, "launch workers waiting for your approval", json_flag=True).add_argument(
+        "name", nargs="+"
+    )
+    c = cmd("start", cmd_start, "start a stopped worker, or continue an interrupted launch", json_flag=True)
+    c.add_argument("name")
+    cmd("decline", cmd_decline, "drop a launch waiting for your approval").add_argument("name")
+    cmd("list", cmd_list, "every worker at a glance", json_flag=True)
     cmd("status", cmd_status, "one worker in detail", json_flag=True).add_argument("name")
     c = cmd("open", cmd_open, "attach to a worker's Claude Code in this terminal (detach: Ctrl-b d)")
     c.add_argument("name", nargs="?")

@@ -66,10 +66,7 @@ def tool(name: str) -> str | None:
 # ---- settings ------------------------------------------------------------------------------------
 
 DEFAULTS: dict[str, object] = {
-    "auto_approve_usd": 50.0,
-    "max_running_machines": 5,
-    "budget_factor": 2.0,
-    "min_budget_hours": 2.0,
+    "approve_above_usd_per_hour": 5.0,
     "idle_minutes": 60,
     "image": "vastai/base-image:cuda-12.8.1-auto",
     "disk_gb": 50,
@@ -89,10 +86,7 @@ def _regions_ok(value: list) -> bool:
 
 
 RULES = {
-    "auto_approve_usd": (lambda v: v >= 0, "a number of dollars, 0 or more"),
-    "max_running_machines": (lambda v: v >= 1, "a whole number, 1 or more"),
-    "budget_factor": (lambda v: v >= 1, "a number, 1 or more"),
-    "min_budget_hours": (lambda v: v > 0, "a number of hours above 0"),
+    "approve_above_usd_per_hour": (lambda v: v >= 0, "a number of dollars per hour, 0 or more"),
     "idle_minutes": (lambda v: v >= 1, "a whole number of minutes, 1 or more"),
     "image": (bool, "a Docker image, e.g. vastai/base-image:cuda-12.8.1-auto"),
     "disk_gb": (lambda v: v >= 10, "a whole number of GB, 10 or more"),
@@ -259,6 +253,10 @@ def write_json(path: Path, data: object) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+    replace(tmp, path)
+
+
+def replace(tmp: Path | str, path: Path) -> None:
     for attempt in range(5):  # (Windows refuses to replace a file another process has open for a moment)
         try:
             os.replace(tmp, path)

@@ -1,6 +1,6 @@
 # The crab-student launcher
 
-You start one crab-student worker for the task you were given, then report back.
+You start the crab-student worker (or workers) for the task you were given, then report back.
 
 ## 1. Your limits
 
@@ -36,8 +36,7 @@ the dependencies, how success is measured, and anything the user already decided
 - `--disk`: 20 GB for the image and environment, plus data, plus checkpoints, plus 30%.
 - `--min-down 500` when more than 50 GB will be downloaded.
 - `--hours`: the expected run time plus 30 minutes for setup, rounded up. Say in the brief how sure
-  you are. The budget is set automatically (about twice the estimate); pass `--budget` only if the
-  user gave one.
+  you are. The worker's time limit is set from it (twice the estimate, at least 2 hours).
 
 ## 5. Name it
 
@@ -79,13 +78,30 @@ Use the Bash tool with a 600000 ms timeout. If the call is cut off or times out,
 `crab-student start NAME --json`, which continues the same launch, until it returns. Never run
 `launch` twice for one task: that would make a second worker.
 
+**Several workers** (a sweep, or several separate tasks you were given together): write one brief
+per worker, each with its own name, and launch them in one call. Flags before the briefs apply to
+every worker; flags on a worker's `===` line override them for that worker.
+
+```
+crab-student launch --batch --hours H [flags] --json <<'BRIEFS'
+=== NAME-1
+<its brief>
+=== NAME-2 --gpu-ram 48
+<its brief>
+BRIEFS
+```
+
+Each worker gets a machine of its own. If the call is cut off, run `crab-student start NAME --json`
+for each worker that is not yet working.
+
 ## 10. Report back
 
 Return exactly: the brief, a blank line, the `result_line` from the JSON, then one `Warning: <text>`
-line for each entry of `warnings`.
+line for each entry of `warnings`. For a batch: each brief, a blank line, then the result lines (one
+per worker) and the warnings.
 
-- Exit 3 (needs approval, or a user budget no machine fits): the same format; the result line says
-  what to approve and why. Never approve.
+- Exit 3 (needs approval: every machine that fits costs more than the user's approve_above_usd_per_hour,
+  $5/hr unless changed): the same format; the result line says the price. Never approve.
 - Exit 2 with "already exists": if you already ran `launch` with that name for this task, run
   `crab-student start NAME --json` instead (it continues that launch); otherwise pick another name once.
 - Exit 4 (no machine fits): loosen the requirements once if the task allows it (fewer cores, less

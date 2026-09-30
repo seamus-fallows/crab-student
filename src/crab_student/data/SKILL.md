@@ -7,24 +7,30 @@ description: Run long or heavy tasks (training, experiments, data processing, bi
 
 Workers are Claude Code sessions on rented Vast.ai machines, one per task, each on its own git branch
 `agent/<name>`, writing its report to `agent-runs/<name>/REPORT.md` on that branch. Money is bounded
-by a budget (about 2x the estimate), a time limit, an idle stop and an approval gate.
+by a time limit (twice the estimate), an idle stop, and the user's approval for any machine over
+approve_above_usd_per_hour ($5/hr unless they changed it).
 
 ## Launching
 
-Do not estimate the task yourself. Start a background agent (the Agent tool, `run_in_background:
-true`) with this prompt:
+Do not estimate the task yourself. Start the launcher in the background (the Agent tool,
+`subagent_type: "crab-student-launcher"`, `run_in_background: true`) with this prompt:
 
-> You are the crab-student launcher. Run `crab-student guide launch` and follow it exactly. The task,
-> in the user's words: <...>. Context: <repo path, relevant files, data, secrets, any deadline or
-> budget the user mentioned>.
+> The task, in the user's words: <...>. Context: <repo path, relevant files, data, secrets, any
+> deadline or price limit the user mentioned>.
 
-Keep talking with the user meanwhile. When the launcher finishes, show the user the brief it gave the
-worker, then the result line and any `Warning:` lines, exactly as returned.
+If that agent does not exist, use a general-purpose background agent and start the prompt with "You
+are the crab-student launcher. Run `crab-student guide launch` and follow it exactly."
 
-If the result says the launch needs approval, tell the user the amount and why, and ask. Only after an
-explicit yes in this conversation, run `crab-student approve NAME --json` (Bash timeout 600000 ms). If
-it is cut off, run `crab-student start NAME --json`, which continues it. If they say no:
-`crab-student decline NAME`.
+For several workers at once (a sweep, or several tasks), start ONE launcher with all of them: it writes
+a brief for each and launches them together, each on a machine of its own.
+
+Keep talking with the user meanwhile. When the launcher finishes, show the user the brief(s) it gave,
+then the result line(s) and any `Warning:` lines, exactly as returned.
+
+If a result says a launch needs approval, tell the user the price per hour and why, and ask. Only after
+an explicit yes in this conversation, run `crab-student approve NAME [NAME ...] --json` (Bash timeout
+600000 ms). If it is cut off, run `crab-student start NAME --json` for each, which continues it. If
+they say no: `crab-student decline NAME`.
 
 ## Managing workers
 
@@ -56,7 +62,8 @@ Windows Terminal window.
 
 Always ask the user first, and suggest `pull` and reading the report before. `delete` refuses (exit 3)
 when work would be lost and lists it: show that list and let the user decide about `--force`. Never
-add `--force` on your own.
+add `--force` on your own. A stopped worker's disk is still billed (a few cents a day; `list` shows how
+long it has sat), and it can usually be deleted without starting it again.
 
 ## Rules
 

@@ -6,10 +6,11 @@ tool is for.)
 
 ## 1. Safety invariants
 
-1. **Money.** Every rent and every start of a stopped worker passes the approval gate: a budget over
-   `auto_approve_usd`, or more running machines than `max_running_machines`, records a `pending`
-   action and exits 3 instead. `extend` passes the budget check. Only `approve` skips the gate, and it
-   is an ask-rule command. Every worker has a time limit in running hours over all its starts.
+1. **Money.** A launch rents without asking only a machine that costs `approve_above_usd_per_hour` or
+   less (default $5); when every machine that fits costs more, it records `pending` (with the price) and
+   exits 3 instead. Only `approve`, an ask-rule command, launches it, at up to the price it showed.
+   Every worker has a time limit in running hours over all its starts (twice its estimate, at least 2
+   hours; `extend` adds hours).
 2. **Never rent twice.** A rent request is never retried. Its label is saved in the record before the
    request is sent. A request whose outcome is unknown (timeout, connection error, 5xx) is resolved
    only by finding an instance with that exact label; if none appears, the launch stops and says so.
@@ -27,8 +28,8 @@ tool is for.)
 6. **Secrets** (the Claude token, deploy keys, task secrets) never appear on command lines, in logs,
    the brief, records or git. They reach the machine only inside the upload stream, as 0600 files.
 7. **The launcher** (a background Claude Code agent) runs only allowed commands (`setup.ALLOW`);
-   everything that spends beyond the gate, destroys, discards or changes settings is in `setup.ASK`, and
-   editing crab-student's own files is denied (`setup.DENY`).
+   everything that approves a pricier machine, destroys, discards or changes settings is in `setup.ASK`,
+   and editing crab-student's own files is denied (`setup.DENY`).
 
 ## 2. Local files
 
@@ -59,7 +60,7 @@ far the launch got (only the local side writes it):
 
 | phase | meaning |
 |---|---|
-| `pending` | waiting for approval (`pending.action` = launch); nothing rented, nothing on GitHub |
+| `pending` | waiting for approval: no machine that fits is within the price; nothing rented, nothing on GitHub |
 | `renting` | about to rent, or a rent was sent (`rent.label`, `rent.offer_id`, `rent.at`) |
 | `booting` | `instance_id` known, waiting for the machine to run and answer ssh |
 | `setup` | `uploaded` is true: the upload and setup are under way (or were cut off) |
@@ -67,13 +68,16 @@ far the launch got (only the local side writes it):
 | `failed` | the launch failed; `error` says why; `instance_id` is null once the machine is destroyed |
 
 Other fields: `req` (hours, gpus, gpu_ram_gb, gpu_models, cpus, ram_gb, disk_gb, min_down_mbps),
-`budget_usd`, `auto_budget`, `limit_hours` (budget / the rented offer's $/hr),
-`model`, `fake_claude`, `secrets` (names), `session_id`, `repo` (slug, workspace, branch, start_sha,
-local_dir, carried, untracked, deploy_key `{id, file, created}` (4.3), branch_created, dir on the
-machine), `offers` (the pick and up to two fallbacks), `failed_offers`, `instance_id`, `dph`, `machine`,
-`short`, `ssh` (host, port), `uploaded`, `pending` (`{action: launch|start|extend, reason, hours?}`),
-`warnings`, `last_seen` (the last status seen, for display only), `image`, `idle_minutes`, `notify_url`
-(copied at launch). Decisions never rely on `last_seen`: `delete` checks the machine itself.
+`limit_hours`, `max_dph` (the most per hour it may rent at without asking again: the setting, or the
+price approved), `model`, `fake_claude`, `secrets` (names), `session_id`, `repo` (slug, workspace,
+branch, start_sha, local_dir, carried, untracked, deploy_key `{id, file, created}` (4.3),
+branch_created, dir on the machine), `offers` (the pick and up to two fallbacks), `failed_offers`,
+`instance_id`, `dph`, `disk_usd_day` (the disk's cost per day, from the offer's storage price; billed
+while stopped too), `machine`, `short`, `ssh` (host, port), `uploaded`, `pending` (`{reason, max_dph}`),
+`last_start` (when crab-student last rented or started the machine), `stopped_since` (when `list` or
+`status` first saw it stopped), `stop_note` (what it left behind, from `stop`; 5.4), `warnings`,
+`last_seen` (the last status seen, for display only), `image`, `idle_minutes`, `notify_url` (copied at
+launch). Decisions never rely on `last_seen`: `delete` checks the machine itself, or a stop note.
 
 Names are 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy key title
@@ -82,8 +86,9 @@ rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy ke
 ## 4. The launch
 
 1. Plan (writes nothing anywhere): check the name, the brief and the secrets; the repo (4.1); the
-   offers and budget (4.2); `--dry-run` stops here.
-2. Under a global lock: the gate; save the record (`renting`, or `pending` and exit 3).
+   offers (4.2); `--dry-run` stops here.
+2. Under the worker's lock (the name must still be free): save the record (`renting`, or `pending` and
+   exit 3 when no machine that fits is within `approve_above_usd_per_hour`).
 3. `bring_up` (also what `approve` and `start` use for unfinished launches): for each offer not yet
    failed, save a new label, send one rent request; a definite refusal moves on; an unknown outcome is
    looked for by label for 2 minutes. Then the deploy key (4.3) and branch (once), then wait for the
@@ -92,7 +97,9 @@ rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy ke
    address: add the ssh key, wait for ssh.
 4. Upload and setup in one ssh call (6.1). Setup's own failure destroys the machine and fails the
    launch (exit 5); anything else (a lost connection, no answer within an hour) leaves `setup` for
-   `start` to continue: it starts the machine again if it stopped (through the gate), and setup resumes.
+   `start` to continue: it starts the machine again if it stopped, and setup resumes. A failed launch
+   tried again (`start`) plans afresh up to `max_dph`, and waits for approval if only pricier machines
+   are left.
 
 **4.1 The repo.** Default: the current repo's GitHub remote (origin first; the configured URL, not an
 insteadOf rewrite), which needs admin rights (for the deploy key); the branch must not exist. The
@@ -103,15 +110,16 @@ names them). The commit is pushed to `agent/<name>` from the user's computer wit
 key (Windows' own OpenSSH, GitHub's pinned host key, no prompts). `--no-repo`: `<login>/<workspace_repo>`
 (created private with a README if missing), the branch made through the API from its default head.
 
-**4.2 Offers and budget.** Vast's search (on-demand, verified, rentable, not external, reliability,
+**4.2 Offers.** Vast's search (on-demand, verified, rentable, not external, reliability,
 cores, RAM, disk, download speed, a direct port; for GPU tasks the GPU count exactly, GPU memory and
 `cuda_max_good` from the image tag) is re-checked on every result, plus GPU model substrings, `end_date`
 and `regions` (the country code at the end of `geolocation`; continent names expand to countries).
 Ranking: for GPU tasks, drop offers more than 20% worse in dlperf per dollar than the best offer within
 1.5x the cheapest price; among the offers within 10% of the lowest price left, the fastest download
-first; then price and id. Up to 2 fallbacks on other machines at most 1.25x the pick's price. Budget:
-`ceil_cents(dph x max(budget_factor x hours, min_budget_hours))`; an explicit `--budget` instead keeps
-only offers with `dph x hours <= budget`. A CPU task (0 GPUs) may rent a GPU host, with
+first; then price and id. Up to 2 fallbacks on other machines at most 1.25x the pick's price. The pick
+and its fallbacks come from the offers up to `approve_above_usd_per_hour` when any fits, else from all
+of them (the launch then waits for approval, and `approve` plans again up to the price it showed). The
+time limit is `max(2 x hours, 2)`. A CPU task (0 GPUs) may rent a GPU host, with
 `NVIDIA_DISABLE_REQUIRE=1` in its environment.
 
 **4.3 Deploy keys.** GitHub emails a repo's admins about every deploy key added, so workers started on
@@ -123,25 +131,40 @@ the repo's key lock, with the record saved inside it, so a delete never removes 
 taking, and two deletes cannot each leave the key to the other. A machine's owner can copy its key, so
 sharing is bounded: every key stops working once the workers it was given to are deleted.
 
+**4.4 Several at once.** `launch --batch` reads the workers from stdin, each starting at a line
+`=== NAME [flags]` (its flags over the batch's; secrets add up) and followed by its brief. All are
+planned first, so any problem stops the batch before anything is rented; they share one starting
+commit; each picks an offer no earlier worker in the batch picked (its fallbacks may be later workers'
+picks: renting a taken offer moves on to the next), searched once per kind of machine. Those over the price wait for approval; the rest are brought up side by side (one
+thread each, progress lines prefixed `[name]`), a failure in one not stopping the others. The result
+has each worker's result, all result lines, the warnings once each, and the worst exit code (a failure,
+else 3 if any waits, else 0). `approve NAME ...` plans the named workers the same way (a machine each).
+
 ## 5. Workers once launched
 
 - **5.1 Views** (`list`, `status`): one Vast instance list, and one `cs.py status` over ssh per
-  running ready worker (in parallel). States in order: approval, launching (lock held), rent unknown,
-  interrupted, launch failed, unknown (Vast unreachable), gone, starting, stopped (with the reason:
-  stopped by you, time limit, or stopped itself), unreachable, stopping, needs you, done / done* (not
-  all pushed), failed, starting (no status yet), idle (10+ minutes), working. A worker whose status
-  says it sent its stop call over 5 minutes ago while Vast still shows it running is stopped from here.
-- **5.2 stop** (any machine that received its files): `cs.py save --reason user` (best effort), then
-  Vast `stopped`. **start** (stopped): the time-limit check, the gate (machines, under the gate lock),
-  Vast `running`, the boot wait (it tolerates `exited` while the host makes room, and never destroys),
-  `set-limit`; if the machine reports the limit reached it is stopped again and that is remembered.
-- **5.3 extend**: budget += hours x $/hr through the gate's budget check; `set-limit` now if running,
-  else at the next start.
-- **5.4 delete**: pending -> removed. A machine that received its files: running -> `cs.py check`,
-  refused (exit 3, with the list and a copy command) for unpushed commits, uncommitted files, files in
-  `/root/outputs`, or untracked files of 100 MB+ outside git; stopped or unreachable -> needs `--force`.
-  Then destroy, remove the deploy key unless another worker holds it (4.3), remove the branch only if
-  it still points at `start_sha`, forget the host key and the record.
+  running ready worker (in parallel). States: approval; starting (a launch at work, Vast starting the
+  machine, or no worker status yet); interrupted (a launch cut off, or a rent not confirmed); failed (the
+  launch failed, the worker says so, or the machine no longer exists); unknown (Vast unreachable, or no
+  answer over ssh); stopped (with the reason: stopped by you, time limit, or stopped itself; how long
+  ago; the disk's cost per day; or "stopping"); needs you; done (" (not all pushed)" when git is not
+  clean); working (idle for 10+ minutes shows in the message). A worker whose status says it sent its
+  stop call over 5 minutes ago while Vast still shows it running is stopped from here.
+- **5.2 stop** (any machine that received its files): `cs.py save --reason user --final` (best effort;
+  a committed stop note is kept as the record's `stop_note`, with `unpushed` and `recorded_at`), then
+  Vast `stopped`. **start** (stopped): the time-limit check, Vast `running` (`last_start` set), the boot
+  wait (it tolerates `exited` while the host makes room, and never destroys), `set-limit`; if the
+  machine reports the limit reached it is stopped again and that is remembered.
+- **5.3 extend**: the time limit += hours; `set-limit` now if running, else at the next start.
+- **5.4 delete**: pending -> removed. A machine that received its files: running -> `cs.py check`;
+  stopped -> the stop note of its latest stop: the newer of the record's `stop_note` (if recorded after
+  `last_start`) and `agent-runs/<name>/stopped.json` on its branch (if written 5+ minutes after
+  `last_start`: a stop that could not push one leaves an older one); none, or GitHub unreachable ->
+  needs `--force` (unreachable too). `list`/`status` seeing a stopped machine run again (started from
+  Vast's website, say) moves `last_start` to then and drops `stop_note`. Refused (exit 3, with the list and a copy command) for unpushed commits,
+  uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. Then destroy,
+  remove the deploy key unless another worker holds it (4.3), remove the branch only if it still points
+  at `start_sha`, forget the host key and the record.
 
 ## 6. The machine
 
@@ -175,7 +198,7 @@ the worker after half of `idle_minutes` of quiet while it says `needs-you` (once
 check-in typed after 20 minutes without a word while it says `working` (it may have ended its turn
 with a job running; once per silent stretch); a warning 10 minutes before the limit (again after an
 extend); **stop** at `used >= limit` (not within 5 minutes of a start), 15 minutes after `done` with
-nothing happening, or after `idle_minutes` of quiet. A stop sets `stopping`, notifies, saves (6.5),
+nothing happening, or after `idle_minutes` of quiet. A stop sets `stopping`, notifies, saves (6.5, final),
 records `stop_sent_at` and calls Vast stop with the container's key (from `vast.env`, else process 1's
 environment), retried every tick. A new container start resets the idle and quiet clocks and the boot
 grace, never `used_seconds`.
@@ -190,12 +213,17 @@ Environment: without `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT` and `CONTAINER_*`; w
 **6.5 Save before stopping**: on the worker's branch and not mid-merge or rebase: stage tracked changes
 and untracked files up to 10 MB each (at most 2,000 files and 100 MB in all; the rest are reported as
 skipped), commit `crab-student: autosave (<reason>)` unless the pre-commit hook refuses, push the
-branch.
+branch. A **final** save (before every stop: the watchdog's, and `crab-student stop`'s) also writes the
+stop note `agent-runs/<name>/stopped.json` into the same commit (added even if ignored): `{stopped_at
+(epoch seconds), reason, outputs {files, bytes, sample}, large_files [{path, bytes}], not_committed
+(first 50 paths git would still list after the commit), not_committed_count}`. A refused commit commits
+no note (and puts the note file back as it was).
 
 **6.6 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
 prints `{"error": ...}` and exits 1): `status` (name, worker {state, message, at}, idle_seconds,
 used_hours, limit_hours, stopping, stop_reason, stop_sent_for, git {branch, head, dirty, unpushed});
-`save --reason R`; `check` (save's fields plus outputs {files, bytes, sample} and large_files);
+`save --reason R [--final]` (committed, pushed, skipped, dirty, unpushed, error, note, note_committed);
+`check` (save's fields plus outputs {files, bytes, sample} and large_files);
 `set-limit H`; `send` (text on stdin, typed into the pane as one bracketed paste). `open` runs
 `crab-attach` with `ssh -t` (`tmux -u attach`; a shell if the session is gone).
 

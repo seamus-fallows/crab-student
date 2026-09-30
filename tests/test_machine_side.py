@@ -28,6 +28,7 @@ T0 = 1_700_000_000.0
 HF = "hf_" + "Zq8x" * 8  # a task secret's value
 TOKEN = "sk-ant-oat01-" + "Tk7w" * 20  # the Claude token
 KEY_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"  # (deploy key, line 1)
+NOTE = "agent-runs/job1/stopped.json"  # the stop note, in the repo
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX (flock, sh scripts, symlinks)")
 
 
@@ -85,6 +86,14 @@ def sh_script(path: Path, command: str) -> None:
 
 def head(repo: Path, ref: str = "HEAD") -> str:
     return git(repo, "rev-parse", ref).strip()
+
+
+def pushed_note(bare: Path) -> dict:
+    return json.loads(git(bare, "show", f"agent/job1:{NOTE}"))
+
+
+def last_commit_files(bare: Path) -> list:
+    return sorted(git(bare, "show", "--name-only", "--format=", "agent/job1").split())
 
 
 def last_json(capsys) -> dict:
@@ -289,7 +298,7 @@ def test_save_adds_at_most_2000_untracked_files_or_100_mb(cs, repo, bare, sized,
 
 
 @pytest.mark.parametrize("situation", ["merge", "other branch"])
-def test_save_commits_nothing_during_a_merge_or_on_another_branch(cs, repo, bare, situation):
+def test_save_commits_nothing_and_no_note_during_a_merge_or_on_another_branch(cs, repo, bare, situation):
     if situation == "merge":  # (MERGE_HEAD names the commit being merged in)
         theirs = git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "theirs")
         (repo / ".git" / "MERGE_HEAD").write_bytes(theirs.encode())  # (LF: git reads it strictly)
@@ -297,8 +306,9 @@ def test_save_commits_nothing_during_a_merge_or_on_another_branch(cs, repo, bare
         git(repo, "checkout", "-q", "-b", "experiment")
     before = head(repo)
     (repo / "README.md").write_text("changed\n")
-    res = cs.save("user")
+    res = cs.save("user", final=True)
     assert res["committed"] == 0 and res["error"] and res["dirty"] == 1
+    assert res["note"] is None and not res["note_committed"] and not (repo / NOTE).exists()
     assert head(repo) == before and head(bare, "agent/job1") == before
 
 
@@ -318,6 +328,56 @@ def test_save_is_not_stopped_by_a_broken_symlink(cs, repo):
     (repo / "README.md").write_text("changed\n")
     res = cs.save("idle")
     assert res["error"] is None and res["committed"] == 2 and res["pushed"]
+
+
+def test_a_final_save_commits_a_note_of_what_the_machine_leaves_behind(cs, repo, bare, sized):
+    """In the autosave's own commit: the outputs, big files git does not track, and what stays uncommitted."""
+    (repo / ".gitignore").write_text("ckpt/\n")
+    (repo / "README.md").write_text("changed\n")
+    sized(cs.OUTPUTS / "run1" / "model.pt", 2000)
+    sized(repo / "ckpt" / "last.pt", 100_000_000)  # (ignored)
+    sized(repo / "data" / "big.bin", 11_000_000)  # (over the autosave's caps)
+    res = cs.save("idle", final=True)
+    assert res["error"] is None and res["pushed"] and res["note_committed"]
+    assert res["committed"] == 2 and res["dirty"] == 1  # (.gitignore and README.md; data/ is left)
+    note = pushed_note(bare)
+    assert note == res["note"] and note["reason"] == "idle"
+    assert time.time() - 60 < note["stopped_at"] <= time.time()
+    assert note["outputs"] == {"files": 1, "bytes": 2000, "sample": ["run1/model.pt"]}
+    assert note["large_files"] == [{"path": "ckpt/last.pt", "bytes": 100_000_000}]
+    assert (note["not_committed"], note["not_committed_count"]) == (["data/big.bin"], 1)
+    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "crab-student: autosave (idle)"
+    assert last_commit_files(bare) == [".gitignore", "README.md", NOTE]
+
+
+def test_a_plain_save_writes_no_note(cs, repo, bare, capsys):
+    (repo / "README.md").write_text("changed\n")
+    assert cs.main(["save", "--reason", "manual"]) == 0
+    res = last_json(capsys)
+    assert res["committed"] == 1 and res["note"] is None and not res["note_committed"]
+    assert not (repo / NOTE).exists() and last_commit_files(bare) == ["README.md"]
+
+
+def test_save_final_commits_the_note_alone_when_nothing_else_changed(cs, repo, bare, capsys):
+    assert cs.main(["save", "--reason", "user", "--final"]) == 0
+    res = last_json(capsys)
+    note = res["note"]
+    assert note["reason"] == "user" and res["note_committed"] and res["pushed"] and res["committed"] == 0
+    assert last_commit_files(bare) == [NOTE] and pushed_note(bare) == note
+    assert note["outputs"] == {"files": 0, "bytes": 0, "sample": []}
+    assert note["large_files"] == note["not_committed"] == [] and note["not_committed_count"] == 0
+
+
+@pytest.mark.parametrize("stopped_before", [False, True])
+def test_a_refused_final_save_commits_no_note_and_restores_the_note_file(cs, repo, bare, stopped_before):
+    earlier = cs.save("idle", final=True)["note"] if stopped_before else None
+    secret_files(cs, {"HF_TOKEN": HF})
+    (repo / "leak.py").write_text(f"token = '{HF}'\n")
+    res = cs.save("time-limit", final=True)
+    assert "HF_TOKEN" in res["error"] and res["note"]["reason"] == "time-limit" and not res["note_committed"]
+    assert head(bare, "agent/job1") == head(repo)
+    assert (json.loads((repo / NOTE).read_text()) if (repo / NOTE).exists() else None) == earlier
+    assert git(repo, "status", "--porcelain").split() == ["??", "leak.py"]  # (no stale note left)
 
 
 def test_check_reports_outputs_large_untracked_files_and_unpushed_commits(cs, repo, tmp_path, sized, capsys):
@@ -535,9 +595,9 @@ def test_a_done_stop_says_finished_and_records_its_stop_call_only_once_saved(cs,
                                                                             capsys):  # fmt: skip
     real_save, seen_while_saving = cs.save, []
 
-    def save(reason):
+    def save(reason, final=False):
         seen_while_saving.append(cs.load_state()["stop_sent_at"])
-        return real_save(reason)
+        return real_save(reason, final)
 
     monkeypatch.setattr(cs, "save", save)
     (repo / "README.md").write_text("changed\n")
@@ -551,6 +611,16 @@ def test_a_done_stop_says_finished_and_records_its_stop_call_only_once_saved(cs,
     assert cs.cmd_status() == 0
     st = last_json(capsys)
     assert st["stop_reason"] == "done" and 0 <= st["stop_sent_for"] < 60
+
+
+@pytest.mark.parametrize("reason", ["idle", "done", "time-limit"])
+def test_a_watchdog_stop_pushes_the_stop_note_with_its_reason(cs, repo, bare, sink, reason):
+    (repo / "README.md").write_text("changed\n")
+    vast_env = {"CS_VAST_URL": "http://vast.invalid", "CONTAINER_ID": "42", "CONTAINER_API_KEY": "key-42"}
+    cs.perform("stop:" + reason, cs.load_state(), cs.cfg(), vast_env)
+    assert pushed_note(bare)["reason"] == reason and last_commit_files(bare) == ["README.md", NOTE]
+    assert head(bare, "agent/job1") == head(repo) and git(repo, "status", "--porcelain") == ""
+    assert [r["method"] for r in sink] == ["PUT"]  # (then Vast is asked to stop the machine)
 
 
 # ---- Claude Code's environment and command line --------------------------------------------------

@@ -1,11 +1,15 @@
-"""The local side of talking to machines, with no real ssh: the ssh config, addresses, the bundle, what
-remote() makes of ssh's answers, the upload's progress and failures, and opening terminals."""
+"""The local side of talking to machines, with no real ssh: the ssh config and host keys (shared by workers
+brought up in threads), addresses, the bundle, what remote() makes of ssh's answers, the upload's progress
+and failures, and opening terminals."""
 
 from __future__ import annotations
 
 import io
 import subprocess
 import tarfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -28,6 +32,24 @@ def fails(code: int, fn, *a) -> core.CrabError:
 def unpack(data: bytes) -> dict[str, tuple[bytes, int]]:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         return {m.name: (tar.extractfile(m).read(), m.mode) for m in tar.getmembers()}
+
+
+def hosts_in(config: str) -> list[str]:
+    return [line.split()[1] for line in config.splitlines() if line.startswith("Host ")]
+
+
+def together(fn, calls: list[tuple]) -> None:
+    """Call fn(*args) for every args in `calls`, each in its own thread, all set off at the same moment;
+    whatever a call raised is raised here."""
+    go = threading.Barrier(len(calls), timeout=10)
+
+    def call(args: tuple) -> None:
+        go.wait()
+        fn(*args)
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        for future in [pool.submit(call, args) for args in calls]:
+            future.result()
 
 
 def fake_run(monkeypatch, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"", raises=None) -> list:
@@ -63,7 +85,7 @@ class Upload:
         pass
 
 
-# ---- the ssh config and addresses ----------------------------------------------------------------
+# ---- the ssh config, host keys and addresses -----------------------------------------------------
 
 
 def test_the_ssh_config_has_a_host_for_each_worker_with_an_address():
@@ -77,6 +99,68 @@ def test_the_ssh_config_has_a_host_for_each_worker_with_an_address():
         assert f"  {line}\n" in text
     key, known = (str(core.ssh_dir() / name).replace("\\", "/") for name in ("id_ed25519", "known_hosts"))
     assert f'IdentityFile "{key}"' in text and f'UserKnownHostsFile "{known}"' in text and "\\" not in text
+
+
+def test_workers_coming_up_in_threads_all_end_up_in_the_ssh_config():
+    def come_up(i: int) -> None:
+        ssh = {"host": "203.0.113.7", "port": 40000 + i}
+        core.save({"name": f"job{i:02}", "created": f"{i:02}", "ssh": ssh})
+        machine.write_ssh_config()
+
+    together(come_up, [(i,) for i in range(16)])
+    config = machine.config_file()
+    text = config.read_text()
+    assert hosts_in(text) == [machine.alias(f"job{i:02}") for i in range(16)]
+    machine.write_ssh_config()  # (quietly, from the same records)
+    assert config.read_text() == text
+    assert [p.name for p in config.parent.iterdir() if p != config] == []  # (no temporary file left)
+
+
+def test_a_worker_saved_while_another_thread_writes_the_ssh_config_is_not_left_out(monkeypatch):
+    def add(name: str) -> None:
+        core.save({"name": name, "created": name, "ssh": {"host": "203.0.113.7", "port": 40122}})
+
+    add("job1")
+    read_records = core.all_records
+    job1_read, job2_written = threading.Event(), threading.Event()
+
+    def slow_first_read() -> list[dict]:
+        recs = read_records()
+        if not job1_read.is_set():
+            job1_read.set()
+            job2_written.wait(0.1)  # (time enough for job2's write, unless the lock keeps it out)
+        return recs
+
+    monkeypatch.setattr(core, "all_records", slow_first_read)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(machine.write_ssh_config)
+        assert job1_read.wait(10)
+        add("job2")
+        machine.write_ssh_config()
+        job2_written.set()
+        first.result(10)
+    assert hosts_in(machine.config_file().read_text()) == [machine.alias("job1"), machine.alias("job2")]
+
+
+def test_host_keys_are_forgotten_one_at_a_time(monkeypatch):
+    core.ssh_dir().mkdir(parents=True)
+    (core.ssh_dir() / "known_hosts").write_text("")
+    guard, running, most, forgotten = threading.Lock(), 0, 0, []
+
+    def keygen(cmd, **kw):  # (ssh-keygen -R rewrites the shared file: two at once would lose changes)
+        nonlocal running, most
+        with guard:
+            running += 1
+            most = max(most, running)
+            forgotten.append(cmd[cmd.index("-R") + 1])
+        time.sleep(0.01)
+        with guard:
+            running -= 1
+
+    monkeypatch.setattr(core, "run", keygen)
+    together(machine.forget_host_key, [(f"job{i}",) for i in range(8)])
+    assert most == 1
+    assert sorted(forgotten) == [machine.alias(f"job{i}") for i in range(8)]
 
 
 def test_set_address_follows_the_direct_port_and_says_when_it_moved():

@@ -25,8 +25,8 @@ def error_code(fn, *args) -> int:
 
 
 def test_a_value_is_parsed_by_the_type_of_its_default():
-    assert core.parse_value("auto_approve_usd", "12.5") == 12.5
-    assert core.parse_value("max_running_machines", " 3 ") == 3
+    assert core.parse_value("approve_above_usd_per_hour", "12.5") == 12.5
+    assert core.parse_value("idle_minutes", " 30 ") == 30
     assert core.parse_value("regions", "CA, europe") == ["CA", "europe"]
     assert core.parse_value("regions", "") == []
     assert core.parse_value("image", " me/image:1 ") == "me/image:1" and core.parse_value("model", "") == ""
@@ -35,9 +35,9 @@ def test_a_value_is_parsed_by_the_type_of_its_default():
 @pytest.mark.parametrize(
     ("key", "text"),
     [
-        ("max_running_machines", "2.5"),
-        ("auto_approve_usd", "lots"),
-        ("budget_factor", "nan"),
+        ("idle_minutes", "2.5"),
+        ("approve_above_usd_per_hour", "lots"),
+        ("approve_above_usd_per_hour", "nan"),
         ("min_reliability", "1.5"),
         ("disk_gb", "5"),
         ("image", "  "),

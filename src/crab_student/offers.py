@@ -1,4 +1,4 @@
-"""Requirements, the offer search, the picking rule and the budget."""
+"""Requirements, the offer search, the picking rule and the time limit."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 
 from crab_student import core, vast
 
+# A worker's time limit: twice its estimated hours, and at least 2 hours.
+LIMIT_FACTOR, MIN_LIMIT_HOURS = 2.0, 2.0
 REGIONS = {  # continent -> ISO country codes; `regions` entries are these names or 2-letter codes
     "north-america": {"US", "CA", "MX"},
     "south-america": {"AR", "BR", "CL", "CO", "PE", "UY"},
@@ -55,12 +57,18 @@ class Plan:
     req: Req
     primary: dict
     fallbacks: list[dict]
-    budget_usd: float
-    auto_budget: bool
     ranked: list[dict]
+    over_cap: bool  # nothing that fits costs less than the cap: these offers need the user's approval
 
     def offers(self) -> list[dict]:
         return [self.primary, *self.fallbacks]
+
+    def top_price(self) -> float:
+        return max(o["dph_total"] for o in self.offers())
+
+
+def time_limit(hours: float) -> float:
+    return max(LIMIT_FACTOR * hours, MIN_LIMIT_HOURS)
 
 
 def image_cuda(image: str) -> float | None:
@@ -141,8 +149,7 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
             and (not req.gpu_models or any(m.lower() in name for m in req.gpu_models))
         )
     end = _num(o, "end_date")
-    hours = max(cfg["budget_factor"] * req.hours, cfg["min_budget_hours"])  # (the time limit it would get)
-    if ok and end and end < now + 3600 * (hours + 1):
+    if ok and end and end < now + 3600 * (time_limit(req.hours) + 1):
         ok = False
     if ok and cfg["regions"]:
         ok = country(o) in allowed_countries(cfg["regions"])
@@ -193,10 +200,24 @@ def search(req: Req, cfg: dict) -> list[dict]:
     return [o for o in vast.search(query(req, cfg)) if fits(o, req, cfg, now)]
 
 
-def plan(req: Req, cfg: dict, budget: float | None = None) -> Plan:
-    """The machine to rent, its backups and the budget: CrabError(4) when nothing fits the hardware,
-    CrabError(3) when an explicit budget is too small for anything that does."""
-    found = search(req, cfg)
+def plan(
+    req: Req,
+    cfg: dict,
+    cap: float | None = None,
+    taken: set | frozenset = frozenset(),
+    found: list[dict] | None = None,
+) -> Plan:
+    """The machine to rent and its backups, from the offers up to `cap` $/hr (over_cap, and all offers, when
+    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given):
+    CrabError(4) when nothing fits the hardware."""
+    fit = search(req, cfg) if found is None else found
+    found = [o for o in fit if o["id"] not in taken]
+    if fit and not found:
+        raise core.CrabError(
+            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the workers that "
+            "need one. Launch fewer at once, or loosen the requirements.",
+            4,
+        )
     if not found:
         where = f" in {', '.join(cfg['regions'])}" if cfg["regions"] else ""
         more = ', or allow more regions: crab-student config regions ""' if cfg["regions"] else ""
@@ -205,23 +226,9 @@ def plan(req: Req, cfg: dict, budget: float | None = None) -> Plan:
             f"available with crab-student offers, loosen the requirements{more}.",
             4,
         )
-    pool = found
-    if budget is not None:
-        pool = [o for o in found if o["dph_total"] * req.hours <= budget]
-        if not pool:
-            low = min(o["dph_total"] for o in found)
-            raise core.CrabError(
-                f"a budget of {core.usd(budget)} is too small: the cheapest machine that fits costs "
-                f"${low:.2f}/hr, so {req.hours:g} h needs at least "
-                f"{core.usd(core.ceil_cents(low * req.hours))}.",
-                3,
-            )
-    ranked = rank(pool, req.gpu)
-    auto = budget is None
-    if budget is None:
-        hours = max(cfg["budget_factor"] * req.hours, cfg["min_budget_hours"])
-        budget = core.ceil_cents(ranked[0]["dph_total"] * hours)
-    return Plan(req, ranked[0], fallbacks(ranked), budget, auto, ranked)
+    within = [o for o in found if cap is None or o["dph_total"] <= cap]
+    ranked = rank(within or found, req.gpu)
+    return Plan(req, ranked[0], fallbacks(ranked), ranked, over_cap=not within)
 
 
 def summary(o: dict) -> str:
@@ -254,6 +261,7 @@ def kept(o: dict) -> dict:
         "id": o["id"],
         "machine_id": o.get("machine_id"),
         "dph_total": o["dph_total"],
+        "storage_cost": _num(o, "storage_cost"),  # $/GB/month, also while stopped
         "gpu_host": (_num(o, "num_gpus") or 0) > 0,
         "summary": summary(o),
         "short": short(o),

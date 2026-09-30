@@ -241,7 +241,7 @@ def running(inst: dict | None) -> bool:
 
 
 def wants_running(inst: dict | None) -> bool:
-    """Running, or on its way up (it counts against max_running_machines)."""
+    """Running, or on its way up."""
     if not inst:
         return False
     intended = inst.get("intended_status") or inst.get("cur_state")

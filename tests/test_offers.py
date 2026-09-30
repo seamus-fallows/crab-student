@@ -1,4 +1,4 @@
-"""offers: the search query, the client-side recheck, the picking rule and the budget."""
+"""offers: the search query, the client-side recheck, the picking rule and the time limit."""
 
 import time
 
@@ -119,34 +119,37 @@ def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_va
     assert offers.plan(Req(hours=1), cfg()).fallbacks == []  # over 1.25x
 
 
-def test_the_automatic_budget_is_twice_the_estimate_and_at_least_min_budget_hours(fake_vast):
-    fake_vast.offers = [cpu_offer(1, dph_total=0.42)]
-    p = offers.plan(Req(hours=3), cfg())
-    assert (p.budget_usd, p.auto_budget) == (2.52, True)
-    assert offers.plan(Req(hours=0.5), cfg()).budget_usd == 0.84  # min_budget_hours (2)
-    assert offers.plan(Req(hours=1), cfg(budget_factor=3.0)).budget_usd == 1.26
-    fake_vast.offers = [cpu_offer(1, dph_total=0.333)]
-    assert offers.plan(Req(hours=1), cfg()).budget_usd == 0.67  # rounded up to the cent
+def test_the_time_limit_is_twice_the_estimate_and_at_least_2_hours():
+    assert (offers.time_limit(3), offers.time_limit(0.5)) == (6, 2)
 
 
-def test_an_explicit_budget_caps_the_price(fake_vast):
+def test_offers_up_to_the_cap_come_first_and_the_rest_only_over_the_cap(fake_vast):
     fake_vast.offers = [
         cpu_offer(1, dph_total=0.40, inet_down=300),
         cpu_offer(2, dph_total=0.43, inet_down=900),
     ]
-    assert offers.plan(Req(hours=5), cfg()).primary["id"] == 2  # the faster download, without a budget
-    p = offers.plan(Req(hours=5), cfg(), budget=2.0)  # 0.43 x 5 h = 2.15 is over it
-    assert (p.primary["id"], p.fallbacks, p.budget_usd, p.auto_budget) == (1, [], 2.0, False)
+    assert offers.plan(Req(hours=5), cfg()).primary["id"] == 2  # the faster download, without a cap
+    p = offers.plan(Req(hours=5), cfg(), cap=0.41)
+    assert (p.primary["id"], p.fallbacks, p.over_cap) == (1, [], False)  # (offer 2 is no backup: over it)
+    p = offers.plan(Req(hours=5), cfg(), cap=0.30)
+    assert (p.primary["id"], p.over_cap, p.top_price()) == (2, True, 0.43)
+
+
+def test_offers_already_taken_are_left_out(fake_vast):
+    fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.41)]
+    assert offers.plan(Req(hours=1), cfg(), taken={1}).offers() == [
+        offers.plan(Req(hours=1), cfg()).fallbacks[0]
+    ]
     with pytest.raises(core.CrabError) as e:
-        offers.plan(Req(hours=5), cfg(), budget=1.99)
-    assert e.value.code == 3
+        offers.plan(Req(hours=1), cfg(), taken={1, 2})
+    assert e.value.code == 4
 
 
-@pytest.mark.parametrize("budget", [None, 100.0])
-def test_nothing_fitting_the_hardware_is_exit_4(fake_vast, budget):
+@pytest.mark.parametrize("cap", [None, 100.0])
+def test_nothing_fitting_the_hardware_is_exit_4(fake_vast, cap):
     fake_vast.offers = [cpu_offer(1, cpu_ram=8000), offer(2, geolocation="California, US")]
     with pytest.raises(core.CrabError) as e:
-        offers.plan(Req(hours=1, ram_gb=16), cfg(regions=["CA"]), budget)
+        offers.plan(Req(hours=1, ram_gb=16), cfg(regions=["CA"]), cap)
     assert e.value.code == 4
 
 

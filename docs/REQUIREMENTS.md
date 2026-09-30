@@ -25,24 +25,31 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
    init installs) starts the launch in the background so the user's conversation is not held up. It
    estimates what the task needs (GPUs and GPU memory, CPU cores, RAM, disk, how many hours) and writes
    a clear task brief for the remote worker. The tool picks a machine that fits, rents it and sets it
-   up. The user never types a price: the budget defaults to about twice the estimated cost. The user's
-   Claude Code shows them the brief it gave the worker and a one-line result (which machine, $/hr,
-   estimated time and cost, the budget, the branch, how to watch it).
+   up. The user never types a price: the worker's time limit is twice the estimate (at least 2 hours),
+   and the launch asks the user only when every machine that fits costs more than a set price per hour
+   (section 5). The user's Claude Code shows them the brief it gave the worker and a one-line result
+   (which machine, $/hr, estimated time and cost, the time limit, the branch, how to watch it). Several
+   workers (a sweep, or several tasks) can be launched in one go: one brief and one result line each,
+   every worker on a machine of its own, started side by side.
 3. **Watching and steering:** `crab-student open NAME` puts the user in the worker's Claude Code
    session in their terminal: they see exactly what it is doing and can type to it like any Claude Code
    session. Closing the terminal, a dropped connection or a laptop sleep does not stop the worker;
    running the command again reattaches. `crab-student open --all` shows every running worker side by
    side in one window (split panes). Opening the machine in VS Code (Remote-SSH) must also be possible.
-4. **Overview:** `crab-student list` shows every worker at a glance: its state (setting up, working,
-   needs you, done, failed, idle, stopped...), its own one-line status message, running time, and money
-   spent against its budget. `list --watch` keeps it on screen and alerts the user (terminal bell and a
-   line) when a worker needs them, finishes or fails.
+4. **Overview:** `crab-student list` shows every worker at a glance: its state (approval, starting,
+   interrupted, working, needs you, done, failed, stopped, unknown), its own one-line status message,
+   running time, and money spent. A stopped worker also shows how long it has been sitting and what its
+   disk costs per day (`status` shows the same). Alerts when a worker needs the user, finishes or fails
+   are the notifications in section 7.
 5. **Results:** the worker commits and pushes its work to branch `agent/<name>` as it goes and writes a
    REPORT.md (what was done, results with evidence, what files it left on the machine, caveats).
    `crab-student report NAME` shows the report; `crab-student pull NAME` fetches the branch into the
    user's local repo without touching their checkout.
-6. **Lifecycle:** `stop` (saves work first), `start` again later, `extend` the time limit, `delete`
-   (destroys the machine, but refuses if work would be lost unless forced).
+6. **Lifecycle:** `stop` (saves work first), `start` again later, `extend` the time limit by some hours,
+   `delete` (destroys the machine, but refuses if work would be lost unless forced). A stopped machine
+   keeps its disk and Vast keeps billing for it, so the user can see how long each stopped worker has
+   been sitting and what its disk costs. A machine records what it leaves behind that git does not hold
+   when it stops, so a stopped worker can usually be deleted without starting it again.
 7. The user's Claude Code can do all of the above for them ("how's the ablation doing?", "show me its
    report", "stop it") by running these commands.
 
@@ -67,8 +74,12 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
 - The launch states requirements (hours estimate, GPUs, GPU memory, allowed GPU models, CPU cores,
   RAM, disk, minimum download speed); the tool searches Vast and picks deterministically: the cheapest
   machine that meets the requirements (for GPU work, prefer better price for speed when the difference
-  is clear), from reliable hosts, within the budget. It keeps a couple of fallback offers in case the
-  first is taken or fails to boot.
+  is clear), from reliable hosts, and among those at or under the price that needs no approval
+  (section 5) when any is that cheap. It keeps a couple of fallback offers in case the first is taken
+  or fails to boot.
+- Workers launched in one go are planned together before anything is rented (a problem with one stops
+  the batch), each with a different machine, and then brought up side by side; a failure in one does
+  not stop the others.
 - A `regions` setting restricts machines to chosen countries or continents (latency for interactive
   use and git pushes); empty means anywhere. Among similarly priced offers, prefer faster downloads
   (the image pull is a big part of start-up time).
@@ -78,26 +89,31 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
 
 ## 5. Money and safety (non-negotiable)
 
-1. **Approval gate.** A launch whose budget is over `auto_approve_usd` (default $50), or that would
-   exceed `max_running_machines` (default 5), does not rent: it waits for `crab-student approve NAME`,
-   which the user's Claude Code may only run with the user's explicit OK (a permission rule that asks).
-   Starting a stopped worker and extending a time limit go through the same limits.
-2. **Time limit.** Every worker has a limit in running hours over all its starts, from its budget. The
-   machine stops itself when it is reached.
+1. **Approval by price.** A launch rents without asking when a machine that fits costs
+   `approve_above_usd_per_hour` (default $5) or less. When every machine that fits costs more, it does
+   not rent: it waits for `crab-student approve NAME [NAME ...]`, which the user's Claude Code may only
+   run with the user's explicit OK (a permission rule that asks). In a batch, the workers over the price
+   wait while the others launch. Only a launch can ask for approval: there is no dollar budget per worker
+   and no cap on running machines, and starting a stopped worker or extending a time limit needs no
+   approval. The approval, the time limit, the idle stop and the dead-man switch are what bound the bill.
+2. **Time limit.** Every worker has a limit in running hours over all its starts: twice its estimate, at
+   least 2 hours, and `extend` adds hours. The machine stops itself when it is reached.
 3. **Idle stop.** The machine stops itself after `idle_minutes` (default 60) with nothing happening:
    no GPU or CPU load, and the Claude Code session not progressing. A session left open but unused
    does not keep a machine up; a worker actually working does.
 4. **Dead-man switch.** If the tool's own machinery on the machine never starts or dies, the machine
    still stops itself within about 45 minutes.
 5. **Save before stopping.** Any stop (idle, time limit, user) first commits and pushes what can
-   safely be saved.
+   safely be saved, and records with it what the machine still holds that git does not (output files,
+   large files), so a stopped worker can be checked for unsaved work without starting it.
 6. **Own machines only.** The tool acts only on machines it rented and recorded. It must never rent
    twice by retrying a rent request whose outcome is unknown; such a machine is found by its unique
    label instead.
 7. **Never destroy work automatically.** The tool destroys a machine by itself only when it holds
    nothing (it failed before receiving its files, or its setup failed). `delete` checks for unpushed
-   work, output files and large untracked files first, and refuses unless forced; a machine that
-   cannot be checked needs force.
+   work, output files and large untracked files first (a stopped machine from what it recorded when it
+   stopped), and refuses unless forced; a machine that cannot be checked needs force, or, if it is
+   stopped, starting first.
 8. **Secrets** (the Claude token, a deploy key, task secrets like an HF or W&B token) never appear on
    command lines, in logs, in the task brief or in git. Task secrets are stored locally by the user
    (`crab-student secret set NAME`, which always asks) and can be attached to a launch.
@@ -105,8 +121,9 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
    access, shared only by workers started on that repo within 24 hours, so that 100 workers do not mean
    100 emails from GitHub; removed when the last of them is deleted). No broad tokens on the machine.
 10. **Claude Code permissions** on the user's own computer: the background launcher may run the
-    read-only and in-budget commands without prompts; anything that spends beyond the gate, destroys,
-    or changes settings asks the user.
+    read-only commands and the ones that launch, start, stop or extend workers without prompts (a
+    launch over the price waits by itself); anything that approves a pricier machine, destroys or
+    changes settings asks the user.
 
 ## 6. Repos
 
@@ -120,14 +137,15 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
 
 ## 7. Other features
 
-- `init`, `offers`, `launch`, `approve`, `decline`, `list [--watch]`, `status NAME`, `open NAME |
-  --all [--vscode]`, `report`, `pull`, `stop`, `start`, `extend`, `delete`, `secret set|list|delete`,
-  `config [KEY [VALUE]]`, and whatever the launcher needs to read its instructions.
+- `init`, `offers`, `launch [--batch]`, `approve NAME [NAME ...]`, `decline`, `list`, `status NAME`,
+  `open NAME | --all [--vscode]`, `report`, `pull`, `stop`, `start`, `extend NAME HOURS`, `delete`,
+  `secret set|list|delete`, `config [KEY [VALUE]]`, and whatever the launcher needs to read its
+  instructions.
 - Optional notifications to the user's phone or chat (`notify_url`: ntfy.sh, Slack or Discord
   webhooks, or a generic JSON POST) when a worker needs them, finishes, fails or its machine stops.
-- Settings with sensible defaults: `auto_approve_usd`, `max_running_machines`, budget factor (2x) and
-  minimum budget hours, `idle_minutes`, the Docker image, disk size, minimum reliability, minimum
-  download speed, `regions`, the Claude model for workers, the workspace repo, `notify_url`.
+- Settings with sensible defaults: `approve_above_usd_per_hour` (default $5), `idle_minutes`, the
+  Docker image, disk size, minimum reliability, minimum download speed, `regions`, the Claude model for
+  workers, the workspace repo, `notify_url`.
 - `--json` on the commands the launcher and scripts use; `launch --dry-run`.
 - A `--fake-claude` launch option that runs a stand-in for Claude Code, so the whole pipeline can be
   tested on a real machine without spending Claude usage.

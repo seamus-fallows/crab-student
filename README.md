@@ -36,8 +36,9 @@ missing):
   `~/.ssh/config`, so `ssh crab-student-<name>` and VS Code can reach your workers.
 - **Claude token.** You run `claude setup-token` in another terminal and paste the token; it is kept
   in your system keyring.
-- **Claude Code.** It installs a skill (so your Claude Code knows how to use crab-student) and
-  permission rules (below) into `~/.claude`.
+- **Claude Code.** It installs a skill (so your Claude Code knows how to use crab-student), the
+  launcher agent (`crab-student-launcher`, which starts workers in the background) and permission rules
+  (below) into `~/.claude`. Run `init` again after upgrading crab-student to update them.
 
 ## Launching
 
@@ -48,19 +49,27 @@ hours), writes a brief for the worker, and runs `crab-student launch`. You then 
 line like:
 
 ```
-ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - est. 3h ~ $1.26 - budget $2.52 (stops after 6h00m) - branch agent/ablation-lr - watch: crab-student open ablation-lr
+ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - est. 3h ~ $1.26 (stops after 6h00m) - branch agent/ablation-lr - watch: crab-student open ablation-lr
 ```
 
 You never type a price. crab-student picks the cheapest reliable machine that fits (for GPU work, a
 faster GPU when it clearly pays for itself; among similar prices, the one that downloads fastest), and
-the budget is about twice the estimate. `crab-student offers --hours 3 --gpus 1 --gpu-ram 24` shows
-what would be picked, without renting anything.
+the worker's time limit is twice the estimate (at least 2 hours). If every machine that fits costs more
+than $5 an hour (`approve_above_usd_per_hour`), nothing is rented until you approve it (see Money and
+safety). `crab-student offers --hours 3 --gpus 1 --gpu-ram 24` shows what would be picked, without
+renting anything.
 
 **Your repo.** The worker starts from your current commit on a new branch `agent/<name>`. Local
 commits that are not on GitHub yet, and uncommitted changes to tracked files, go along (as one extra
 commit on the worker's branch; your own checkout is not touched). Untracked files do not; the launch
 warns about them. A task that has nothing to do with a repo (`--no-repo`) goes to a private
 `crab-student-work` repo on your GitHub.
+
+**Several workers.** For a sweep, or several separate tasks, the launcher writes a brief for each and
+launches them together (`crab-student launch --batch`, which reads the workers from stdin, each
+starting with a line `=== NAME [flags]` followed by its brief). Each gets a machine of its own, they
+come up side by side, and you see one line per worker. Any that would cost over the approval price wait
+for your OK while the rest go ahead.
 
 ## Watching and steering
 
@@ -84,12 +93,15 @@ answers for a while, it makes the call itself and records it in its report.
 ## Keeping track
 
 ```
-crab-student list            # every worker: state, its own status line, time, money spent / budget
-crab-student list --watch    # the same, kept on screen; rings when a worker needs you, finishes or fails
+crab-student list            # every worker: state, its own status line, time, money spent
 crab-student status NAME     # one worker in detail
 crab-student report NAME     # its REPORT.md
 crab-student pull NAME       # fetch its branch into your repo (your checkout is not touched)
 ```
+
+A worker's state is `approval` (waiting for your OK), `starting`, `interrupted` (a launch that was cut
+off: `start NAME` continues it), `working`, `needs you`, `done`, `failed`, `stopped` (with why, how long
+ago, and what its disk costs per day) or `unknown` (Vast or the machine did not answer).
 
 (`pull` for a `--no-repo` worker uses `~/crab-student-work`, cloning it the first time, unless you give
 `--repo PATH`.)
@@ -105,20 +117,24 @@ Discord webhook, or any URL that takes a JSON POST) for "needs you", "done", "fa
 ```
 crab-student stop NAME           # saves (commits and pushes) its work, then stops the machine
 crab-student start NAME          # starts it again; the worker resumes its conversation
-crab-student extend NAME HOURS   # more machine time
+crab-student extend NAME HOURS   # adds HOURS to its time limit
 crab-student delete NAME         # destroys the machine and forgets the worker
 ```
 
-A stopped machine keeps its disk (Vast still bills a little for storage), so delete workers you are
-done with. `delete` first checks the machine for work that would be lost (unpushed commits, files in
-`/root/outputs`, large files outside git) and refuses, listing them, unless you add `--force`. The
-branch stays on GitHub.
+A stopped machine keeps its disk, and Vast bills for it, so delete
+workers you are done with: `list` and `status` show how long each stopped worker has been sitting and
+what its disk costs per day. Before a machine stops, by itself or with `stop`, it saves its work and
+writes a note of what it leaves behind (`agent-runs/<name>/stopped.json`, committed and pushed with
+that last save). So `delete` can usually check a stopped worker for work that would be lost (unpushed
+commits, files in `/root/outputs`, large files outside git) without starting it again, and refuses,
+listing them, unless you add `--force`. If it cannot tell what is on the machine, it asks you to
+`start` it first (or to use `--force`). The branch stays on GitHub.
 
 ## Money and safety
 
-- **Budget and time limit.** Each worker gets a budget (about 2x the estimate) and a time limit in
-  machine hours from it. The machine stops itself when the limit is reached (after a 10-minute
-  warning to the worker).
+- **Time limit.** Each worker gets a time limit in machine hours: twice the estimate, at least 2
+  hours. The machine stops itself when the limit is reached (after a 10-minute warning to the
+  worker). `crab-student extend NAME HOURS` adds hours.
 - **Idle stop.** The machine stops itself after an hour (`idle_minutes`) with nothing happening: no
   CPU or GPU work and no progress in the conversation. An open but unused session does not keep it up.
   A worker that has finished stops 15 minutes after it is done (`start` brings it back, with its
@@ -127,9 +143,12 @@ branch stays on GitHub.
 - **Dead-man switch.** If crab-student's own machinery on the machine never starts or dies, the
   machine still stops itself within about 45 minutes. A machine without a key to stop itself is refused
   at setup, and one whose stop call Vast ignores is stopped by the next `list` or `status`.
-- **Approval.** A launch with a budget over `auto_approve_usd` ($50), or beyond `max_running_machines`
-  (5), does not rent: it waits for `crab-student approve NAME`, which your Claude Code only runs with
-  your OK.
+- **Approval, by price per hour.** A launch rents without asking when a machine that fits costs
+  `approve_above_usd_per_hour` ($5) or less. If every machine that fits costs more, it does not rent: it
+  waits for `crab-student approve NAME [NAME ...]`, which your Claude Code only runs with your OK
+  (`crab-student decline NAME` drops it). Only a launch can ask for approval: there is no dollar budget
+  and no cap on running machines, and starting a stopped worker or extending its time limit needs no
+  approval. The approval, the time limit, the idle stop and the dead-man switch are what bound the bill.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
   a rent request whose outcome is unknown (so you never pay twice).
 - **Nothing is destroyed automatically** once a worker has run on it: crab-student destroys a machine
@@ -147,8 +166,9 @@ branch stays on GitHub.
 ### What your Claude Code may do without asking
 
 `init` adds these rules to `~/.claude/settings.json`. Allowed: `guide`, `offers`, `launch`, `list`,
-`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `extend`, `secret list` (launch, start and
-extend stay within the limits above by themselves). Always asked first: `approve`, `decline`,
+`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `extend`, `secret list` (a `launch` over the
+price limit waits for `approve` by itself; restarting a stopped worker with `start`, or `extend`, only
+gives a worker you already have more machine time). Always asked first: `approve`, `decline`,
 `delete`, `config`, `init`, `secret set`, `secret delete`.
 
 ## Settings
@@ -158,10 +178,7 @@ default.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `auto_approve_usd` | 50 | Budgets above this wait for `approve` |
-| `max_running_machines` | 5 | More running machines than this wait for `approve` |
-| `budget_factor` | 2 | Budget = this x the estimated cost |
-| `min_budget_hours` | 2 | The budget always covers at least this many machine hours |
+| `approve_above_usd_per_hour` | 5 | A launch waits for `approve` when every machine that fits costs more than this per hour (0: approve every launch) |
 | `idle_minutes` | 60 | Idle stop after this long with nothing happening |
 | `image` | `vastai/base-image:cuda-12.8.1-auto` | Docker image (Ubuntu, CUDA, Python) |
 | `disk_gb` | 50 | Disk when the launch does not say |
@@ -185,9 +202,11 @@ command carries the dead-man switch, so it works before anything else is install
 
 ## Trouble
 
-- **A launch was cut off** (Ctrl-C, a closed terminal): `crab-student start NAME` continues it.
-- **`list` says `rent unknown`**: Vast did not confirm a rent. crab-student never rents again by itself;
-  `crab-student start NAME` looks for the machine again, or `delete` gives up.
+- **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`):
+  `crab-student start NAME` continues it (for a batch, once for each worker that is not yet working).
+- **`list` says `interrupted` and "the rent was not confirmed"**: Vast did not confirm a rent.
+  crab-student never rents again by itself; `crab-student start NAME` looks for the machine again, or
+  `delete` gives up.
 - **Setup failed**: the machine was destroyed (it held nothing) and the error says why; fix it and
   `crab-student start NAME` tries again. A refused Claude token: `crab-student init --claude-token`.
 - **Big outputs**: the worker keeps them in `/root/outputs` (not in git) and lists them in its report;

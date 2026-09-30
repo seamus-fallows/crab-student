@@ -370,7 +370,7 @@ def delete_branch_if_at(slug: str, branch: str, sha: str) -> bool:
     return True
 
 
-def read_report(slug: str, branch: str, path: str) -> str | None:
+def read_file(slug: str, branch: str, path: str) -> str | None:
     try:
         return gh(
             "api", "-H", "Accept: application/vnd.github.raw", f"repos/{slug}/contents/{path}?ref={branch}"

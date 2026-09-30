@@ -1,4 +1,5 @@
-"""`crab-student init`, the Claude Code integration (skill and permission rules) and readiness checks."""
+"""`crab-student init`, the Claude Code integration (skill, launcher agent and permission rules) and readiness
+checks."""
 
 from __future__ import annotations
 
@@ -11,11 +12,12 @@ from pathlib import Path
 from crab_student import core, github, vast
 
 DATA = Path(__file__).parent / "data"
+LAUNCHER_AGENT = "agents/crab-student-launcher.md"  # (in ~/.claude; its name is the skill's subagent_type)
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{60,}")
 
-# Allowed without asking: reading, and actions that stay in budget by construction (launch, start and
-# extend check the approval gate themselves). Always asked: spending beyond the gate, destroying,
-# discarding, and changing settings.
+# Allowed without asking: reading, and actions within the user's price rule (a launch that would need a
+# pricier machine waits for `approve`). Always asked: approving, destroying, discarding, and changing
+# settings.
 ALLOW = [
     f"Bash(crab-student {c}:*)"
     for c in (
@@ -75,7 +77,7 @@ def init(renew_claude_token: bool = False) -> int:
     print("crab-student setup")
     ok = all([_vast_step(), _github_step(), _ssh_step(), _claude_step(renew_claude_token)])
     install_claude_files()
-    _say("Claude Code", "skill and permission rules installed in ~/.claude")
+    _say("Claude Code", "skill, launcher agent and permission rules installed in ~/.claude")
     ok = _tools_step() and ok
     if ok:
         print(
@@ -194,12 +196,13 @@ def _tools_step() -> bool:
 
 
 def install_claude_files() -> None:
-    """The skill, and the permission rules merged into ~/.claude/settings.json (older crab-student rules are
-    replaced; everything else is kept)."""
+    """The skill, the launcher agent, and the permission rules merged into ~/.claude/settings.json (older
+    crab-student rules are replaced; everything else is kept)."""
     claude = Path.home() / ".claude"
-    skill = claude / "skills" / "crab-student" / "SKILL.md"
-    skill.parent.mkdir(parents=True, exist_ok=True)
-    skill.write_text((DATA / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
+    for source, target in (("SKILL.md", "skills/crab-student/SKILL.md"), ("launcher.md", LAUNCHER_AGENT)):
+        path = claude / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text((DATA / source).read_text(encoding="utf-8"), encoding="utf-8")
     path = claude / "settings.json"
     settings = core.read_json(path, None) if path.exists() else {}
     if not isinstance(settings, dict):

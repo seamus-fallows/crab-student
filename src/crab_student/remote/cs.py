@@ -9,6 +9,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -599,7 +600,7 @@ def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
         log("stopping: " + why)
         notify(c, "stopped", "%s stopped: %s" % (c["name"], why))
         try:
-            log("saved: %s" % json.dumps(save(reason)))
+            log("saved: %s" % json.dumps(save(reason, final=True)))
         except Exception as e:
             log("save failed: %r" % (e,))
         st["stop_sent_at"] = (
@@ -701,13 +702,76 @@ def untracked() -> list:
     return [f for f in git("ls-files", "--others", "--exclude-standard", "-z").split("\0") if f]
 
 
-def save(reason: str) -> dict:
+def uncommitted() -> list:
+    """What a commit now would leave out: unstaged changes to tracked files, and untracked files."""
+    return [f for f in git("diff", "--name-only", "-z").split("\0") if f] + untracked()
+
+
+def files_under(top: Path, skip=()):
+    """(path relative to top, size) of each file under top, but in folders named in `skip`. (Jobs may still be
+    writing: a file that vanishes on the way is left out.)"""
+    for folder, dirs, names in os.walk(str(top)):
+        dirs[:] = [d for d in dirs if d not in skip]
+        for name in names:
+            path = Path(folder) / name
+            try:
+                info = path.stat()
+            except OSError:  # (gone meanwhile, or a broken symlink)
+                continue
+            if stat.S_ISREG(info.st_mode):
+                yield path.relative_to(top).as_posix(), info.st_size
+
+
+def left_behind(repo: Path) -> dict:
+    """What git will not save: the files in /root/outputs, and files of 100 MB+ in the repo that git does not
+    track (ignored ones too)."""
+    outputs = dict(files_under(OUTPUTS))
+    tracked = set(git("ls-files", "-z", check=False).split("\0")) if (repo / ".git").exists() else set()
+    large = [
+        {"path": f, "bytes": n}
+        for f, n in files_under(repo, SKIP_DIRS)
+        if n >= 100_000_000 and f not in tracked
+    ]
+    return {
+        "outputs": {"files": len(outputs), "bytes": sum(outputs.values()), "sample": list(outputs)[:5]},
+        "large_files": large,
+    }
+
+
+def restore(repo: Path, path: str) -> None:
+    """The file as HEAD has it, or no file if HEAD has none."""
+    if run(["git", "checkout", "-q", "HEAD", "--", path], cwd=str(repo)).returncode:
+        (repo / path).unlink(missing_ok=True)
+
+
+def stop_note_path(c: dict) -> str:
+    return "agent-runs/%s/stopped.json" % c["name"]
+
+
+def stop_note(c: dict, reason: str) -> dict:
+    """What the stopped machine will hold that GitHub does not, once the staged changes are committed (so the
+    local side can delete a stopped worker without starting it again)."""
+    left = [f for f in uncommitted() if f != stop_note_path(c)]
+    behind = left_behind(Path(c["repo_dir"]))
+    return {
+        "stopped_at": int(time.time()),
+        "reason": reason,
+        "outputs": behind["outputs"],
+        "large_files": behind["large_files"],
+        "not_committed": left[:50],
+        "not_committed_count": len(left),
+    }
+
+
+def save(reason: str, final: bool = False) -> dict:
     """Commit and push what can safely be saved: tracked changes, and untracked files up to 10 MB each (at
     most 2,000 files and 100 MB in all: a forgotten dataset folder is no work to push), never during a merge
-    or rebase, never on another branch, never past the pre-commit hook."""
+    or rebase, never on another branch, never past the pre-commit hook. A final save (the machine is about to
+    stop) puts the stop note in the same commit; `note` is the note, `note_committed` whether it went in."""
     c = cfg()
-    repo, branch = Path(c["repo_dir"]), c["branch"]
-    res = {"committed": 0, "pushed": False, "skipped": [], "dirty": 0, "unpushed": 0, "error": None}
+    repo, branch, note_path = Path(c["repo_dir"]), c["branch"], stop_note_path(c)
+    res = {"committed": 0, "pushed": False, "skipped": [], "dirty": 0, "unpushed": 0, "error": None,
+           "note": None, "note_committed": False}  # fmt: skip
     if not (repo / ".git").exists():
         res["error"] = "there is no repository yet"
         return res
@@ -728,14 +792,21 @@ def save(reason: str) -> dict:
         if added:  # (on stdin: thousands of paths would not fit on one command line)
             run(["git", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], input="\0".join(added),
                 check=True, cwd=str(repo))  # fmt: skip
+        if final:
+            res["note"] = stop_note(c, reason)
+            write(repo / note_path, json.dumps(res["note"], indent=2) + "\n")
+            git("add", "-f", "--", note_path)  # (-f: even where the repo's .gitignore would leave it out)
         staged = [f for f in git("diff", "--cached", "--name-only", "-z").split("\0") if f]
         if staged:
             p = run(["git", "commit", "-q", "-m", "crab-student: autosave (%s)" % reason], cwd=str(repo))
             if p.returncode:
                 git("reset", "-q")
                 res["error"] = "not committed: " + last_line(p.stderr or p.stdout)
+                if final:  # (left in the work tree, the note would go into a later commit, stale)
+                    restore(repo, note_path)
             else:
-                res["committed"] = len(staged)
+                res["committed"] = len([f for f in staged if f != note_path])
+                res["note_committed"] = final
     p = run(["git", "push", "-q", "origin", "refs/heads/%s:refs/heads/%s" % (branch, branch)], cwd=str(repo))
     res["pushed"] = p.returncode == 0
     if p.returncode and not res["error"]:
@@ -754,23 +825,14 @@ def cmd_check() -> int:
         res["unpushed"] = int(
             git("rev-list", "--count", "origin/%s..HEAD" % branch, check=False).strip() or 0
         )
-    files = [p for p in OUTPUTS.rglob("*") if p.is_file()] if OUTPUTS.exists() else []
-    res["outputs"] = {
-        "files": len(files),
-        "bytes": sum(p.stat().st_size for p in files),
-        "sample": [str(p.relative_to(OUTPUTS)) for p in files[:5]],
-    }
-    tracked = set(git("ls-files", "-z", check=False).split("\0")) if (repo / ".git").exists() else set()
-    large = []
-    for top, dirs, names in os.walk(str(repo)):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        for n in names:
-            path = Path(top) / n
-            rel = str(path.relative_to(repo)).replace(os.sep, "/")
-            if rel not in tracked and path.is_file() and path.stat().st_size >= 100_000_000:
-                large.append({"path": rel, "bytes": path.stat().st_size})
-    res["large_files"] = large
+    res.update(left_behind(repo))
     return out(res)
+
+
+def cmd_save(args: list) -> int:
+    """save [--reason R] [--final]: --final (the machine is about to stop) adds the stop note."""
+    reason = args[args.index("--reason") + 1] if "--reason" in args else "manual"
+    return out(save(reason, final="--final" in args))
 
 
 def cmd_status() -> int:
@@ -909,7 +971,7 @@ def main(argv: list) -> int:
         "status": cmd_status,
         "check": cmd_check,
         "send": lambda: (type_to_worker(sys.stdin.read()), out({"sent": True}))[1],
-        "save": lambda: out(save(args[args.index("--reason") + 1] if "--reason" in args else "manual")),
+        "save": lambda: cmd_save(args),
         "set-limit": lambda: cmd_set_limit(float(args[0])),
         "declare": lambda: cmd_declare(args),
         "hook": lambda: cmd_hook(args[0], args[1:]),

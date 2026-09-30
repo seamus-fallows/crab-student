@@ -17,19 +17,19 @@ from crab_student import cli, core, github, launch, machine, offers, vast
 TOKEN = "sk-ant-oat01-" + "x" * 80  # (the Claude token the ready fixture stores)
 HF = "hf_the-task-secret-0042"
 RESULT_KEYS = {"name", "state", "result_line", "warnings", "needs_approval", "instance_id", "machine", "dph",
-               "hours", "est_usd", "budget_usd", "limit_hours", "repo", "branch"}  # fmt: skip
+               "hours", "est_usd", "limit_hours", "repo", "branch"}  # fmt: skip
 
 
 @pytest.fixture(autouse=True)
 def world(fake_vast, fake_github, user_repo, machines, ready, monkeypatch):
-    """Two offers on different machines (a 1h task gets a budget of 2 x $0.30 = $0.60), from the user's repo."""
+    """Two offers on different machines (a 1h task stops after 2 hours), from the user's repo."""
     fake_vast.offers = [offer(1, dph_total=0.30), offer(2, dph_total=0.35)]
     monkeypatch.chdir(user_repo)
 
 
 def args(name: str = "job1", req: offers.Req | None = None, **kw) -> launch.LaunchArgs:
-    fields = {"budget": None, "brief": "# Task\nDo the thing.\n", "repo_path": None, "no_repo": False,
-              "secrets": [], "model": None, "fake_claude": False, "dry_run": False}  # fmt: skip
+    fields = {"brief": "# Task\nDo the thing.\n", "repo_path": None, "no_repo": False, "secrets": [],
+              "model": None, "fake_claude": False, "dry_run": False}  # fmt: skip
     return launch.LaunchArgs(name=name, req=req or offers.Req(hours=1), **{**fields, **kw})
 
 
@@ -121,7 +121,7 @@ def test_a_launch_rents_once_and_sets_up_the_worker(fake_vast, fake_github, user
     assert list(fake_vast.instances) == [rec["instance_id"]]
     (sent,) = rents(fake_vast)
     assert sent[1] == "/api/v0/asks/1/" and labels == [sent[2]["label"]] == [rec["rent"]["label"]]
-    assert (rec["budget_usd"], rec["limit_hours"]) == (0.6, 2.0)
+    assert rec["limit_hours"] == 2.0 and rec["last_start"]
     head = git(user_repo, "rev-parse", "HEAD").strip()
     assert fake_github.branch_sha("ada/proj", "agent/job1") == rec["repo"]["start_sha"] == head
     ((key_id, key),) = fake_github.keys["ada/proj"].items()
@@ -205,39 +205,110 @@ def test_no_repo_works_in_a_private_workspace_repo(fake_github, machines, tmp_pa
     assert config["repo_dir"] == "/root/work/crab-student-work"
 
 
-# ---- the approval gate ---------------------------------------------------------------------------
+# ---- approval by price --------------------------------------------------------------------------
 
 
-def test_a_budget_over_auto_approve_waits_and_approve_rents_within_it(fake_vast, fake_github):
-    core.set_config("auto_approve_usd", "0.5")
+def test_a_machine_over_the_price_waits_and_approve_rents_up_to_that_price(fake_vast, fake_github):
+    core.set_config("approve_above_usd_per_hour", "0.25")  # (both offers cost more)
     res, rec = go(args()), core.load("job1")
     assert res["exit_code"] == 3 and res["needs_approval"] and res.keys() >= RESULT_KEYS
-    assert rec["phase"] == "pending" and rec["pending"]["action"] == "launch"
+    assert rec["phase"] == "pending" and rec["pending"]["max_dph"] == 0.35
     assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)
     assert fake_github.branch_sha("ada/proj", "agent/job1") is None
-    # approve plans again: offer 4 would be a backup, but $0.62 for the 1h estimate is over the approved $0.60
-    fake_vast.offers = [offer(3, dph_total=0.50), offer(4, dph_total=0.62)]
+    # approve plans again: offer 4 is over the $0.35/hr that was approved
+    fake_vast.offers = [offer(3, dph_total=0.33), offer(4, dph_total=0.40)]
     res, rec = launch.approve("job1", out()), core.load("job1")
     assert res["exit_code"] == 0 and rec["phase"] == "ready" and rec["pending"] is None
-    assert rec["budget_usd"] == 0.6 and [o["id"] for o in rec["offers"]] == [3]
+    assert [o["id"] for o in rec["offers"]] == [3] and rec["max_dph"] == 0.35
     assert [r[1] for r in rents(fake_vast)] == ["/api/v0/asks/3/"]
 
 
+def test_approve_asks_again_when_the_price_went_up(fake_vast):
+    core.set_config("approve_above_usd_per_hour", "0.25")
+    go(args())
+    fake_vast.offers = [offer(5, dph_total=0.50)]
+    res, rec = launch.approve("job1", out()), core.load("job1")
+    assert res["exit_code"] == 3 and rec["phase"] == "pending" and rec["pending"]["max_dph"] == 0.5
+    assert not rents(fake_vast)
+
+
+def test_a_machine_within_the_price_goes_without_approval_and_so_do_its_backups(fake_vast):
+    core.set_config("approve_above_usd_per_hour", "0.32")  # (offer 2, at $0.35, would need approval)
+    res, rec = go(args()), core.load("job1")
+    assert res["exit_code"] == 0 and rec["phase"] == "ready" and [o["id"] for o in rec["offers"]] == [1]
+
+
 def test_decline_forgets_a_pending_launch(fake_vast):
-    core.set_config("auto_approve_usd", "0.5")
+    core.set_config("approve_above_usd_per_hour", "0.25")
     go(args())
     launch.decline("job1")
     assert not core.record_path("job1").exists() and not launch.brief_file("job1").exists()
     assert not fake_vast.calls("PUT", "/")
 
 
-@pytest.mark.parametrize("status", ["running", "exited"])
-def test_max_running_machines_holds_a_launch_while_another_machine_runs(status, fake_vast):
-    core.set_config("max_running_machines", "1")
-    other_worker(fake_vast, status)
-    res, held = go(args()), status == "running"
-    assert res["exit_code"] == (3 if held else 0) and (core.load("job1")["phase"] == "pending") is held
-    assert len(rents(fake_vast)) == (0 if held else 1)
+# ---- several at once -----------------------------------------------------------------------------
+
+
+def four_offers(fake_vast) -> None:
+    fake_vast.offers = [offer(i, dph_total=0.30 + i / 100) for i in (1, 2, 3, 4)]
+
+
+def test_a_batch_launches_each_worker_on_a_machine_of_its_own(fake_vast, fake_github, machines):
+    four_offers(fake_vast)
+    res = launch.launch_batch([args("job1"), args("job2")], out())
+    recs = [core.load(n) for n in ("job1", "job2")]
+    assert res["exit_code"] == 0 and [r["state"] for r in res["results"]] == ["working", "working"]
+    assert all(r["phase"] == "ready" for r in recs) and len(res["result_line"].splitlines()) == 2
+    picks = [fake_vast.instances[r["instance_id"]]["offer_id"] for r in recs]
+    assert picks == [1, 2]
+    assert set(machines.uploads) == {"job1", "job2"} and len(fake_github.keys["ada/proj"]) == 1
+    assert recs[0]["repo"]["start_sha"] == recs[1]["repo"]["start_sha"]  # (one snapshot for the batch)
+
+
+def test_in_a_batch_only_workers_over_the_price_wait_for_approval(fake_vast):
+    core.set_config("approve_above_usd_per_hour", "0.315")  # (only offer 1, at $0.31, is within)
+    four_offers(fake_vast)
+    res = launch.launch_batch([args("job1"), args("job2")], out())
+    assert res["exit_code"] == 3 and [r["state"] for r in res["results"]] == ["working", "approval"]
+    assert core.load("job2")["phase"] == "pending" and len(rents(fake_vast)) == 1
+
+
+def test_approving_several_gives_each_a_machine_of_its_own(fake_vast):
+    core.set_config("approve_above_usd_per_hour", "0.25")
+    four_offers(fake_vast)
+    launch.launch_batch([args("job1"), args("job2")], out())
+    res = launch.approve_all(["job1", "job2"], out())
+    recs = [core.load(n) for n in ("job1", "job2")]
+    assert res["exit_code"] == 0 and all(r["phase"] == "ready" for r in recs)
+    assert len({fake_vast.instances[r["instance_id"]]["offer_id"] for r in recs}) == 2
+
+
+def test_one_failed_launch_in_a_batch_leaves_the_others_running(fake_vast, machines, monkeypatch):
+    four_offers(fake_vast)
+    real = launch.setup_machine
+
+    def setup_machine(rec, progress):
+        if rec["name"] == "job2":
+            raise core.CrabError("setup failed at step 4 (Claude Code): the token was refused", 5)
+        real(rec, progress)
+
+    monkeypatch.setattr(launch, "setup_machine", setup_machine)
+    res = launch.launch_batch([args("job1"), args("job2")], out())
+    assert res["exit_code"] == 5 and [r["state"] for r in res["results"]] == ["working", "failed"]
+    assert core.load("job1")["phase"] == "ready"
+
+
+@pytest.mark.parametrize("problem", ["same name", "taken name", "no machine", "too few machines"])
+def test_a_batch_that_cannot_be_planned_rents_nothing(problem, fake_vast):
+    items = [args("job1"), args("job1" if problem == "same name" else "job2")]
+    if problem == "taken name":
+        core.save({"name": "job2", "phase": "pending"})
+    if problem == "no machine":
+        items[1] = args("job2", req=offers.Req(hours=1, gpus=8))
+    if problem == "too few machines":
+        fake_vast.offers = [offer(1)]
+    fails(4 if "machine" in problem else 2, launch.launch_batch, items, out())
+    assert not rents(fake_vast) and not core.record_path("job1").exists()
 
 
 # ---- the rent loop -------------------------------------------------------------------------------
@@ -249,8 +320,7 @@ def test_a_taken_offer_moves_on_to_the_next(fake_vast):
     rec = core.load("job1")
     assert rec["phase"] == "ready" and fake_vast.instances[rec["instance_id"]]["offer_id"] == 2
     assert [f["id"] for f in rec["failed_offers"]] == [1] and len(rents(fake_vast)) == 2
-    # the same budget; the time limit follows the backup's price
-    assert (rec["budget_usd"], rec["limit_hours"]) == (0.6, 1.71)
+    assert rec["limit_hours"] == 2.0  # (hours, whatever the backup costs)
 
 
 @pytest.mark.parametrize("boot", ["boot_error", "exits", "never"])
@@ -371,7 +441,7 @@ def test_a_failed_setup_destroys_the_machine_and_start_retries_with_fresh_offers
 
 
 def test_dry_run_rents_nothing_and_writes_nothing(fake_vast, fake_github, user_repo):
-    core.set_config("auto_approve_usd", "0.5")
+    core.set_config("approve_above_usd_per_hour", "0.25")
     (user_repo / "README.md").write_text("changed\n")
     res = go(args(dry_run=True))
     assert res["state"] == "dry run" and res["exit_code"] == 0 and res.keys() >= RESULT_KEYS
@@ -420,8 +490,7 @@ def test_nvidia_disable_require_only_for_a_cpu_task_on_a_gpu_host(gpus, host, di
 def test_extend_pushes_the_new_limit_to_a_running_machine(machines):
     go(args())
     res, rec = launch.extend("job1", 2), core.load("job1")
-    assert res["exit_code"] == 0
-    assert (rec["budget_usd"], rec["limit_hours"]) == (1.2, 4.0)
+    assert res["exit_code"] == 0 and rec["limit_hours"] == 4.0
     assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
 
 
@@ -433,17 +502,6 @@ def test_extend_of_a_stopped_worker_is_pushed_by_the_next_start(fake_vast, machi
     res = launch.start("job1", out())
     assert res["state"] == "working" and res.keys() >= RESULT_KEYS and len(starts(fake_vast)) == 1
     assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
-
-
-def test_extend_over_auto_approve_waits_for_approval(machines):
-    go(args())
-    core.set_config("auto_approve_usd", "1")
-    res, rec = launch.extend("job1", 10), core.load("job1")  # (the budget would be $0.60 + 10 x $0.30)
-    assert res["exit_code"] == 3 and rec["pending"]["action"] == "extend" and rec["limit_hours"] == 2.0
-    assert not machines.calls
-    launch.approve("job1", out())
-    rec = core.load("job1")
-    assert rec["pending"] is None and (rec["budget_usd"], rec["limit_hours"]) == (3.6, 12.0)
 
 
 def test_start_refuses_once_the_time_limit_is_used_up(fake_vast):
@@ -467,28 +525,23 @@ def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(f
     assert core.load("job1")["last_seen"]["stop_reason"] is None and not fake_vast.calls("DELETE", "/")
 
 
-@pytest.mark.parametrize("then", ["approve", "start again"])
-@pytest.mark.parametrize("was", ["stopped", "failed"])
-def test_start_waits_for_approval_while_too_many_machines_run(was, then, fake_vast, machines):
-    if was == "stopped":
-        go(args())
-        stop_machine(fake_vast)
-    else:
-        machines.setup_result = core.CrabError("setup failed at step 2 (repository): clone failed", 5)
-        fails(5, go, args())
-        machines.setup_result = None
-    core.set_config("max_running_machines", "1")
-    busy = other_worker(fake_vast)
+def test_start_and_extend_never_wait_for_approval(fake_vast, machines):
+    go(args())
+    stop_machine(fake_vast)
+    core.set_config("approve_above_usd_per_hour", "0")
+    assert launch.extend("job1", 10)["exit_code"] == 0 and core.load("job1")["limit_hours"] == 12.0
+    assert launch.start("job1", out())["state"] == "working" and machine_runs(fake_vast)
+
+
+def test_a_failed_launch_tried_again_asks_first_if_only_pricier_machines_are_left(fake_vast, machines):
+    machines.setup_result = core.CrabError("setup failed at step 2 (repository): clone failed", 5)
+    fails(5, go, args())
+    machines.setup_result = None
+    fake_vast.offers = [offer(9, dph_total=7.50)]  # (over the default $5/hr)
     res = launch.start("job1", out())
-    assert res["exit_code"] == 3 and core.load("job1")["pending"]["action"] == "start"
-    assert not machine_runs(fake_vast)
-    if then == "approve":
-        launch.approve("job1", out())
-    else:  # (the other machine stopped meanwhile)
-        fake_vast.instances[busy].update(actual_status="exited", intended_status="stopped")
-        launch.start("job1", out())
-    rec = core.load("job1")
-    assert rec["phase"] == "ready" and rec["pending"] is None and machine_runs(fake_vast)
+    assert res["exit_code"] == 3 and core.load("job1")["phase"] == "pending" and not machine_runs(fake_vast)
+    launch.approve("job1", out())
+    assert core.load("job1")["phase"] == "ready" and core.load("job1")["max_dph"] == 7.5
 
 
 def test_start_stops_a_machine_that_reports_its_limit_reached(fake_vast, machines):

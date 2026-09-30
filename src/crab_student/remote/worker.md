@@ -30,6 +30,7 @@ start with `crab-student:` come from the machine's watchdog.
 - Keep big files (over 50 MB), datasets, checkpoints, caches and virtualenvs out of git with
   `.gitignore`. Put big outputs in `/root/outputs/` and list them in your report.
 - Keep your notes, report and small results (tables, plots, JSON under 5 MB) in `agent-runs/{{name}}/`.
+- crab-student writes `agent-runs/{{name}}/stopped.json` when the machine stops. Leave that file alone.
 
 ## Long jobs
 

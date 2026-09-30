@@ -237,12 +237,12 @@ def test_a_branch_is_deleted_only_while_nobody_worked_on_it(fake_github, tmp_pat
     assert fake_github.branch_sha("ada/proj", "agent/t2")
 
 
-def test_read_report(fake_github, tmp_path):
+def test_read_file(fake_github, tmp_path):
     fake_github.create_repo("ada/proj")
     worker_push(tmp_path, fake_github, "agent/t1", {"agent-runs/t1/REPORT.md": "# t1\nall good\n"})
-    assert github.read_report("ada/proj", "agent/t1", "agent-runs/t1/REPORT.md") == "# t1\nall good\n"
-    assert github.read_report("ada/proj", "agent/t1", "agent-runs/t2/REPORT.md") is None
-    assert github.read_report("ada/proj", "agent/t2", "agent-runs/t1/REPORT.md") is None
+    assert github.read_file("ada/proj", "agent/t1", "agent-runs/t1/REPORT.md") == "# t1\nall good\n"
+    assert github.read_file("ada/proj", "agent/t1", "agent-runs/t2/REPORT.md") is None
+    assert github.read_file("ada/proj", "agent/t2", "agent-runs/t1/REPORT.md") is None
 
 
 def test_pull_fetches_without_touching_the_checkout(user_repo, fake_github, tmp_path):

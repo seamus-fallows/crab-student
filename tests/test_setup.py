@@ -113,6 +113,8 @@ def test_install_merges_the_rules_into_the_users_settings(isolated):
     assert settings["permissions"]["ask"] == ["Bash(rm:*)", *setup.ASK]
     skill = isolated / ".claude" / "skills" / "crab-student" / "SKILL.md"
     assert skill.read_text(encoding="utf-8") == (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
+    agent = isolated / ".claude" / setup.LAUNCHER_AGENT
+    assert agent.read_text(encoding="utf-8") == (setup.DATA / "launcher.md").read_text(encoding="utf-8")
 
 
 def test_settings_that_are_not_json_are_left_alone(isolated):
@@ -180,3 +182,11 @@ def test_the_markdown_and_the_rules_name_only_real_commands_and_flags():
     assert set(re.findall(r"--[a-z][a-z-]+", guide)) <= set(subs["launch"]._option_string_actions)
     every_flag = set().union(*(p._option_string_actions for p in subs.values()))
     assert set(re.findall(r"--[a-z][a-z-]+", skill)) <= every_flag
+
+
+def test_the_skill_starts_the_launcher_agent_that_init_installs():
+    agent = (setup.DATA / "launcher.md").read_text(encoding="utf-8")
+    name = re.search(r"^name: (.+)$", agent, re.M).group(1)
+    assert setup.LAUNCHER_AGENT.endswith(f"/{name}.md") and re.search(r"^tools: .*Bash", agent, re.M)
+    assert f'subagent_type: "{name}"' in (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
+    assert agent.isascii() and "crab-student guide launch" in agent

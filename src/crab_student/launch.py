@@ -1,5 +1,5 @@
 """Launching: the plan, the approval rule, bring-up (rent, boot, repo, upload and setup), several launches at
-once, approve, decline, start and extend."""
+once, approve, decline and start."""
 
 from __future__ import annotations
 
@@ -69,9 +69,12 @@ class LaunchArgs:
     repo_path: Path | None
     no_repo: bool
     secrets: list[str]
-    model: str | None
     fake_claude: bool
     dry_run: bool
+    mode: str | None = None  # None: the mode setting
+    model: str | None = None  # model, effort, fast: None falls back to the settings, then to the user's own
+    effort: str | None = None
+    fast: bool | None = None
 
 
 class Progress:
@@ -114,7 +117,7 @@ class Progress:
 
 
 def brief_file(name: str) -> Path:
-    return core.workers_dir() / f"{name}.brief.md"
+    return core.agents_dir() / f"{name}.brief.md"
 
 
 # ---- launch --------------------------------------------------------------------------------------
@@ -128,7 +131,9 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     cfg = core.load_config()
     repo, repo_line, warnings = plan_repo(a, cfg, f"agent/{a.name}")
     plan = offers.plan(a.req, cfg, cfg["approve_above_usd_per_hour"])
-    p, limit = plan.primary, offers.time_limit(a.req.hours)
+    p = plan.primary
+    reason = approval_reason(plan, cfg["approve_above_usd_per_hour"])
+    rec = new_record(a, cfg, plan, repo, reason)
     out.line(f"Planning {a.name}")
     out.line(f"  machine  {offers.summary(p)} - ${p['dph_total']:.2f}/hr (offer {p['id']})")
     if plan.fallbacks:
@@ -136,13 +141,10 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
         out.line(
             f"  backups  {len(plan.fallbacks)} more offer{'s' if len(plan.fallbacks) > 1 else ''}, up to ${top:.2f}/hr"
         )
-    est = core.usd(core.ceil_cents(p["dph_total"] * a.req.hours))
-    out.line(f"  time     about {a.req.hours:g}h (~{est}); it stops after {core.fmt_hours(limit)} at most")
+    out.line(f"  agent    {rec['mode']} - Claude Code: {settings_text(rec['claude_settings'])}")
     out.line(f"  repo     {repo_line}")
     for w in warnings:
         out.line(f"Warning: {w}")
-    reason = approval_reason(plan, cfg["approve_above_usd_per_hour"])
-    rec = new_record(a, cfg, plan, repo, reason)
     if a.dry_run:
         return result(rec, "dry run", warnings, reason=reason)
     save_new(rec, a.brief, warnings)
@@ -155,7 +157,7 @@ def check_new(a: LaunchArgs) -> None:
     core.check_name(a.name)
     if core.record_path(a.name).exists():
         raise core.CrabError(
-            f"a worker named {a.name} already exists. Pick another name, or delete it first: "
+            f"an agent named {a.name} already exists. Pick another name, or delete it first: "
             f"crab-student delete {a.name}",
             2,
         )
@@ -181,7 +183,7 @@ def approval_reason(plan: offers.Plan, cap: float) -> str | None:
 def plan_repo(
     a: LaunchArgs, cfg: dict, branch: str, snapshots: dict | None = None
 ) -> tuple[dict, str, list[str]]:
-    """Where the worker's branch starts. Nothing is written anywhere yet (the starting commit is a local,
+    """Where the agent's branch starts. Nothing is written anywhere yet (the starting commit is a local,
     unreferenced object; several launches at once share one through `snapshots`)."""
     if a.no_repo:
         slug = f"{github.login()}/{cfg['workspace_repo']}"
@@ -215,7 +217,7 @@ def plan_repo(
         it = "it" if len(untracked) == 1 else "them"
         warnings.append(
             f"not carried over: {_files(untracked, 'untracked file')}. Commit {it} and launch again if "
-            f"the worker needs {it}."
+            f"the agent needs {it}."
         )
     repo = {
         "slug": r.slug,
@@ -237,6 +239,26 @@ def _files(paths: list[str], word: str = "file") -> str:
     return f"{len(paths)} {word}{'s' if len(paths) > 1 else ''} ({shown})"
 
 
+def claude_settings(a: LaunchArgs, cfg: dict) -> dict:
+    """The agent's Claude Code settings: each from the launch's flag, else the setting, else the user's own
+    Claude Code settings; only those set somewhere."""
+    own, fast_setting = core.own_claude_settings(), {"on": True, "off": False}.get(cfg["fast_mode"])
+    chosen = {
+        "model": a.model or cfg["model"] or own.get("model"),
+        "effortLevel": a.effort or cfg["effort"] or own.get("effortLevel"),
+        "fastMode": next((v for v in (a.fast, fast_setting, own.get("fastMode")) if v is not None), None),
+    }
+    return {k: v for k, v in chosen.items() if v is not None}
+
+
+def settings_text(s: dict) -> str:
+    """ "model opus, effort high, fast mode on", or what Claude Code does by itself."""
+    parts = [f"model {s['model']}"] if s.get("model") else []
+    parts += [f"effort {s['effortLevel']}"] if s.get("effortLevel") else []
+    parts += [f"fast mode {'on' if s['fastMode'] else 'off'}"] if "fastMode" in s else []
+    return ", ".join(parts) or "its defaults"
+
+
 def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: str | None) -> dict:
     return {
         "name": a.name,
@@ -244,9 +266,9 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "phase": "pending" if reason else "renting",
         "error": None,
         "req": offers.req_dict(a.req),
-        "limit_hours": offers.time_limit(a.req.hours),
         "max_dph": cfg["approve_above_usd_per_hour"],  # (the most it may rent at without asking again)
-        "model": cfg["model"] if a.model is None else a.model,
+        "mode": a.mode or cfg["mode"],
+        "claude_settings": claude_settings(a, cfg),
         "fake_claude": a.fake_claude,
         "secrets": a.secrets,
         "session_id": str(uuid.uuid4()),
@@ -275,7 +297,7 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
 def save_new(rec: dict, brief: str, warnings: list[str]) -> None:
     with core.locked(rec["name"]):
         if core.record_path(rec["name"]).exists():  # (another launch took the name meanwhile)
-            raise core.CrabError(f"a worker named {rec['name']} already exists. Pick another name.", 2)
+            raise core.CrabError(f"an agent named {rec['name']} already exists. Pick another name.", 2)
         rec["warnings"] = warnings  # (repeated when a launch waiting for approval goes ahead)
         brief_file(rec["name"]).parent.mkdir(parents=True, exist_ok=True)
         brief_file(rec["name"]).write_text(brief, encoding="utf-8")
@@ -286,12 +308,12 @@ def save_new(rec: dict, brief: str, warnings: list[str]) -> None:
 
 
 def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
-    """Launch several workers at once. Everything is planned first (a problem stops the batch before anything
-    is rented), each worker picks a different machine, and the bring-ups run side by side."""
+    """Launch several agents at once. Everything is planned first (a problem stops the batch before anything
+    is rented), each agent picks a different machine, and the bring-ups run side by side."""
     from crab_student import setup
 
     if len({a.name for a in items}) < len(items):
-        raise core.CrabError("two workers in the batch have the same name.", 2)
+        raise core.CrabError("two agents in the batch have the same name.", 2)
     setup.check_ready(fake_claude=any(a.fake_claude for a in items))
     for a in items:
         check_new(a)
@@ -305,12 +327,12 @@ def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
         plan = offers.plan(a.req, cfg, cap, taken, found[key])
         taken.add(plan.primary["id"])  # (backups may be another's pick: a taken offer moves on to the next)
         reason = approval_reason(plan, cap)
-        p = plan.primary
+        rec, p = new_record(a, cfg, plan, repo, reason), plan.primary
         out.line(
-            f"{a.name}: {offers.short(p)} at ${p['dph_total']:.2f}/hr, about {a.req.hours:g}h"
+            f"{a.name}: {offers.short(p)} at ${p['dph_total']:.2f}/hr - {rec['mode']}"
             + (" - needs your approval" if reason else "")
         )
-        planned.append((a, new_record(a, cfg, plan, repo, reason), warnings, reason))
+        planned.append((a, rec, warnings, reason))
     if any(a.dry_run for a in items):
         return batch_result([result(rec, "dry run", w, reason=r) for _, rec, w, r in planned])
     for a, rec, warnings, _ in planned:
@@ -333,7 +355,7 @@ def side_by_side(jobs: list, out: Progress) -> list[dict]:
     def run(name: str, job) -> dict:
         try:
             return job(Progress(out.stream, prefix=f"[{name}] "))
-        except Exception as e:  # (one worker's trouble, even a bug, must not lose the others' results)
+        except Exception as e:  # (one agent's trouble, even a bug, must not lose the others' results)
             return failed(name, e)
 
     if not jobs:
@@ -365,7 +387,7 @@ def batch_result(results: list[dict]) -> dict:
 
 
 def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict:
-    """Take a worker from wherever its launch got to (renting, booting, setup, failed) to ready."""
+    """Take an agent from wherever its launch got to (renting, booting, setup, failed) to ready."""
     with core.locked(name, wait=900):  # (a second caller waits for a launch at work, then reports it)
         rec = core.load(name)
         if rec["phase"] == "pending":
@@ -390,7 +412,7 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
 
 
 def resume_machine(rec: dict, out: Progress) -> None:
-    """A launch cut off during setup: its machine is kept (the worker may already be at work), and may have
+    """A launch cut off during setup: its machine is kept (the agent may already be at work), and may have
     stopped since; start it again and wait for it."""
     name, inst = rec["name"], vast.instance(rec["instance_id"])
     if inst is None:
@@ -587,7 +609,7 @@ def discard(rec: dict, why: str, out: Progress) -> None:
 
 
 def prepare_repo(rec: dict, out: Progress) -> None:
-    """The worker's deploy key (usually shared, see github.claim_deploy_key) and its branch on GitHub (once;
+    """The agent's deploy key (usually shared, see github.claim_deploy_key) and its branch on GitHub (once;
     the record says what is done)."""
     repo, name = rec["repo"], rec["name"]
     if repo["branch_created"]:
@@ -620,11 +642,11 @@ def machine_config(rec: dict) -> dict:
         "branch": rec["repo"]["branch"],
         "repo_url": github.git_url(rec["repo"]["slug"]),
         "repo_dir": rec["repo"]["dir"],
-        "model": rec["model"],
+        "mode": rec["mode"],
+        "claude_settings": rec["claude_settings"],
         "fake_claude": rec["fake_claude"],
         "session_id": rec["session_id"],
         "idle_minutes": rec["idle_minutes"],
-        "limit_hours": rec["limit_hours"],
         "notify_url": rec["notify_url"],
         "secret_names": rec["secrets"],
     }
@@ -654,7 +676,7 @@ def generated_files(rec: dict) -> dict[str, tuple[bytes, int]]:
 
 
 def setup_machine(rec: dict, out: Progress) -> None:
-    """Upload and set up the machine. A setup that fails destroys the machine (the worker never ran, so it
+    """Upload and set up the machine. A setup that fails destroys the machine (the agent never ran, so it
     holds nothing); a lost connection leaves the launch for `start` to continue."""
     files = generated_files(rec)
     rec.update(phase="setup", uploaded=True)
@@ -681,7 +703,7 @@ def setup_machine(rec: dict, out: Progress) -> None:
     core.save(rec)
 
 
-# ---- approve, decline, start, extend -------------------------------------------------------------
+# ---- approve, decline, start ---------------------------------------------------------------------
 
 
 def approve(name: str, out: Progress) -> dict:
@@ -689,7 +711,7 @@ def approve(name: str, out: Progress) -> dict:
 
 
 def approve_all(names: list[str], out: Progress) -> dict:
-    """Launch workers waiting for approval, each with fresh offers (a different machine each) up to the price
+    """Launch agents waiting for approval, each with fresh offers (a different machine each) up to the price
     the user approved; one whose price rose meanwhile waits again."""
     names, taken, results = list(dict.fromkeys(names)), set(), {}
     for name in names:
@@ -747,17 +769,8 @@ def decline(name: str) -> str:
     return f"Declined {name}: nothing was rented."
 
 
-def _time_up(rec: dict) -> core.CrabError:
-    used = (rec.get("last_seen") or {}).get("used_hours") or rec["limit_hours"]
-    return core.CrabError(
-        f"{rec['name']} has reached its time limit ({core.fmt_hours(used)} used of "
-        f"{core.fmt_hours(rec['limit_hours'])}). Extend it first: crab-student extend {rec['name']} 2",
-        3,
-    )
-
-
 def start(name: str, out: Progress) -> dict:
-    """Start a stopped worker again, or continue a launch that was interrupted or failed."""
+    """Start a stopped agent again, or continue a launch that was interrupted or failed."""
     rec = core.load(name)
     if rec["phase"] == "pending":
         raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
@@ -768,13 +781,11 @@ def start(name: str, out: Progress) -> dict:
         inst = vast.instance(rec["instance_id"])
         if inst is None:
             raise core.CrabError(
-                f"{name}'s machine no longer exists on Vast. Delete the worker: crab-student delete {name}"
+                f"{name}'s machine no longer exists on Vast. Delete the agent: crab-student delete {name}"
             )
         if vast.running(inst):
             out.line(f"{name} is already running.")
             return result(rec, "working", [])
-        if ((rec.get("last_seen") or {}).get("used_hours") or 0) >= rec["limit_hours"]:
-            raise _time_up(rec)
         vast.set_state(rec["instance_id"], "running")
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
         rec.update(last_start=time.time(), stopped_since=None)
@@ -785,67 +796,33 @@ def start(name: str, out: Progress) -> dict:
                 f"{name} did not come back up ({why}). Vast keeps trying: check again with "
                 f"crab-student status {name}, or stop it with crab-student stop {name}."
             )
-        res = machine.remote(name, ["set-limit", str(rec["limit_hours"])])
-        core.save(rec)
         machine.write_ssh_config()
-        if res.get("used_hours", 0) >= rec["limit_hours"]:
-            vast.set_state(rec["instance_id"], "stopped")
-            # (remembered, so the next start refuses without booting the machine again)
-            seen = {"used_hours": res["used_hours"], "stop_reason": "time-limit"}
-            rec["last_seen"] = {**(rec.get("last_seen") or {}), **seen}
-            core.save(rec)
-            raise _time_up(rec)
         return result(rec, "working", [])
-
-
-def extend(name: str, hours: float) -> dict:
-    """More machine time: the time limit grows by `hours`."""
-    if not hours > 0:
-        raise core.CrabError("the hours to add must be more than 0.", 2)
-    with core.locked(name):
-        rec = core.load(name)
-        if rec["phase"] != "ready":
-            raise core.CrabError(
-                f"{name} has not finished launching, so there is no time limit to extend yet."
-            )
-        rec["limit_hours"] = round(rec["limit_hours"] + hours, 2)
-        core.save(rec)
-        when = "when it starts again"
-        if vast.running(vast.instance(rec["instance_id"])):
-            try:
-                machine.remote(name, ["set-limit", str(rec["limit_hours"])])
-                when = "now"
-            except machine.Unreachable:
-                when = (
-                    "when it starts again (it could not be reached now, so it keeps its old limit until then)"
-                )
-    return {
-        **result(rec, "extended", []),
-        "result_line": f"{name}: time limit is now {core.fmt_hours(rec['limit_hours'])}; the machine gets it {when}.",
-    }
 
 
 # ---- results -------------------------------------------------------------------------------------
 
 
 def result(rec: dict, state: str, warnings: list[str], reason: str | None = None) -> dict:
-    """What launch, approve, start and extend return (the CLI prints result_line; --json the whole)."""
+    """What launch, approve and start return (the CLI prints result_line; --json the whole)."""
     o = rec["offers"][0] if rec.get("offers") else {}
     dph, short = rec.get("dph") or o.get("dph_total"), rec.get("short") or o.get("short", "?")
-    hours = rec["req"]["hours"]
-    est = core.ceil_cents(dph * hours) if dph else None
-    name, branch = rec["name"], rec["repo"]["branch"]
-    cost = f"est. {hours:g}h ~ {core.usd(est)} (stops after {core.fmt_hours(rec['limit_hours'])})"
+    name, branch, mode = rec["name"], rec["repo"]["branch"], rec["mode"]
     if state == "approval":
         line = (
-            f"{name}: NOT started - needs your approval: {reason} - would rent {short} at ${dph:.2f}/hr, {cost} - "
+            f"{name}: NOT started - needs your approval: {reason} - would rent {short} at ${dph:.2f}/hr - "
             f"approve: crab-student approve {name} (or: crab-student decline {name})"
         )
     elif state == "dry run":
         need = f"needs approval ({reason})" if reason else "no approval needed"
-        line = f"{name} (dry run): would rent {short} at ${dph:.2f}/hr - {cost} - {need}"
+        line = f"{name} (dry run): would rent {short} at ${dph:.2f}/hr - {mode} - {need}"
+    elif mode == "interactive":
+        line = (
+            f"{name}: ready on {short} at ${dph:.2f}/hr - interactive - branch {branch} - open it: "
+            f"crab-student open {name} --vscode"
+        )
     else:
-        line = f"{name}: working on {short} at ${dph:.2f}/hr - {cost} - branch {branch} - watch: crab-student open {name}"
+        line = f"{name}: working on {short} at ${dph:.2f}/hr - {mode} - branch {branch} - watch: crab-student open {name}"
     return {
         "name": name,
         "state": state,
@@ -855,9 +832,7 @@ def result(rec: dict, state: str, warnings: list[str], reason: str | None = None
         "instance_id": rec.get("instance_id"),
         "machine": rec.get("machine") or o.get("summary"),
         "dph": dph,
-        "hours": hours,
-        "est_usd": est,
-        "limit_hours": rec["limit_hours"],
+        "mode": mode,
         "repo": rec["repo"]["slug"],
         "branch": branch,
         "exit_code": 3 if state == "approval" else 0,

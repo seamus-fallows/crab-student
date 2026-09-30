@@ -1,4 +1,4 @@
-"""Errors, paths, settings, worker records and their locks, secrets, subprocesses, formatting."""
+"""Errors, paths, settings, agent records and their locks, secrets, subprocesses, formatting."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def home() -> Path:
     return Path.home() / ".crab-student"
 
 
-def workers_dir() -> Path:
-    return home() / "workers"
+def agents_dir() -> Path:
+    return home() / "agents"
 
 
 def ssh_dir() -> Path:
@@ -73,10 +73,15 @@ DEFAULTS: dict[str, object] = {
     "min_reliability": 0.98,
     "min_download_mbps": 200.0,
     "regions": [],
+    "mode": "colleague",
     "model": "",
+    "effort": "",
+    "fast_mode": "",
     "workspace_repo": "crab-student-work",
     "notify_url": "",
 }
+MODES = ("autonomous", "colleague", "interactive")
+EFFORTS = ("low", "medium", "high", "xhigh")
 
 
 def _regions_ok(value: list) -> bool:
@@ -97,7 +102,10 @@ RULES = {
         "country codes (US, CA, DE, ...) or continents (north-america, south-america, "
         "europe, asia, oceania, africa), comma-separated; empty means anywhere",
     ),
-    "model": (lambda v: True, "a Claude model such as opus or sonnet; empty uses Claude Code's default"),
+    "mode": (lambda v: v in MODES, "autonomous, colleague or interactive"),
+    "model": (lambda v: True, "a Claude model such as opus or sonnet (empty: as your own Claude Code)"),
+    "effort": (lambda v: v in ("", *EFFORTS), "low, medium, high or xhigh (empty: as your own Claude Code)"),
+    "fast_mode": (lambda v: v in ("", "on", "off"), "on or off (empty: as your own Claude Code)"),
     "workspace_repo": (lambda v: bool(re.fullmatch(r"[A-Za-z0-9._-]+", v)), "a GitHub repo name"),
     "notify_url": (lambda v: v == "" or v.startswith(("http://", "https://")), "an http(s) URL, or empty"),
 }
@@ -140,7 +148,23 @@ def set_config(key: str, text: str | None) -> object:
     return value
 
 
-# ---- worker records ------------------------------------------------------------------------------
+def own_claude_settings() -> dict:
+    """What agents copy from the user's own Claude Code settings when nothing else says: `model`,
+    `effortLevel` and `fastMode`, those set with a sensible type (a missing or invalid file gives none)."""
+    data = read_json(Path.home() / ".claude" / "settings.json", {})
+    if not isinstance(data, dict):
+        return {}
+    kept = {
+        k: data[k].strip()
+        for k in ("model", "effortLevel")
+        if isinstance(data.get(k), str) and data[k].strip()
+    }
+    if isinstance(data.get("fastMode"), bool):
+        kept["fastMode"] = data["fastMode"]
+    return kept
+
+
+# ---- agent records -------------------------------------------------------------------------------
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,38}[a-z0-9]")
 
@@ -154,18 +178,18 @@ def check_name(name: str) -> None:
 
 
 def record_path(name: str) -> Path:
-    return workers_dir() / f"{name}.json"
+    return agents_dir() / f"{name}.json"
 
 
 def load(name: str) -> dict:
     rec = read_json(record_path(name), None)
     if rec is None:
-        raise CrabError(f"there is no worker named {name} (see crab-student list).")
+        raise CrabError(f"there is no agent named {name} (see crab-student list).")
     return rec
 
 
 def all_records() -> list[dict]:
-    recs = [read_json(p, None) for p in sorted(workers_dir().glob("*.json"))]
+    recs = [read_json(p, None) for p in sorted(agents_dir().glob("*.json"))]
     return sorted(
         (r for r in recs if isinstance(r, dict) and "name" in r), key=lambda r: r.get("created", "")
     )
@@ -176,17 +200,17 @@ def save(rec: dict) -> None:
 
 
 def remove(name: str) -> None:
-    """Forget a worker: its record and brief (its lock file may still be held)."""
+    """Forget an agent: its record and brief (its lock file may still be held)."""
     for suffix in (".json", ".brief.md", ".lock"):
         with contextlib.suppress(OSError):
-            (workers_dir() / f"{name}{suffix}").unlink(missing_ok=True)
+            (agents_dir() / f"{name}{suffix}").unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
 def locked(name: str, wait: float = 0) -> Iterator[None]:
-    """Hold the worker's OS lock (it dies with the process, so a lock that cannot be taken means another
-    crab-student command is working on the worker right now)."""
-    path = workers_dir() / f"{name}.lock"
+    """Hold the agent's OS lock (it dies with the process, so a lock that cannot be taken means another
+    crab-student command is working on the agent right now)."""
+    path = agents_dir() / f"{name}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+") as f:
         deadline = time.monotonic() + wait
@@ -278,7 +302,7 @@ def write_private(path: Path, text: str) -> None:
 # ---- secrets -------------------------------------------------------------------------------------
 
 SERVICE = "crab-student"
-TOKEN = "claude-oauth-token"  # the Claude token for workers
+TOKEN = "claude-oauth-token"  # the Claude token for agents
 SECRET_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
@@ -381,10 +405,6 @@ def last_line(text: str) -> str:
 
 def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def ceil_cents(x: float) -> float:
-    return math.ceil(round(x * 100, 6)) / 100
 
 
 def usd(x: float | None) -> str:

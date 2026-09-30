@@ -32,11 +32,11 @@ def commit(repo: Path, files: dict[str, str], message: str = "work") -> str:
     return git(repo, "rev-parse", "HEAD").strip()
 
 
-def worker_push(tmp_path: Path, fake_github, branch: str, files: dict[str, str]) -> str:
-    """A commit on `branch` of ada/proj, pushed the way a worker would."""
-    work = tmp_path / "worker"
+def agent_push(tmp_path: Path, fake_github, branch: str, files: dict[str, str]) -> str:
+    """A commit on `branch` of ada/proj, pushed the way an agent would."""
+    work = tmp_path / "agent"
     if not work.exists():
-        git(tmp_path, "clone", "-q", str(fake_github.bare("ada/proj")), "worker")
+        git(tmp_path, "clone", "-q", str(fake_github.bare("ada/proj")), "agent")
         git(work, "checkout", "-q", "-b", branch)
     sha = commit(work, files)
     git(work, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
@@ -207,7 +207,7 @@ def test_deploy_keys(fake_github):
     github.remove_deploy_key("ada/proj", kid)  # (already gone: GitHub answers 404)
 
 
-def test_workers_claiming_a_key_at_the_same_time_share_one(fake_github, monkeypatch):
+def test_agents_claiming_a_key_at_the_same_time_share_one(fake_github, monkeypatch):
     fake_github.create_repo("ada/proj")
     names = ["w1", "w2", "w3"]
     for name in names:
@@ -232,14 +232,14 @@ def test_a_branch_is_deleted_only_while_nobody_worked_on_it(fake_github, tmp_pat
     assert github.delete_branch_if_at("ada/proj", "agent/t1", start)
     assert fake_github.branch_sha("ada/proj", "agent/t1") is None
     assert not github.delete_branch_if_at("ada/proj", "agent/t1", start)
-    worker_push(tmp_path, fake_github, "agent/t2", {"result.txt": "1\n"})
+    agent_push(tmp_path, fake_github, "agent/t2", {"result.txt": "1\n"})
     assert not github.delete_branch_if_at("ada/proj", "agent/t2", start)
     assert fake_github.branch_sha("ada/proj", "agent/t2")
 
 
 def test_read_file(fake_github, tmp_path):
     fake_github.create_repo("ada/proj")
-    worker_push(tmp_path, fake_github, "agent/t1", {"agent-runs/t1/REPORT.md": "# t1\nall good\n"})
+    agent_push(tmp_path, fake_github, "agent/t1", {"agent-runs/t1/REPORT.md": "# t1\nall good\n"})
     assert github.read_file("ada/proj", "agent/t1", "agent-runs/t1/REPORT.md") == "# t1\nall good\n"
     assert github.read_file("ada/proj", "agent/t1", "agent-runs/t2/REPORT.md") is None
     assert github.read_file("ada/proj", "agent/t2", "agent-runs/t1/REPORT.md") is None
@@ -247,11 +247,11 @@ def test_read_file(fake_github, tmp_path):
 
 def test_pull_fetches_without_touching_the_checkout(user_repo, fake_github, tmp_path):
     (user_repo / "README.md").write_text("my own edit\n")
-    first = worker_push(tmp_path, fake_github, "agent/w1", {"result.txt": "1\n"})
+    first = agent_push(tmp_path, fake_github, "agent/w1", {"result.txt": "1\n"})
     before = checkout(user_repo)
     assert "agent/w1" in github.pull(record(), user_repo)
     assert ref(user_repo, "refs/remotes/origin/agent/w1") == first == ref(user_repo, "refs/heads/agent/w1")
-    second = worker_push(tmp_path, fake_github, "agent/w1", {"result.txt": "2\n"})
+    second = agent_push(tmp_path, fake_github, "agent/w1", {"result.txt": "2\n"})
     github.pull(record(), user_repo)
     assert ref(user_repo, "refs/heads/agent/w1") == second  # (fast-forwarded)
     assert checkout(user_repo) == before
@@ -260,14 +260,14 @@ def test_pull_fetches_without_touching_the_checkout(user_repo, fake_github, tmp_
 
 @pytest.mark.parametrize("local", ["checked out", "diverged"])
 def test_pull_leaves_a_busy_local_branch_alone(local, user_repo, fake_github, tmp_path):
-    worker_push(tmp_path, fake_github, "agent/w1", {"result.txt": "1\n"})
+    agent_push(tmp_path, fake_github, "agent/w1", {"result.txt": "1\n"})
     github.pull(record(), user_repo)
     git(user_repo, "switch", "-q", "agent/w1")
     if local == "diverged":
         git(user_repo, "commit", "-q", "--allow-empty", "-m", "mine")
         git(user_repo, "switch", "-q", "main")
     mine = ref(user_repo, "refs/heads/agent/w1")
-    theirs = worker_push(tmp_path, fake_github, "agent/w1", {"result.txt": "2\n"})
+    theirs = agent_push(tmp_path, fake_github, "agent/w1", {"result.txt": "2\n"})
     before = checkout(user_repo)
     github.pull(record(), user_repo)
     assert ref(user_repo, "refs/remotes/origin/agent/w1") == theirs

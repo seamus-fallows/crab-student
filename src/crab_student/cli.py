@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import math
 import os
 import shutil
 import sys
@@ -54,8 +55,9 @@ def _req_args(p: argparse.ArgumentParser) -> None:
 def _req(args: argparse.Namespace, cfg: dict, hours: float) -> offers.Req:
     models = [m.strip() for m in args.gpu_models.split(",") if m.strip()]
     gpus = args.gpus or (1 if args.gpu_ram or models else 0)
-    if hours <= 0 or gpus < 0 or args.cpus < 1:
-        raise core.CrabError("hours must be above 0, and --gpus and --cpus cannot be negative.", 2)
+    numbers = (hours, args.gpu_ram, args.ram, args.disk or 1, args.min_down or 0)
+    if not all(math.isfinite(x) for x in numbers) or hours <= 0 or gpus < 0 or args.cpus < 1:
+        raise core.CrabError("hours must be a number above 0, and the other requirements plain numbers.", 2)
     return offers.Req(
         hours=hours,
         gpus=gpus,
@@ -98,47 +100,47 @@ def _show(value: object) -> str:
 
 def cmd_offers(args: argparse.Namespace) -> int:
     cfg = core.load_config()
-    req = _req(args, cfg, args.hours)
-    found = offers.search(req, cfg)
-    if args.budget is not None:
-        found = [o for o in found if o["dph_total"] * req.hours <= args.budget]
-    if not found:
-        raise core.CrabError(
-            f"no machine fits {req.describe()} right now" + (" within that budget." if args.budget else "."),
-            4,
-        )
-    ranked = offers.rank(found, req.gpu)
-    backups = {o["id"] for o in offers.fallbacks(ranked)}
+    plan = offers.plan(_req(args, cfg, args.hours), cfg, _money(args.budget))
+    shown, backups = plan.ranked[: args.count], {o["id"] for o in plan.fallbacks}
     if args.json:
-        print(
-            json.dumps(
-                {"offers": ranked[: args.count], "pick": ranked[0]["id"], "fallbacks": sorted(backups)}
-            )
-        )
+        print(json.dumps({"offers": shown, "pick": plan.primary["id"], "fallbacks": sorted(backups)}))
         return 0
-    width = max(len(offers.summary(o)) for o in ranked[: args.count])
+    width = max(len(offers.summary(o)) for o in shown)
     say(f"   {'OFFER':<10}{'MACHINE':<{width + 2}}{'$/HR':<8}{'DOWN':<11}RELIABILITY")
-    for o in ranked[: args.count]:
-        mark = "*" if o is ranked[0] else "+" if o["id"] in backups else " "
+    for o in shown:
+        mark = "*" if o is plan.primary else "+" if o["id"] in backups else " "
         rel = o.get("reliability2") or o.get("reliability") or 0
         say(
             f"{mark}  {o['id']:<10}{offers.summary(o):<{width + 2}}${o['dph_total']:<7.2f}"
             f"{o.get('inet_down', 0):>5.0f} Mbps  {rel * 100:.1f}%"
         )
-    hours = max(cfg["budget_factor"] * req.hours, cfg["min_budget_hours"])
-    budget = args.budget or core.ceil_cents(ranked[0]["dph_total"] * hours)
-    say(f"\n{len(found)} machines fit {req.describe()}. * the pick, + its backups.")
+    say(f"\n{len(plan.ranked)} machines fit {plan.req.describe()}. * the pick, + its backups.")
     say(
-        f"A {req.hours:g}h launch would get a budget of {core.usd(budget)} (it stops after "
-        f"{core.fmt_hours(budget / ranked[0]['dph_total'])}). Nothing was rented."
+        f"A {plan.req.hours:g}h launch would get a budget of {core.usd(plan.budget_usd)} (it stops after "
+        f"{core.fmt_hours(plan.budget_usd / plan.primary['dph_total'])}). Nothing was rented."
     )
     return 0
+
+
+def _positive(text: str) -> int:
+    if not text.isdigit() or int(text) < 1:
+        raise argparse.ArgumentTypeError("must be a whole number, 1 or more")
+    return int(text)
+
+
+def _money(value: float | None) -> float | None:
+    if value is not None and not (math.isfinite(value) and value > 0):
+        raise core.CrabError("a budget must be a number of dollars above 0.", 2)
+    return value
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
     cfg = core.load_config()
     if args.brief_file:
-        brief = Path(args.brief_file).read_text(encoding="utf-8")
+        try:
+            brief = Path(args.brief_file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise core.CrabError(f"could not read the brief file: {e}", 2) from None
     elif sys.stdin.isatty():
         raise core.CrabError("give the task brief on stdin or with --brief-file.", 2)
     else:
@@ -148,7 +150,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     a = launch.LaunchArgs(
         name=args.name,
         req=_req(args, cfg, args.hours),
-        budget=args.budget,
+        budget=_money(args.budget),
         brief=brief,
         repo_path=Path(args.repo).resolve() if args.repo else None,
         no_repo=args.no_repo,
@@ -202,7 +204,9 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    say(workers.report(args.name))
+    text = workers.report(args.name) + "\n"  # (the worker's words, in whatever characters the console has)
+    sys.stdout.buffer.write(text.encode(sys.stdout.encoding or "utf-8", "replace"))
+    sys.stdout.flush()
     return 0
 
 
@@ -233,9 +237,7 @@ def cmd_secret(args: argparse.Namespace) -> int:
         emit({"name": args.name, "result_line": f"Deleted {args.name}."}, args.json)
         return 0
     if not setup.interactive():
-        raise core.CrabError(
-            f"secret set asks for the value: run crab-student secret set {args.name} in a terminal.", 2
-        )
+        raise core.CrabError(f"secret set asks for the value, but {setup.NOT_A_TERMINAL}", 2)
     value = getpass.getpass(f"Value of {args.name} (it will not be shown): ").strip()
     if not value:
         raise core.CrabError("the value is empty; nothing was stored.", 2)
@@ -359,8 +361,10 @@ def cmd_open(args: argparse.Namespace) -> int:
     insts = {i["id"]: i for i in vast.instances()} if recs else {}
     live = [r for r in recs if vast.running(insts.get(r["instance_id"]))]
     for r in live:  # (the port can change after a restart)
-        if machine.set_address(r, insts[r["instance_id"]]):
-            core.save(r)
+        with core.locked(r["name"], wait=30):
+            fresh = core.load(r["name"])
+            if machine.set_address(fresh, insts[r["instance_id"]]):
+                core.save(fresh)
     machine.write_ssh_config()
     if args.name and not live:
         raise core.CrabError(f"{args.name} is not running. Start it first: crab-student start {args.name}")
@@ -402,7 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
     _req_args(c)
     c.add_argument("--hours", type=float, default=1.0, help="the task's estimated hours (default 1)")
     c.add_argument("--budget", type=float, metavar="USD")
-    c.add_argument("--count", type=int, default=10, help="how many to show (default 10)")
+    c.add_argument("--count", type=_positive, default=10, help="how many to show (default 10)")
     c = cmd(
         "launch", cmd_launch, "start a worker on a rented machine (the task brief on stdin)", json_flag=True
     )

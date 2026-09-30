@@ -2,8 +2,10 @@
 
 Tests set its behaviour: `offers` (what searches return, filtered like Vast would unless
 `ignore_filters`), `rent_outcome[offer_id]` (ok, taken, no_credit, error_created, error_none,
-slow_created), `boot[offer_id]` (polls until running, or "never", "boot_error", "exits"), and read
-`requests` (every call) and `instances`.
+slow_created), `boot[offer_id]` (polls until running, or "never", "boot_error", "exits", "stale_error":
+runs at once, an old error still in its status message), `start_polls` (polls a machine started again
+still reads "exited", with an error, while its host makes room), and read `requests` (every call) and
+`instances`.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from urllib.parse import parse_qs, urlsplit
 OPS = {"eq": lambda a, b: a == b, "gte": lambda a, b: a >= b, "gt": lambda a, b: a > b,
        "lte": lambda a, b: a <= b, "lt": lambda a, b: a < b, "in": lambda a, b: a in b}  # fmt: skip
 CONTROL = {"type", "order", "limit", "allocated_storage"}
+NO_ROOM = "Error: the host's GPUs are in use by another client; waiting for them"
 
 
 def offer(id: int, **fields) -> dict:
@@ -45,6 +48,7 @@ class FakeVast:
         self.user = {"id": 1, "email": "ada@example.com", "credit": 25.0}
         self.ssh_keys: dict[int, list[str]] = {}
         self.slow_seconds = 1.0
+        self.start_polls = 0
         self._next = 5000
         self.lock = threading.Lock()
 
@@ -93,6 +97,8 @@ class FakeVast:
                 state = (body or {}).get("state")
                 inst["intended_status"] = inst["cur_state"] = state
                 inst["actual_status"] = "running" if state == "running" else "exited"
+                if state == "running" and self.start_polls:
+                    inst.update(actual_status="exited", waits=self.start_polls, status_msg=NO_ROOM)
                 return 200, {"success": True}
             if method == "DELETE":
                 del self.instances[iid]
@@ -131,11 +137,17 @@ class FakeVast:
 
     def _advance(self, inst: dict) -> None:
         inst["polls"] += 1
+        if inst.get("waits"):
+            inst["waits"] -= 1
+            if not inst["waits"]:
+                inst.update(actual_status="running", status_msg="")
         if inst["actual_status"] != "loading":
             return
         script = self.boot.get(inst["offer_id"], 1)
-        if script == "boot_error":
+        if script in ("boot_error", "stale_error"):
             inst["status_msg"] = "Error response from daemon: failed to set up container networking"
+            if script == "stale_error":
+                inst["actual_status"] = "running"
         elif script == "exits":
             inst["actual_status"] = "exited"
         elif script != "never" and inst["polls"] >= script:

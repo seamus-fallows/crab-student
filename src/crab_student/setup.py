@@ -38,7 +38,13 @@ ASK = [
     f"Bash(crab-student {c}:*)"
     for c in ("approve", "decline", "delete", "config", "init", "secret set", "secret delete")
 ]
-_OURS = re.compile(r"^Bash\(crab-student[ :)]")
+# Claude Code may not raise the limits by editing crab-student's files instead of asking.
+DENY = ["Edit(~/.crab-student/**)", "Write(~/.crab-student/**)"]
+_OURS = re.compile(r"^(Bash\(crab-student[ :)]|(Edit|Write)\(~/\.crab-student/)")
+NOT_A_TERMINAL = (
+    "this is not an interactive terminal. Run it in PowerShell, Windows Terminal, or macOS/Linux's terminal "
+    "(in Git Bash's own window, put winpty in front)."
+)
 
 
 def interactive() -> bool:
@@ -47,7 +53,7 @@ def interactive() -> bool:
 
 def _ask_secret(prompt: str) -> str:
     if not interactive():
-        raise core.CrabError("init needs to ask you something: run crab-student init in a terminal.", 2)
+        raise core.CrabError(f"init needs to ask you something, but {NOT_A_TERMINAL}", 2)
     return getpass.getpass(prompt).strip()
 
 
@@ -130,21 +136,7 @@ def _ssh_step() -> bool:
     key = core.ssh_dir() / "id_ed25519"
     made = not key.exists()
     if made:
-        key.parent.mkdir(parents=True, exist_ok=True)
-        core.run(
-            [
-                core.tool("ssh-keygen") or "ssh-keygen",
-                "-q",
-                "-t",
-                "ed25519",
-                "-N",
-                "",
-                "-C",
-                "crab-student",
-                "-f",
-                str(key),
-            ]
-        )
+        core.keygen(key, "crab-student")
     github.known_hosts_file().write_text(github.HOST_KEY + "\n", encoding="utf-8")
     added = ensure_ssh_include()
     note = " (and added the Include line to ~/.ssh/config)" if added else ""
@@ -217,7 +209,7 @@ def install_claude_files() -> None:
         )
         return
     perms = settings.setdefault("permissions", {})
-    for kind, ours in (("allow", ALLOW), ("ask", ASK)):
+    for kind, ours in (("allow", ALLOW), ("ask", ASK), ("deny", DENY)):
         kept = [r for r in perms.get(kind) or [] if not _OURS.match(r)]
         perms[kind] = kept + ours
     core.write_json(path, settings)

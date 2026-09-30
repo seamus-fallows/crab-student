@@ -114,7 +114,7 @@ def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_va
         cpu_offer(6, machine_id=40, dph_total=0.50),  # a third
     ]
     p = offers.plan(Req(hours=1), cfg())
-    assert (p.primary["id"], ids(p.fallbacks), p.considered) == (1, [3, 5], 6)
+    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5], 6)
     fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.51)]
     assert offers.plan(Req(hours=1), cfg()).fallbacks == []  # over 1.25x
 

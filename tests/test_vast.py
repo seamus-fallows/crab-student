@@ -102,6 +102,17 @@ def test_a_rent_whose_outcome_is_unknown_is_never_retried(fake_vast, monkeypatch
         time.sleep(fake_vast.slow_seconds)  # (the fake's late reply fails now, not during another test)
 
 
+def test_a_garbled_rent_success_is_unknown_but_success_false_is_a_refusal(fake_vast, monkeypatch):
+    answer_next(fake_vast, 1, 200, {"success": False, "msg": "offer is no longer available"})
+    with pytest.raises(vast.VastError):
+        vast.rent(7, {"label": LABEL})
+    real_send = vast._send  # (Vast rents, but its reply arrives garbled)
+    monkeypatch.setattr(vast, "_send", lambda *a: (real_send(*a)[0], b"<html>Bad Gateway</html>"))
+    with pytest.raises(vast.RentUnknown):
+        vast.rent(7, {"label": LABEL})
+    assert len(fake_vast.calls("PUT", "/api/v0/asks/")) == 2  # (one each: never retried)
+
+
 @pytest.mark.parametrize(("outcome", "status"), [("taken", 400), ("no_credit", 402)])
 def test_a_refused_rent_is_a_vast_error(fake_vast, outcome, status):
     fake_vast.rent_outcome[7] = outcome

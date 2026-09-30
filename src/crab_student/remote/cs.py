@@ -26,6 +26,8 @@ CLAUDE = ROOT / ".local" / "bin" / "claude"
 TICK = float(os.environ.get("CS_TICK_SECONDS", "60"))
 PY = sys.executable or "python3"
 CPU_BUSY_CORES, GRACE = 0.25, 300
+QUIET_MINUTES = 20  # a "working" worker silent this long gets a check-in (longer than its longest sleep)
+DONE_MINUTES = 15  # a finished worker's machine stops after this long without activity
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
 STEPS = ("environment", "repository", "worker settings", "Claude Code", "starting the worker")
@@ -51,6 +53,10 @@ NUDGE = (
 WARN = (
     "crab-student: about 10 minutes of machine time are left before the time limit ({limit}). Commit and push "
     "your work and bring REPORT.md up to date now. The machine will stop itself."
+)
+CHECK_IN = (
+    "crab-student: you have been quiet for {minutes} minutes while your status says working. Check on your "
+    "running jobs and carry on with the task; if you are finished, complete the report and run crab-status done."
 )
 TMUX_CONF = (
     'set -g mouse on\nset -g history-limit 50000\nset -sg escape-time 10\nset -g default-terminal "screen-256color"\n'
@@ -176,6 +182,9 @@ def report_path(c: dict) -> str:
 
 def cmd_setup() -> int:
     c, jobs = cfg(), {}
+    if (D / "setup-done").exists():  # (a launch that was cut off after setup: the worker may be at work)
+        spawn_watchdog()
+        return out({"ok": True, "resumed": True})
     steps = (setup_environment, setup_repository, setup_settings, setup_claude, setup_start)
     for i, step in enumerate(steps, 1):
         label = STEPS[i - 1]
@@ -288,6 +297,10 @@ def setup_claude(c: dict, jobs: dict) -> None:
 
 
 def setup_start(c: dict, jobs: dict) -> None:
+    if not vast_credentials().get(
+        "CONTAINER_API_KEY"
+    ):  # (then neither the idle stop nor the limit would work)
+        raise RuntimeError("this machine cannot stop itself: Vast gave it no CONTAINER_API_KEY")
     write(D / "setup-done", "", 0o600)
     spawn_watchdog()
     sid, deadline = session_id(c), time.time() + 90
@@ -409,6 +422,8 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
     cpu_busy = (
         cpu is not None and st["cpu_seconds"] is not None and cpu - st["cpu_seconds"] >= CPU_BUSY_CORES * dt
     )
+    if size != st["transcript_bytes"]:
+        st["last_talk"], st["talk_nudged"] = now, False
     if size != st["transcript_bytes"] or cpu_busy or probe.gpu_busy():
         st["last_activity"], st["nudged_at"] = now, None
     st["transcript_bytes"], st["cpu_seconds"] = size, cpu
@@ -420,6 +435,11 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
     if state == "needs-you" and idle >= c["idle_minutes"] * 30 and st["nudged_at"] is None:
         actions.append("nudge")
         st["nudged_at"] = now
+    # A worker that says "working" but has not said a word for a while has likely ended its turn with a
+    # job still running (and nothing wakes an interactive session): remind it once per quiet stretch.
+    if state == "working" and now - st["last_talk"] >= QUIET_MINUTES * 60 and not st["talk_nudged"]:
+        actions.append("check-in")
+        st["talk_nudged"] = True
     if st["used_seconds"] < limit - 600:
         st["warned_limit"] = False  # (re-armed after an extend)
     elif not st["warned_limit"]:
@@ -427,6 +447,8 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
         st["warned_limit"] = True
     if st["used_seconds"] >= limit and now - st["boot"] >= GRACE:
         actions.append("stop:time-limit")
+    elif state == "done" and idle >= DONE_MINUTES * 60:
+        actions.append("stop:done")
     elif idle >= c["idle_minutes"] * 60:
         actions.append("stop:idle")
     return actions
@@ -446,6 +468,9 @@ def load_state() -> dict:
         "notified_state": None,
         "nudged_at": None,
         "warned_limit": False,
+        "last_talk": 0.0,
+        "talk_nudged": False,
+        "stop_sent_at": None,
     }
     return dict(defaults, **(st if isinstance(st, dict) else {}))
 
@@ -518,7 +543,7 @@ def cmd_watch() -> int:
     lock = _lock(D / "watch.lock")
     if not lock:
         return 0
-    vast_env = dict(container_env(), **read_env_file(D / "vast.env"))
+    vast_env = vast_credentials()
     for key in ("CONTAINER_API_KEY", "CONTAINER_ID"):  # (the tmux server and the worker never see them)
         os.environ.pop(key, None)
     st, probe, now = load_state(), Probe(), time.time()
@@ -527,8 +552,11 @@ def cmd_watch() -> int:
             boot=booted_at(),
             last_activity=now,
             last_tick=now,
+            last_talk=now,
+            talk_nudged=False,
             stopping=None,
             stop_reason=None,
+            stop_sent_at=None,
             nudged_at=None,
             transcript_bytes=probe.transcript_bytes(),
             cpu_seconds=probe.cpu_seconds(),
@@ -560,13 +588,12 @@ def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
         type_to_worker(NUDGE.format(minutes=c["idle_minutes"] // 2))
     elif action == "warn":
         type_to_worker(WARN.format(limit=fmt_hours(c["limit_hours"])))
+    elif action == "check-in":
+        type_to_worker(CHECK_IN.format(minutes=QUIET_MINUTES))
     elif action.startswith("stop:"):
         reason = action.split(":", 1)[1]
-        why = (
-            "idle for %d min" % c["idle_minutes"]
-            if reason == "idle"
-            else "time limit (%s) reached" % fmt_hours(c["limit_hours"])
-        )
+        why = {"idle": "idle for %d min" % c["idle_minutes"], "done": "finished %d min ago" % DONE_MINUTES,
+               "time-limit": "time limit (%s) reached" % fmt_hours(c["limit_hours"])}[reason]  # fmt: skip
         st.update(stopping=reason, stop_reason=reason)
         save_state(st)
         log("stopping: " + why)
@@ -575,18 +602,24 @@ def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
             log("saved: %s" % json.dumps(save(reason)))
         except Exception as e:
             log("save failed: %r" % (e,))
+        st["stop_sent_at"] = (
+            time.time()
+        )  # (after the save: from now on stopping it from outside loses nothing)
+        save_state(st)
         vast_stop(vast_env)
 
 
-def container_env() -> dict:
-    """Vast's variables as the container's first process has them (a fallback for vast.env)."""
+def vast_credentials() -> dict:
+    """CONTAINER_ID, CONTAINER_API_KEY (this machine's own Vast key) and CS_VAST_URL: from vast.env (written
+    by onstart), else as the container's first process has them."""
+    keys, first = ("CONTAINER_ID", "CONTAINER_API_KEY", "CS_VAST_URL"), {}
     try:
         with open("/proc/1/environ", "rb") as f:
             items = f.read().decode("utf-8", "replace").split(chr(0))
+        first = {k: v for k, _, v in (item.partition("=") for item in items) if k in keys}
     except OSError:
-        return {}
-    keys = ("CONTAINER_ID", "CONTAINER_API_KEY", "CS_VAST_URL")
-    return {k: v for k, _, v in (item.partition("=") for item in items) if k in keys}
+        pass
+    return dict(first, **read_env_file(D / "vast.env"))
 
 
 def vast_stop(vast_env: dict) -> None:
@@ -602,6 +635,7 @@ def vast_stop(vast_env: dict) -> None:
         headers={
             "Authorization": "Bearer " + vast_env.get("CONTAINER_API_KEY", ""),
             "Content-Type": "application/json",
+            "User-Agent": "crab-student",
         },
     )
     try:
@@ -633,6 +667,7 @@ def notify(c: dict, event: str, text: str) -> None:
         body = json.dumps(
             {"worker": c["name"], "event": event, "message": text.split(": ", 2)[-1], "text": text}
         ).encode()
+    headers["User-Agent"] = "crab-student"  # (some webhook hosts refuse Python's default)
     try:
         urllib.request.urlopen(
             urllib.request.Request(url, data=body, method="POST", headers=headers), timeout=10
@@ -741,20 +776,16 @@ def cmd_check() -> int:
 def cmd_status() -> int:
     c, st, now = cfg(), load_state(), time.time()
     spawn_watchdog()
-    running = (
-        run(["pgrep", "-f", "fake_claude.py" if c["fake_claude"] else "/.local/bin/claude"]).returncode == 0
-    )
     return out(
         {
             "name": c["name"],
             "worker": read_worker(),
-            "claude_running": running,
             "idle_seconds": int(now - st["last_activity"]) if st["last_activity"] else 0,
             "used_hours": round(st["used_seconds"] / 3600, 3),
             "limit_hours": c["limit_hours"],
             "stopping": st["stopping"],
             "stop_reason": st["stop_reason"],
-            "setup_done": (D / "setup-done").exists(),
+            "stop_sent_for": int(now - st["stop_sent_at"]) if st["stop_sent_at"] else None,
             "git": git_state(c),
         }
     )

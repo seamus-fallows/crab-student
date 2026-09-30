@@ -57,7 +57,7 @@ class Plan:
     fallbacks: list[dict]
     budget_usd: float
     auto_budget: bool
-    considered: int
+    ranked: list[dict]
 
     def offers(self) -> list[dict]:
         return [self.primary, *self.fallbacks]
@@ -141,7 +141,8 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
             and (not req.gpu_models or any(m.lower() in name for m in req.gpu_models))
         )
     end = _num(o, "end_date")
-    if ok and end and end < now + 3600 * (cfg["budget_factor"] * req.hours + 1):
+    hours = max(cfg["budget_factor"] * req.hours, cfg["min_budget_hours"])  # (the time limit it would get)
+    if ok and end and end < now + 3600 * (hours + 1):
         ok = False
     if ok and cfg["regions"]:
         ok = country(o) in allowed_countries(cfg["regions"])
@@ -220,7 +221,7 @@ def plan(req: Req, cfg: dict, budget: float | None = None) -> Plan:
     if budget is None:
         hours = max(cfg["budget_factor"] * req.hours, cfg["min_budget_hours"])
         budget = core.ceil_cents(ranked[0]["dph_total"] * hours)
-    return Plan(req, ranked[0], fallbacks(ranked), budget, auto, len(found))
+    return Plan(req, ranked[0], fallbacks(ranked), budget, auto, ranked)
 
 
 def summary(o: dict) -> str:

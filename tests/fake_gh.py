@@ -22,6 +22,7 @@ class FakeGitHub:
         self.root = root
         self.login = login
         self.admin: dict[str, bool] = {}
+        self.private: dict[str, bool] = {}
         self.keys: dict[str, dict[int, dict]] = {}
         self.calls: list[tuple[str, ...]] = []
         self._next_key = 100
@@ -82,7 +83,8 @@ class FakeGitHub:
             raise self._missing()
         tail = parts[3:]
         if not tail:
-            return json.dumps({"full_name": slug, "permissions": {"admin": self.admin.get(slug, True)}})
+            return json.dumps({"full_name": slug, "private": self.private.get(slug, True),
+                               "permissions": {"admin": self.admin.get(slug, True)}})  # fmt: skip
         if tail[:3] == ["git", "matching-refs", "heads"]:
             branch = "/".join(tail[3:])
             sha = self.branch_sha(slug, branch)

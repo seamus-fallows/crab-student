@@ -102,12 +102,13 @@ def settings_file(home: Path) -> Path:
 def test_install_merges_the_rules_into_the_users_settings(isolated):
     path = settings_file(isolated)
     allow = ["Bash(ls:*)", "Bash(crab-student dashboard:*)"]  # (the second: an older crab-student's rule)
-    perms = {"allow": allow, "ask": ["Bash(rm:*)"], "deny": ["Read(.env)"]}
+    deny = ["Read(.env)", "Write(~/.crab-student/config.json)"]  # (likewise)
+    perms = {"allow": allow, "ask": ["Bash(rm:*)"], "deny": deny}
     path.write_text(json.dumps({"model": "opus", "permissions": perms}))
     setup.install_claude_files()
     setup.install_claude_files()
     settings = json.loads(path.read_text())
-    assert settings["model"] == "opus" and settings["permissions"]["deny"] == ["Read(.env)"]
+    assert settings["model"] == "opus" and settings["permissions"]["deny"] == ["Read(.env)", *setup.DENY]
     assert settings["permissions"]["allow"] == ["Bash(ls:*)", *setup.ALLOW]
     assert settings["permissions"]["ask"] == ["Bash(rm:*)", *setup.ASK]
     skill = isolated / ".claude" / "skills" / "crab-student" / "SKILL.md"

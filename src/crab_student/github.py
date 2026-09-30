@@ -174,7 +174,25 @@ def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str]
     return sha, changed, untracked, local
 
 
+def check_workspace(slug: str, branch: str) -> bool:
+    """Before renting: whether the workspace repo exists; an existing one must be private and without the
+    branch."""
+    try:
+        info = api(f"repos/{slug}")
+    except GhError as e:
+        if e.not_found:
+            return False
+        raise
+    if not info.get("private"):
+        raise core.CrabError(f"{slug} is public, so crab-student will not put workers' work there. Make it "
+                             "private, or choose another name: crab-student config workspace_repo NAME")  # fmt: skip
+    if branch_sha(slug, branch):
+        raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
+    return True
+
+
 def ensure_workspace(user: str, name: str) -> str:
+    """The private workspace repo, created if missing (check_workspace vetted an existing one)."""
     slug = f"{user}/{name}"
     try:
         api(f"repos/{slug}")
@@ -240,6 +258,7 @@ def create_branch(repo: dict, key_file: Path) -> None:
                 repo["local_dir"],
                 "push",
                 "-q",
+                "--no-verify",  # (the user's own pre-push hooks are for their pushes, not this one)
                 git_url(repo["slug"]),
                 f"{repo['start_sha']}:refs/heads/{repo['branch']}",
             ],

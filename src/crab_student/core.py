@@ -363,6 +363,12 @@ def run(
     return proc
 
 
+def keygen(path: Path, comment: str) -> None:
+    """A new ed25519 key without a passphrase, made by ssh-keygen (so Windows gives it the ACLs OpenSSH wants)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run([tool("ssh-keygen") or "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(path)])
+
+
 def last_line(text: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     return lines[-1] if lines else "no output"

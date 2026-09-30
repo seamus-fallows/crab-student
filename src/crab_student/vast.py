@@ -141,6 +141,11 @@ def rent(offer_id: int, body: dict) -> int:
         raise RentUnknown(str(e) or type(e).__name__) from None
     if status >= 500:
         raise RentUnknown(f"HTTP {status}")
+    if 200 <= status < 300:
+        try:
+            json.loads(raw)
+        except ValueError:  # (a garbled success may well have rented)
+            raise RentUnknown(f"an unexpected reply: {raw[:200].decode('utf-8', 'replace')}") from None
     data = _parse(status, raw, f"rent offer {offer_id}")
     iid = data.get("new_contract")
     if not isinstance(iid, int) or iid <= 0:

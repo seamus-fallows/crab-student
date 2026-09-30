@@ -86,7 +86,8 @@ line for each entry of `warnings`.
 
 - Exit 3 (needs approval, or a user budget no machine fits): the same format; the result line says
   what to approve and why. Never approve.
-- Exit 2 with "already exists": pick another name once and launch again.
+- Exit 2 with "already exists": if you already ran `launch` with that name for this task, run
+  `crab-student start NAME --json` instead (it continues that launch); otherwise pick another name once.
 - Exit 4 (no machine fits): loosen the requirements once if the task allows it (fewer cores, less
   RAM, other GPU models), else report.
 - Exit 1 or 5: the brief, then `Launch failed: <the error>` with the suggestion it gives.

@@ -23,7 +23,7 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
             "instance_id": None, "dph": 0.40, "budget_usd": 2.0, "limit_hours": 5.0, "machine": "1x RTX 4090",
-            "ssh": None, "last_seen": None, "repo": repo, **fields}  # fmt: skip
+            "ssh": None, "last_seen": None, "repo": repo, "uploaded": phase == "ready", **fields}  # fmt: skip
 
 
 def worker(fake_vast, name: str = "job1", status: str = "running", **fields) -> int:
@@ -87,6 +87,8 @@ DISPLAY = [  # (record fields, Vast's instance, cs.py status, lock held) -> STAT
     ({}, BOOTING, None, False, "starting", "pulling image"),
     ({"last_seen": {"stop_reason": "idle", "message": "sweep 4/6"}}, STOPPED, None, False, "stopped", "sweep 4/6"),
     ({"pending": {"action": "start", "reason": "5 machines"}}, STOPPED, None, False, "stopped", "start"),
+    ({"last_seen": {"used_hours": 2.0}}, STOPPED, None, False, "stopped", "stopped itself"),  # (idle or done)
+    ({"last_seen": {"used_hours": 5.0}}, STOPPED, None, False, "stopped", "time limit"),
     ({"last_seen": {"message": "epoch 3/10"}}, RUNNING, None, False, "unreachable", "epoch 3/10"),
     ({}, RUNNING, status("working", stopping=True, stop_reason="idle"), False, "stopping", ""),
     ({}, RUNNING, status("needs-you", "Drop the old table?"), False, "needs you", "Drop the old table?"),
@@ -131,6 +133,15 @@ def test_views_use_live_status_and_remember_what_they_saw(fake_vast, machines):
     assert f"Port {port}" in machine.config_file().read_text()
 
 
+@pytest.mark.parametrize("sent_for, stopped", [(None, False), (120, False), (400, True)])
+def test_views_stop_a_machine_whose_own_stop_call_vast_did_not_take(sent_for, stopped, fake_vast, machines):
+    iid = worker(fake_vast)
+    machines.replies[("job1", "status")] = status("done", stopping="done", stop_sent_for=sent_for)
+    workers.views()
+    assert (fake_vast.instances[iid]["intended_status"] == "stopped") is stopped  # (the fake checks the key)
+    assert len(fake_vast.calls("PUT", "/")) == stopped
+
+
 # ---- stop ----------------------------------------------------------------------------------------
 
 
@@ -162,6 +173,18 @@ def test_stopping_a_stopped_worker_changes_nothing(fake_vast, machines):
     worker(fake_vast, status="exited")
     workers.stop("job1", out())
     assert not fake_vast.calls("PUT", "/") and not machines.calls
+
+
+@pytest.mark.parametrize("state", ["running", "exited"])
+def test_a_launch_cut_off_after_its_upload_may_hold_work(state, fake_vast, machines):
+    """Delete checks it (a stopped one cannot be checked: --force), and stop stops it."""
+    iid = worker(fake_vast, status=state, phase="setup", uploaded=True)
+    machines.replies[("job1", "check")] = {**CLEAN, "unpushed": 1}
+    machines.replies[("job1", "save")] = {"committed": 1, "pushed": True, "error": None}
+    fails(3, workers.delete, "job1", False, out())
+    assert iid in fake_vast.instances and core.record_path("job1").exists()
+    workers.stop("job1", out())
+    assert not vast.wants_running(fake_vast.instances[iid])
 
 
 # ---- delete --------------------------------------------------------------------------------------

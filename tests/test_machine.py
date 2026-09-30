@@ -168,7 +168,7 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
     [
         (b'{"ok": true}', 0, "ok"),
         (b"step 3/5 worker settings", 255, "unreachable"),  # (the connection dropped: the launch can go on)
-        (b"Traceback (most recent call last):", 1, 5),  # (setup died without a result)
+        (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
     ],
 )
 def test_the_upload_outcome(last, returncode, outcome, monkeypatch):

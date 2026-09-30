@@ -154,7 +154,7 @@ class FakeProbe:
 def watchdog(cs, **config):
     """The state right after a container start at T0, a quiet fake probe, and the config with changes."""
     st = cs.load_state()
-    st.update(boot=T0, last_activity=T0, last_tick=T0, cpu_seconds=0.0)
+    st.update(boot=T0, last_activity=T0, last_tick=T0, last_talk=T0, cpu_seconds=0.0)
     return st, FakeProbe(), dict(cs.cfg(), **config)
 
 
@@ -199,6 +199,29 @@ def test_the_nudge_comes_once_per_quiet_stretch_and_only_for_needs_you(cs, state
 
     seen = run_minutes(cs, st, probe, c, range(1, 100), answered_at_40)
     assert minutes_with(seen, "nudge") == nudges
+
+
+@pytest.mark.parametrize("state, check_ins", [("working", [20, 60]), ("needs-you", []), ("done", [])])
+def test_a_check_in_comes_once_per_silent_stretch_however_busy_the_machine(cs, state, check_ins):
+    st, probe, c = watchdog(cs, idle_minutes=600, limit_hours=20)
+    set_worker(cs, state)
+
+    def busy_and_a_word_at_40(minute):  # (a job keeps the CPU and the GPU busy; the worker says nothing)
+        probe.cpu, probe.gpu = probe.cpu + 60.0, True
+        if minute == 40:
+            probe.work(minute)
+
+    seen = run_minutes(cs, st, probe, c, range(1, 80), busy_and_a_word_at_40)
+    assert minutes_with(seen, "check-in") == check_ins
+
+
+@pytest.mark.parametrize("state, stop", [("done", ("stop:done", 15)), ("working", ("stop:idle", 60)),
+                                         ("needs-you", ("stop:idle", 60))])  # fmt: skip
+def test_a_finished_worker_stops_after_15_quiet_minutes_the_others_after_idle_minutes(cs, state, stop):
+    st, probe, c = watchdog(cs, idle_minutes=60, limit_hours=10)
+    set_worker(cs, state)
+    seen = run_minutes(cs, st, probe, c, range(1, 61))
+    assert next((a, m) for m, actions in seen.items() for a in actions if a.startswith("stop:")) == stop
 
 
 def test_the_warning_comes_once_before_the_limit_and_again_after_an_extend(cs):
@@ -253,6 +276,18 @@ def test_save_commits_and_pushes_what_is_safe_and_skips_big_untracked_files(cs, 
     assert git(bare, "ls-tree", "-r", "--name-only", "agent/job1").split() == ["README.md", "notes.txt"]
 
 
+@pytest.mark.parametrize("count, size, added", [(2060, 2, 2000), (11, 9_500_000, 10)])
+def test_save_adds_at_most_2000_untracked_files_or_100_mb(cs, repo, bare, sized, count, size, added):
+    """The rest are skipped, and at most 50 of them named. (2,000 paths are too long for one Windows
+    command line.)"""
+    for i in range(count):
+        sized(repo / "results" / f"result-{i:04}.bin", size)
+    res = cs.save("idle")
+    pushed = set(git(bare, "ls-tree", "-r", "--name-only", "agent/job1").split()) - {"README.md"}
+    assert res["error"] is None and res["committed"] == len(pushed) == added
+    assert len(res["skipped"]) == min(count - added, 50) and not pushed & set(res["skipped"])
+
+
 @pytest.mark.parametrize("situation", ["merge", "other branch"])
 def test_save_commits_nothing_during_a_merge_or_on_another_branch(cs, repo, bare, situation):
     if situation == "merge":  # (MERGE_HEAD names the commit being merged in)
@@ -303,13 +338,7 @@ def test_check_reports_outputs_large_untracked_files_and_unpushed_commits(cs, re
     assert res["unpushed"] == 2 and not res["pushed"]  # a.txt and the autosave of .gitignore
 
 
-def test_status_reports_the_documented_fields(cs, repo, monkeypatch, capsys):
-    real_run = cs.run
-
-    def run(args, **kw):  # (pgrep: "is Claude Code running?")
-        return subprocess.CompletedProcess(args, 0, "", "") if args[0] == "pgrep" else real_run(args, **kw)
-
-    monkeypatch.setattr(cs, "run", run)
+def test_status_reports_the_documented_fields(cs, repo, capsys):
     cs.save_state(dict(cs.load_state(), used_seconds=5400.0, last_activity=time.time() - 120))
     set_worker(cs, "working", "epoch 3/10")
     (repo / "a.txt").write_text("a\n")
@@ -318,10 +347,10 @@ def test_status_reports_the_documented_fields(cs, repo, monkeypatch, capsys):
     (repo / "README.md").write_text("changed\n")
     assert cs.cmd_status() == 0
     st = last_json(capsys)
-    assert set(st) == {"name", "worker", "claude_running", "idle_seconds", "used_hours", "limit_hours",
-                       "stopping", "stop_reason", "setup_done", "git"}  # fmt: skip
+    assert set(st) == {"name", "worker", "idle_seconds", "used_hours", "limit_hours", "stopping",
+                       "stop_reason", "stop_sent_for", "git"}  # fmt: skip
     assert st["git"] == {"branch": "agent/job1", "head": head(repo)[:7], "dirty": 1, "unpushed": 1}
-    assert st["worker"]["message"] == "epoch 3/10" and st["claude_running"] and not st["setup_done"]
+    assert st["worker"]["message"] == "epoch 3/10" and st["stop_sent_for"] is None
     assert (st["used_hours"], st["limit_hours"]) == (1.5, 2.0) and 120 <= st["idle_seconds"] < 180
 
 
@@ -502,6 +531,28 @@ def test_a_watchdog_stop_notifies_saves_and_asks_vast_to_stop(cs, repo, bare, si
     assert stop["headers"]["authorization"] == "Bearer key-42"
 
 
+def test_a_done_stop_says_finished_and_records_its_stop_call_only_once_saved(cs, repo, bare, sink, monkeypatch,
+                                                                            capsys):  # fmt: skip
+    real_save, seen_while_saving = cs.save, []
+
+    def save(reason):
+        seen_while_saving.append(cs.load_state()["stop_sent_at"])
+        return real_save(reason)
+
+    monkeypatch.setattr(cs, "save", save)
+    (repo / "README.md").write_text("changed\n")
+    c = dict(cs.cfg(), notify_url="http://example.invalid/hook")
+    vast_env = {"CS_VAST_URL": "http://vast.invalid", "CONTAINER_ID": "42", "CONTAINER_API_KEY": "key-42"}
+    cs.perform("stop:done", cs.load_state(), c, vast_env)
+    note, stop = sink
+    payload = json.loads(note["body"])
+    assert payload["event"] == "stopped" and "finished" in payload["message"]
+    assert seen_while_saving == [None] and head(bare, "agent/job1") == head(repo) and stop["method"] == "PUT"
+    assert cs.cmd_status() == 0
+    st = last_json(capsys)
+    assert st["stop_reason"] == "done" and 0 <= st["stop_sent_for"] < 60
+
+
 # ---- Claude Code's environment and command line --------------------------------------------------
 
 
@@ -600,6 +651,23 @@ def test_setup_repository_clones_the_branch_once_and_configures_it(cs, bare):
     (repo / "work.txt").write_text("not lost\n")
     cs.setup_repository(dict(c, repo_url=str(bare.parent / "gone.git")), {})  # a later start: no new clone
     assert (repo / "work.txt").exists()
+
+
+def test_setup_where_it_was_done_before_only_restarts_the_watchdog(cs, monkeypatch, capsys):
+    (cs.D / "setup-done").write_text("")
+    ran = []
+    for step in ("setup_environment", "setup_repository", "setup_settings", "setup_claude", "setup_start"):
+        monkeypatch.setattr(cs, step, lambda c, jobs, step=step: ran.append(step))
+    monkeypatch.setattr(cs, "spawn_watchdog", lambda: ran.append("watchdog"))
+    assert cs.cmd_setup() == 0 and last_json(capsys) == {"ok": True, "resumed": True} and ran == ["watchdog"]
+
+
+def test_setup_refuses_a_machine_vast_gave_no_key_to_stop_itself(cs):
+    (cs.D / "vast.env").write_text("export CONTAINER_ID=42\nexport CONTAINER_API_KEY='unbalanced\n")
+    assert cs.read_env_file(cs.D / "vast.env") == {"CONTAINER_ID": "42"}  # (the broken line is skipped)
+    with pytest.raises(RuntimeError):
+        cs.setup_start(cs.cfg(), {})
+    assert not (cs.D / "setup-done").exists()  # (so no watchdog, and no later setup takes it as done)
 
 
 # ---- the fake Claude and the watchdog process ----------------------------------------------------

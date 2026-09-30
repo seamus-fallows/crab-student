@@ -91,6 +91,9 @@ crab-student report NAME     # its REPORT.md
 crab-student pull NAME       # fetch its branch into your repo (your checkout is not touched)
 ```
 
+(`pull` for a `--no-repo` worker uses `~/crab-student-work`, cloning it the first time, unless you give
+`--repo PATH`.)
+
 Each worker writes `agent-runs/<name>/REPORT.md` on its branch: a summary, results with evidence,
 what it did, the decisions it made without you, the files it left on the machine, and caveats.
 
@@ -118,16 +121,19 @@ branch stays on GitHub.
   warning to the worker).
 - **Idle stop.** The machine stops itself after an hour (`idle_minutes`) with nothing happening: no
   CPU or GPU work and no progress in the conversation. An open but unused session does not keep it up.
+  A worker that has finished stops 15 minutes after it is done (`start` brings it back, with its
+  conversation). A worker that goes quiet mid-task gets one reminder to check its jobs and carry on.
 - **Save before stopping.** Every stop commits and pushes what can safely be saved first.
 - **Dead-man switch.** If crab-student's own machinery on the machine never starts or dies, the
-  machine still stops itself within about 45 minutes.
+  machine still stops itself within about 45 minutes. A machine without a key to stop itself is refused
+  at setup, and one whose stop call Vast ignores is stopped by the next `list` or `status`.
 - **Approval.** A launch with a budget over `auto_approve_usd` ($50), or beyond `max_running_machines`
   (5), does not rent: it waits for `crab-student approve NAME`, which your Claude Code only runs with
   your OK.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
   a rent request whose outcome is unknown (so you never pay twice).
-- **Nothing is destroyed automatically** once a worker has started: only machines that failed before
-  they received anything.
+- **Nothing is destroyed automatically** once a worker has run on it: crab-student destroys a machine
+  by itself only when it failed to boot or its first setup failed.
 - **GitHub access** is one deploy key per worker, for its one repo, removed on delete. A deploy key
   can technically push to any branch of that repo, so crab-student's git hooks keep the worker on
   `agent/<name>`; for extra safety, protect your `main` branch on GitHub (deploy keys obey it).

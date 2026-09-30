@@ -42,7 +42,8 @@ it is cut off, run `crab-student start NAME --json`, which continues it. If they
 
 Summarize the output in plain words; do not paste tables unless asked. A state of `needs you` means
 the worker asked a question: show it, and pass the answer on with `send` (or the user can type to the
-worker directly with `open`).
+worker directly with `open`). A finished worker's machine stops itself after 15 quiet minutes; for a
+follow-up, `start` it (its conversation resumes), then `send`.
 
 ## Watching
 

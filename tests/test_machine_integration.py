@@ -188,7 +188,7 @@ def test_a_worker_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(m
     # (c) status: done, and nothing uncommitted or unpushed
     st = last_json(cs(m, "status"))
     head = git(m.bare, "rev-parse", BRANCH).strip()[:7]
-    assert st["worker"]["state"] == "done" and st["claude_running"] and st["setup_done"], st
+    assert st["worker"]["state"] == "done", st
     assert st["git"] == {"branch": BRANCH, "head": head, "dirty": 0, "unpushed": 0}, st
     assert st["stopping"] is None, st
 

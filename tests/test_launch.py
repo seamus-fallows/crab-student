@@ -238,6 +238,16 @@ def test_a_machine_that_does_not_boot_is_destroyed_and_a_backup_rented(boot, fak
     assert [f["id"] for f in rec["failed_offers"]] == [1]
 
 
+def test_a_running_machine_with_an_old_error_in_its_status_is_kept(fake_vast, monkeypatch):
+    fake_vast.boot[1] = "stale_error"
+    answers = iter([False, False])  # (ssh answers from the third poll)
+    monkeypatch.setattr(machine, "reachable", lambda name: next(answers, True))
+    go(args())
+    rec = core.load("job1")
+    assert rec["phase"] == "ready" and fake_vast.instances[rec["instance_id"]]["offer_id"] == 1
+    assert len(rents(fake_vast)) == 1 and not fake_vast.calls("DELETE", "/")
+
+
 def test_when_every_offer_fails_the_launch_fails_with_exit_4(fake_vast):
     fake_vast.rent_outcome[1] = "taken"
     fake_vast.boot[2] = "exits"
@@ -306,6 +316,19 @@ def test_an_interrupted_launch_is_continued_by_start(where, fake_vast, machines,
     assert "job1" in machines.uploads
 
 
+def test_start_restarts_the_stopped_machine_of_a_launch_cut_off_during_setup(fake_vast, machines):
+    """The worker may be at work there: its machine is started again and kept, and setup runs again."""
+    machines.setup_result = machine.Unreachable("the upload and setup on job1 did not finish")
+    fails(1, go, args())
+    machines.setup_result, machines.uploads = None, {}
+    stop_machine(fake_vast)  # (the dead-man switch or the watchdog stopped it meanwhile)
+    fake_vast.start_polls = 3  # (it reads "exited", with an error, until its host has room)
+    iid = core.load("job1")["instance_id"]
+    assert launch.start("job1", out())["state"] == "working"
+    assert core.load("job1")["phase"] == "ready" and len(starts(fake_vast)) == 1 and machine_runs(fake_vast)
+    assert list(fake_vast.instances) == [iid] and "job1" in machines.uploads
+
+
 def test_a_failed_setup_destroys_the_machine_and_start_retries_with_fresh_offers(fake_vast, machines):
     machines.setup_result = core.CrabError("setup failed at step 4 (Claude Code): the token was refused", 5)
     fails(5, go, args())
@@ -345,6 +368,18 @@ def test_refused_launches_rent_nothing(case, code, fake_vast, fake_github):
     assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)
 
 
+def test_a_name_another_launch_takes_while_this_one_plans_rents_nothing(fake_vast, fake_github, monkeypatch):
+    real_plan, other = offers.plan, {"name": "job1", "phase": "pending"}
+
+    def plan(*a):
+        core.save(other)  # (the other launch passes the gate first)
+        return real_plan(*a)
+
+    monkeypatch.setattr(offers, "plan", plan)
+    fails(2, go, args())
+    assert core.load("job1") == other and not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)
+
+
 @pytest.mark.parametrize("gpus,host,disabled", [(0, offer, True), (1, offer, False), (0, cpu_offer, False)])
 def test_nvidia_disable_require_only_for_a_cpu_task_on_a_gpu_host(gpus, host, disabled, fake_vast):
     fake_vast.offers = [host(1)]
@@ -359,7 +394,7 @@ def test_nvidia_disable_require_only_for_a_cpu_task_on_a_gpu_host(gpus, host, di
 def test_extend_pushes_the_new_limit_to_a_running_machine(machines):
     go(args())
     res, rec = launch.extend("job1", 2), core.load("job1")
-    assert res["exit_code"] == 0 and rec["limit_pushed"]
+    assert res["exit_code"] == 0
     assert (rec["budget_usd"], rec["limit_hours"]) == (1.2, 4.0)
     assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
 
@@ -368,10 +403,10 @@ def test_extend_of_a_stopped_worker_is_pushed_by_the_next_start(fake_vast, machi
     go(args())
     stop_machine(fake_vast)
     launch.extend("job1", 2)
-    assert not core.load("job1")["limit_pushed"] and not machines.calls
+    assert not machines.calls
     res = launch.start("job1", out())
     assert res["state"] == "working" and res.keys() >= RESULT_KEYS and len(starts(fake_vast)) == 1
-    assert core.load("job1")["limit_pushed"] and machines.calls == [("job1", ["set-limit", "4.0"], None)]
+    assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
 
 
 def test_extend_over_auto_approve_waits_for_approval(machines):
@@ -393,6 +428,17 @@ def test_start_refuses_once_the_time_limit_is_used_up(fake_vast):
     core.save(rec)
     fails(3, launch.start, "job1", out())
     assert not starts(fake_vast)
+
+
+def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(fake_vast, machines):
+    go(args())
+    stop_machine(fake_vast)
+    rec = core.load("job1")
+    rec["last_seen"] = {"used_hours": 0.5, "stop_reason": "user"}
+    core.save(rec)
+    fake_vast.start_polls = 3  # (it reads "exited", with an error, until its host has room)
+    assert launch.start("job1", out())["state"] == "working" and machine_runs(fake_vast)
+    assert core.load("job1")["last_seen"]["stop_reason"] is None and not fake_vast.calls("DELETE", "/")
 
 
 @pytest.mark.parametrize("then", ["approve", "start again"])

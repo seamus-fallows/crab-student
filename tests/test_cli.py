@@ -100,7 +100,9 @@ def test_failures_go_to_stderr_with_their_exit_code(exc, code, monkeypatch, caps
 @pytest.mark.parametrize(
     "argv",
     ["", "launch", "frobnicate", "extend job1 lots", "open", "open job1 --all", "launch job1 --hours 0",
-     "launch job1 --hours 1 --repo . --no-repo"],
+     "launch job1 --hours 1 --repo . --no-repo", "launch job1 --hours nan", "offers --hours inf",
+     "launch job1 --hours 1 --budget -1", "offers --budget inf", "offers --count 0",
+     "launch job1 --hours 1 --brief-file no-such-brief.md"],
 )  # fmt: skip
 def test_usage_mistakes_exit_2(argv, launched, capsys):
     assert exit_code(argv.split()) == 2 and not launched
@@ -163,14 +165,16 @@ def test_a_result_that_needs_approval_exits_3(patched, monkeypatch, capsys):
     assert rc == 3 and json.loads(out)["needs_approval"]
 
 
-def test_all_output_is_ascii(patched, monkeypatch, capsys):
-    monkeypatch.setattr(workers, "report", lambda name: "# Résumé\nloss 0.41 ✓\n")
+def test_all_output_is_ascii_but_the_workers_report(patched, monkeypatch, capsys):
     monkeypatch.setattr(workers, "views", lambda: [view(message="naïve ✓")])
     monkeypatch.setattr(workers, "view", lambda name: view(message="naïve ✓"))
-    for argv in ("report job1", "list", "list --json", "status job1", "status job1 --json"):
+    for argv in ("list", "list --json", "status job1", "status job1 --json"):
         assert cli.main(argv.split()) == 0
     out, err = capsys.readouterr()
-    assert out.isascii() and err.isascii() and "R?sum?" in out
+    assert out.isascii() and err.isascii()
+    monkeypatch.setattr(workers, "report", lambda name: "# Résumé\nloss 0.41\n")  # (the worker's own words)
+    assert cli.main(["report", "job1"]) == 0
+    assert "Résumé" in capsys.readouterr().out
 
 
 def test_config_lists_gets_sets_and_resets(capsys):

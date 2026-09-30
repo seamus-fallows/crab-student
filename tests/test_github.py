@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,31 @@ def test_the_workspace_is_created_once_and_branched_through_the_api(fake_github,
     repo = {"workspace": True, "slug": slug, "branch": "agent/w1", "start_sha": head}
     github.create_branch(repo, tmp_path / "w1.key")
     assert fake_github.branch_sha(slug, "agent/w1") == head
+
+
+def test_an_existing_public_workspace_is_refused_before_anything_is_rented(fake_github):
+    assert github.check_workspace("ada/crab-student-work", "agent/w1") is False  # (created after the rent)
+    fake_github.create_repo("ada/crab-student-work")
+    assert github.check_workspace("ada/crab-student-work", "agent/w1") is True
+    fake_github.private["ada/crab-student-work"] = False
+    assert (
+        "ada/crab-student-work" in error(github.check_workspace, "ada/crab-student-work", "agent/w1").message
+    )
+    assert not any("user/repos" in call for call in fake_github.calls)
+
+
+def test_create_branch_skips_the_users_own_pre_push_hook(user_repo, fake_github, tmp_path):
+    hook = user_repo / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 1\n", newline="\n")
+    hook.chmod(0o755)
+    probe = subprocess.run(["git", "-C", str(user_repo), "push", "-q", "origin", "HEAD:refs/heads/probe"],
+                           capture_output=True)  # fmt: skip
+    if probe.returncode == 0:
+        pytest.skip("git does not run hooks here")
+    head = git(user_repo, "rev-parse", "HEAD").strip()
+    repo = {"workspace": False, "slug": "ada/proj", "branch": "agent/t1", "start_sha": head}
+    github.create_branch({**repo, "local_dir": str(user_repo)}, tmp_path / "t1.key")
+    assert fake_github.branch_sha("ada/proj", "agent/t1") == head
 
 
 def test_deploy_keys(fake_github):

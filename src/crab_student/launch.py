@@ -85,7 +85,7 @@ class Progress:
         if self.tty and os.name == "nt":
             os.system("")  # (turns on the escape codes that rewrite the status line)
         self.shown: str | None = None
-        self.t0 = time.monotonic()
+        self.t0 = self.printed = time.monotonic()
 
     def elapsed(self) -> str:
         s = round(time.monotonic() - self.t0)
@@ -98,14 +98,17 @@ class Progress:
         print(core.ascii_text(text), file=self.stream, flush=True)
 
     def status(self, text: str) -> None:
-        """One changing line: rewritten in place (with the time so far) on a terminal, else printed when
-        it changes."""
+        """One changing line: rewritten in place (with the time so far) on a terminal; elsewhere printed when
+        its first part changes, and a detail change at most every 15 s (an image pull reports often)."""
         text = core.ascii_text(text)
         if self.tty:
             self.stream.write(f"\r\033[K{text} ({self.elapsed()})")
             self.stream.flush()
         elif text != self.shown:
-            print(f"{text} ({self.elapsed()})", file=self.stream, flush=True)
+            new_part = text.split(" - ")[0] != (self.shown or "").split(" - ")[0]
+            if new_part or time.monotonic() - self.printed >= 15:
+                print(f"{text} ({self.elapsed()})", file=self.stream, flush=True)
+                self.printed = time.monotonic()
         self.shown = text
 
 
@@ -170,6 +173,8 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
         }
         return result(rec, "dry run", warnings, reason=reason)
     with core.locked("_gate", wait=120):  # (two launches must not both pass max_running_machines)
+        if core.record_path(a.name).exists():  # (another launch took the name meanwhile)
+            raise core.CrabError(f"a worker named {a.name} already exists. Pick another name.", 2)
         reason = gate(plan.budget_usd, cfg, running_count())
         rec = new_record(a, cfg, plan, repo, limit)
         rec["warnings"] = warnings  # (repeated when a launch waiting for approval goes ahead)
@@ -188,12 +193,7 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
     unreferenced object)."""
     if a.no_repo:
         slug = f"{github.login()}/{cfg['workspace_repo']}"
-        try:
-            if github.branch_sha(slug, branch):
-                raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
-        except github.GhError as e:
-            if not e.not_found:  # (a workspace repo that does not exist yet is created after the rent)
-                raise
+        github.check_workspace(slug, branch)  # (a repo that does not exist yet is created after the rent)
         repo = {
             "slug": slug,
             "workspace": True,
@@ -252,7 +252,6 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, limit: f
         "budget_usd": plan.budget_usd,
         "auto_budget": plan.auto_budget,
         "limit_hours": limit,
-        "limit_pushed": True,
         "model": cfg["model"] if a.model is None else a.model,
         "fake_claude": a.fake_claude,
         "secrets": a.secrets,
@@ -314,6 +313,8 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
         elif rec["phase"] == "booting" and (why := wait_boot(rec, out, rec["rent"]["at"] + BOOT_TIMEOUT)):
             discard(rec, why, out)
             rent_loop(rec, out)
+        if rec["phase"] == "setup":
+            resume_machine(rec, out)
         if rec["phase"] in ("booting", "setup"):
             prepare_repo(rec, out)
             setup_machine(rec, out)
@@ -322,10 +323,32 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
         return result(rec, "working", list(warnings))
 
 
+def resume_machine(rec: dict, out: Progress) -> None:
+    """A launch cut off during setup: its machine is kept (the worker may already be at work), and may have
+    stopped since; start it again (through the gate) and wait for it."""
+    name, inst = rec["name"], vast.instance(rec["instance_id"])
+    if inst is None:
+        rec.update(phase="failed", error="the machine no longer exists on Vast", instance_id=None, ssh=None)
+        core.save(rec)
+        raise core.CrabError(
+            f"{name}'s machine no longer exists on Vast. Try again: crab-student start {name}"
+        )
+    if not vast.running(inst):
+        with core.locked("_gate", wait=120):
+            if reason := gate(None, core.load_config(), running_count(exclude=name)):
+                raise core.CrabError(f"{name}'s machine needs starting again, but {reason}. Stop another worker "
+                                     "first, or raise max_running_machines.", 3)  # fmt: skip
+            vast.set_state(rec["instance_id"], "running")
+        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
+        core.save(rec)
+    if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
+        raise core.CrabError(
+            f"{name}'s machine did not come back up ({why}). Try again later: crab-student start {name}"
+        )
+
+
 def replan(rec: dict, out: Progress) -> None:
     """A failed launch tried again: fresh offers within its budget."""
-    if rec["instance_id"]:  # (a setup that failed, whose machine could not be destroyed then)
-        vast.destroy(rec["instance_id"])
     plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), rec["budget_usd"])
     rec.update(
         offers=[offers.kept(o) for o in plan.offers()],
@@ -448,8 +471,9 @@ def adopt(rec: dict, iid: int, offer: dict) -> None:
     machine.forget_host_key(rec["name"])
 
 
-def wait_boot(rec: dict, out: Progress, deadline: float) -> str | None:
-    """Wait until the machine runs and answers ssh: None, else why not."""
+def wait_boot(rec: dict, out: Progress, deadline: float, restarting: bool = False) -> str | None:
+    """Wait until the machine runs and answers ssh: None, else why not. A machine being started again
+    reads "exited" until its host has room, so only a new one fails on that (or on a boot error)."""
     key_added, errors = False, 0
     while True:
         inst = vast.instance(rec["instance_id"])
@@ -460,11 +484,6 @@ def wait_boot(rec: dict, out: Progress, deadline: float) -> str | None:
             " ".join(str(inst.get("status_msg") or "").split()),
         )
         out.status(f"Booting: {actual}{' - ' + msg[:80] if msg else ''}")
-        if actual in ("exited", "offline"):
-            return f"status {actual}: {msg}"
-        errors = errors + 1 if re.search(r"\b(error|failed)\b", msg, re.I) else 0
-        if errors >= 2:
-            return msg
         if actual == "running" and vast.address(inst):
             if machine.set_address(rec, inst):
                 core.save(rec)
@@ -475,6 +494,12 @@ def wait_boot(rec: dict, out: Progress, deadline: float) -> str | None:
             if machine.reachable(rec["name"]):
                 out.line(f"Booted: ssh answers ({out.elapsed()})")
                 return None
+        elif not restarting:
+            if actual in ("exited", "offline"):
+                return f"status {actual}: {msg}"
+            errors = errors + 1 if re.search(r"\b(error|failed)\b", msg, re.I) else 0
+            if errors >= 2:
+                return msg
         if time.time() > deadline:
             return f"not running after {BOOT_TIMEOUT // 60} minutes (last status: {actual}{': ' + msg if msg else ''})"
         time.sleep(POLL)
@@ -499,20 +524,7 @@ def prepare_repo(rec: dict, out: Progress) -> None:
     try:
         key = key_file(name)
         if not key.exists():
-            core.run(
-                [
-                    core.tool("ssh-keygen") or "ssh-keygen",
-                    "-q",
-                    "-t",
-                    "ed25519",
-                    "-N",
-                    "",
-                    "-C",
-                    f"crab-student {name}",
-                    "-f",
-                    str(key),
-                ]
-            )
+            core.keygen(key, f"crab-student {name}")
         if repo["workspace"] and not repo["start_sha"]:
             github.ensure_workspace(*repo["slug"].split("/"))
             repo["start_sha"] = github.default_head(repo["slug"])
@@ -596,7 +608,7 @@ def setup_machine(rec: dict, out: Progress) -> None:
             f"crab-student start {rec['name']}",
             5,
         ) from None
-    rec.update(phase="ready", limit_pushed=True)
+    rec["phase"] = "ready"
     core.save(rec)
 
 
@@ -674,26 +686,27 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
             return result(rec, "working", [])
         if ((rec.get("last_seen") or {}).get("used_hours") or 0) >= rec["limit_hours"]:
             raise _time_up(rec)
-        if check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
-            return _pend(rec, "start", reason)
-        vast.set_state(rec["instance_id"], "running")
+        with core.locked("_gate", wait=120):  # (a start and a launch must not both pass the machine limit)
+            if check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
+                return _pend(rec, "start", reason)
+            vast.set_state(rec["instance_id"], "running")
         if (rec.get("pending") or {}).get("action") == "start":
             rec["pending"] = None  # (the start that waited for approval is done)
-            core.save(rec)
+        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
+        core.save(rec)
         out.line(f"Starting {name}...")
-        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
+        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
             raise core.CrabError(
                 f"{name} did not come back up ({why}). Vast keeps trying: check again with "
                 f"crab-student status {name}, or stop it with crab-student stop {name}."
             )
         res = machine.remote(name, ["set-limit", str(rec["limit_hours"])])
-        rec["limit_pushed"] = True
         core.save(rec)
         machine.write_ssh_config()
         if res.get("used_hours", 0) >= rec["limit_hours"]:
             vast.set_state(rec["instance_id"], "stopped")
             # (remembered, so the next start refuses without booting the machine again)
-            seen = {"used_hours": res["used_hours"], "stop_reason": "time-limit", "at": core.now_iso()}
+            seen = {"used_hours": res["used_hours"], "stop_reason": "time-limit"}
             rec["last_seen"] = {**(rec.get("last_seen") or {}), **seen}
             core.save(rec)
             raise _time_up(rec)
@@ -713,14 +726,17 @@ def extend(name: str, hours: float, check_gate: bool = True) -> dict:
         budget = core.ceil_cents(rec["budget_usd"] + hours * rec["dph"])
         if check_gate and (reason := gate(budget, core.load_config(), None)):
             return _pend(rec, "extend", reason, hours=hours)
-        rec.update(budget_usd=budget, limit_hours=round(rec["limit_hours"] + hours, 2), limit_pushed=False)
+        rec.update(budget_usd=budget, limit_hours=round(rec["limit_hours"] + hours, 2))
         core.save(rec)
-        pushed = False
+        when = "when it starts again"
         if vast.running(vast.instance(rec["instance_id"])):
-            machine.remote(name, ["set-limit", str(rec["limit_hours"])])
-            rec["limit_pushed"] = pushed = True
-            core.save(rec)
-    when = "now" if pushed else "when it starts again"
+            try:
+                machine.remote(name, ["set-limit", str(rec["limit_hours"])])
+                when = "now"
+            except machine.Unreachable:
+                when = (
+                    "when it starts again (it could not be reached now, so it keeps its old limit until then)"
+                )
     return {
         **result(rec, "extended", []),
         "result_line": f"{name}: time limit is now {core.fmt_hours(rec['limit_hours'])} "

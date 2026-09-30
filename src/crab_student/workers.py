@@ -8,7 +8,8 @@ from dataclasses import dataclass
 
 from crab_student import core, github, launch, machine, vast
 
-STOP_REASONS = {"user": "stopped by you", "idle": "idle stop", "time-limit": "time limit"}
+STOP_REASONS = {"user": "stopped by you", "idle": "idle stop", "time-limit": "time limit", "done": "finished"}
+STOP_STUCK = 300  # a machine still running this long after asking Vast to stop it gets stopped from here
 
 
 @dataclass
@@ -54,6 +55,8 @@ def views(names: list[str] | None = None) -> list[View]:
     for rec in recs:
         inst = insts.get(rec.get("instance_id")) if insts else None
         st = statuses.get(rec["name"])
+        if st and (st.get("stop_sent_for") or 0) > STOP_STUCK:
+            vast.set_state(rec["instance_id"], "stopped")  # (Vast did not take the machine's own stop call)
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
@@ -72,7 +75,6 @@ def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
         if st:
             w = st.get("worker") or {}
             fresh["last_seen"] = {
-                "at": core.now_iso(),
                 "state": w.get("state"),
                 "message": w.get("message"),
                 "used_hours": st.get("used_hours"),
@@ -133,11 +135,12 @@ def display_state(
 
 
 def _stopped_itself(rec: dict, last: dict) -> str:
-    """Why a machine the user did not stop stopped (its watchdog's reason is on the stopped machine)."""
+    """Why a machine the user did not stop stopped, as far as can be told from here (the watchdog's own
+    reason stays on the stopped machine): the time limit, else it stopped itself (idle or finished)."""
     used = last.get("used_hours")
     if used is None:
         return ""
-    return "time limit" if used >= rec.get("limit_hours", 0) - 0.02 else "idle stop"
+    return "time limit" if used >= rec.get("limit_hours", 0) - 0.02 else "stopped itself"
 
 
 def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: str) -> View:
@@ -181,7 +184,7 @@ def stop(name: str, out: launch.Progress) -> dict:
                 f"{name} is waiting for approval and has no machine yet. To drop it: crab-student "
                 f"decline {name}"
             )
-        if rec["phase"] != "ready":
+        if not rec.get("uploaded"):
             raise core.CrabError(
                 f"{name} has not finished launching, so there is nothing to stop. To give up on it: "
                 f"crab-student delete {name}"
@@ -204,7 +207,7 @@ def stop(name: str, out: launch.Progress) -> dict:
             except core.CrabError as e:
                 out.line(f"Could not save first ({e.message}); the disk is kept, so nothing is lost.")
         vast.set_state(rec["instance_id"], "stopped")
-        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": "user", "at": core.now_iso()}
+        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": "user"}
         core.save(rec)
     return {
         "name": name,
@@ -259,7 +262,7 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                 "result_line": f"Deleted {name} (it was waiting for approval; nothing was rented).",
             }
         inst = _find_instance(rec)
-        if inst and rec["phase"] == "ready" and not force:  # (only a finished launch can hold work)
+        if inst and rec.get("uploaded") and not force:  # (a machine that received its files may hold work)
             if not vast.running(inst):
                 raise core.CrabError(
                     f"{name} is stopped, so crab-student cannot check it for unsaved work. Start it "

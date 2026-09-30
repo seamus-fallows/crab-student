@@ -61,7 +61,9 @@ def write_ssh_config() -> None:
                 "",
             ]
     config_file().parent.mkdir(parents=True, exist_ok=True)
-    config_file().write_text("\n".join(lines), encoding="utf-8")
+    tmp = config_file().with_name(f"config.{os.getpid()}.tmp")  # (several commands may rewrite it at once)
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(tmp, config_file())
 
 
 def set_address(rec: dict, inst: dict) -> bool:
@@ -151,8 +153,9 @@ def bundle(extra: dict[str, tuple[bytes, int]]) -> bytes:
     return buf.getvalue()
 
 
-def upload_and_setup(name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 600) -> None:
-    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come."""
+def upload_and_setup(name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600) -> None:
+    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come. Anything
+    but setup's own answer (a lost connection, a timeout) is Unreachable: the launch can continue."""
     cmd = [
         *ssh_cmd(name),
         "-o",
@@ -194,12 +197,8 @@ def upload_and_setup(name: str, data: bytes, on_line: Callable[[str], None], tim
         result = json.loads(last)
     except ValueError:
         stderr = b"".join(err).decode("utf-8", "replace")
-        if proc.returncode == 255:
-            raise Unreachable(
-                f"could not reach {name} over ssh for the upload ({core.last_line(stderr)})."
-            ) from None
-        raise core.CrabError(
-            f"setup on {name} ended unexpectedly: {core.last_line(stderr or last)}", 5
+        raise Unreachable(
+            f"the upload and setup on {name} did not finish ({core.last_line(stderr or last)})."
         ) from None
     if not result.get("ok"):
         raise core.CrabError(
@@ -295,17 +294,19 @@ def _tmux_all(names: list[str]) -> int:
         encoding="utf-8",
     )
     base = [tmux, "-L", "crab-student", "-f", str(conf)]
-    core.run([*base, "kill-session", "-t", "workers"], check=False)
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}  # (works from inside the user's own tmux too)
+    core.run([*base, "kill-session", "-t", "workers"], env=env, check=False)
     for i, name in enumerate(names):
         command = shlex.join([*ssh_cmd(name, tty=True), "crab-attach"])
         core.run(
             [*base, "new-session", "-d", "-s", "workers", command]
             if i == 0
-            else [*base, "split-window", "-t", "workers", command]
+            else [*base, "split-window", "-t", "workers", command],
+            env=env,
         )
-        core.run([*base, "select-pane", "-t", "workers", "-T", name])
-        core.run([*base, "select-layout", "-t", "workers", "tiled"])
-    return subprocess.call([*base, "attach", "-t", "workers"])
+        core.run([*base, "select-pane", "-t", "workers", "-T", name], env=env)
+        core.run([*base, "select-layout", "-t", "workers", "tiled"], env=env)
+    return subprocess.call([*base, "attach", "-t", "workers"], env=env)
 
 
 def open_vscode(rec: dict) -> int:

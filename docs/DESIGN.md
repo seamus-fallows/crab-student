@@ -1,5 +1,11 @@
 # crab-student: design
 
+> The original design, written from REQUIREMENTS.md before the code. The code and SPEC.md are current
+> where they differ: the worker's report is `agent-runs/<name>/REPORT.md` (not the repo root), rent labels
+> are `crab-student-<name>-<8 hex>`, the snapshot commit is built from a copy of the user's index, the
+> worker model defaults to Claude Code's own default, and the machine can also read its Vast key from
+> process 1's environment.
+
 This is the design for the requirements in `REQUIREMENTS.md`. It is meant to be built exactly as written.
 Where the requirements leave a choice, the choice is made here and listed with its reason in section 5.
 Section 9 lists the places where outside behaviour is uncertain and how the design limits the damage.

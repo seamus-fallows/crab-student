@@ -112,7 +112,7 @@ def test_ties_are_broken_the_same_way_every_time():
     assert ids(offers.rank(same, gpu=True)) == ids(offers.rank(same[::-1], gpu=True)) == [3, 5, 9]
 
 
-def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_vast):
+def test_fallbacks_are_up_to_four_other_machines_at_most_a_quarter_dearer(fake_vast):
     fake_vast.offers = [
         cpu_offer(1, machine_id=10, dph_total=0.40),
         cpu_offer(2, machine_id=10, dph_total=0.41),  # the pick's machine
@@ -120,9 +120,12 @@ def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_va
         cpu_offer(4, machine_id=20, dph_total=0.46),  # the first fallback's machine
         cpu_offer(5, machine_id=30, dph_total=0.49),
         cpu_offer(6, machine_id=40, dph_total=0.50),  # a third
+        cpu_offer(7, machine_id=50, dph_total=0.50),
+        cpu_offer(8, machine_id=60, dph_total=0.50),
+        cpu_offer(9, machine_id=70, dph_total=0.50),  # a fifth: one too many
     ]
     p = offers.plan(Req(hours=1), cfg())
-    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5], 6)
+    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5, 6, 7], 9)
     fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.51)]
     assert offers.plan(Req(hours=1), cfg()).fallbacks == []  # over 1.25x
 

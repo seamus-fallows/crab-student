@@ -411,7 +411,7 @@ def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
 
 
 def reserve_racers(plans: list[offers.Plan]) -> list[list[dict]]:
-    """Each agent's offers (as kept in its record) in the order it rents them: its pick, then up to two backups
+    """Each agent's offers (as kept in its record) in the order it rents them: its pick, then up to offers.MAX_BACKUPS backups
     that are no agent's pick. The first backup, which it races against its pick, is one no earlier agent races,
     so agents do not race each other for a machine; an agent left without one races its pick alone. (A later
     backup may be another agent's racer: renting a taken offer moves on to the next.)"""

@@ -12,6 +12,8 @@ from crab_student import core, vast
 # A host's lease must outlast twice the expected hours, and at least a day (plus an hour of margin).
 LEASE_FACTOR, MIN_LEASE_HOURS = 2.0, 24.0
 SIMILAR_PRICE = 1.20  # offers up to this factor over the cheapest count as the same price
+# Backups after the pick: two race at a time, so four leave room for two more rounds after the first pair.
+MAX_BACKUPS = 4
 REGIONS = {  # continent -> ISO country codes; `regions` entries are these names or 2-letter codes
     "north-america": {"US", "CA", "MX"},
     "south-america": {"AR", "BR", "CL", "CO", "PE", "UY"},
@@ -198,13 +200,17 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
 
 
 def fallbacks(ranked: list[dict]) -> list[dict]:
-    """Up to 2 backups after the pick: other machines (a boot failure is often the host's fault) at most
+    """Up to MAX_BACKUPS backups after the pick: other machines (a boot failure is often the host's fault) at most
     1.25x its price."""
     primary, picked = ranked[0], []
     seen = {primary.get("machine_id") or primary["id"]}
     for o in ranked[1:]:
         machine = o.get("machine_id") or o["id"]
-        if len(picked) < 2 and machine not in seen and o["dph_total"] <= 1.25 * primary["dph_total"]:
+        if (
+            len(picked) < MAX_BACKUPS
+            and machine not in seen
+            and o["dph_total"] <= 1.25 * primary["dph_total"]
+        ):
             picked.append(o)
             seen.add(machine)
     return picked

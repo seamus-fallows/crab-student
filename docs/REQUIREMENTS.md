@@ -176,8 +176,9 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
   disk size, minimum reliability, minimum download speed, `regions`, the mode, the Claude model,
   effort and fast mode for agents (empty: as the user's own Claude Code), the workspace repo,
   `notify_url`.
-- Remote Control for agents: not now (it refuses the long-lived token agents use; a decision is
-  pending).
+- No Remote Control for agents (it refuses the long-lived token they use, and a full login on a rented
+  machine is too much exposure). The user steers agents from their phone through their own session's
+  Remote Control and crab-student commands.
 - `--json` on the commands the launcher and scripts use; `launch --dry-run`.
 - A `--fake-claude` launch option that runs a stand-in for Claude Code, so the whole pipeline can be
   tested on a real machine without spending Claude usage.

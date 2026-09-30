@@ -191,6 +191,11 @@ no report until you hand it over.
 Optional phone or chat notifications: `crab-student config notify_url <url>` (ntfy.sh, a Slack or
 Discord webhook, or any URL that takes a JSON POST) for "needs you", "done", "failed" and "stopped".
 
+**From your phone.** Turn on [Remote Control](https://code.claude.com/docs/en/remote-control) for your
+own Claude Code session (`/remote-control`), then talk to it from the Claude app or claude.ai/code: it
+runs `list`, `status`, `report`, `send` and `stop` for you. Agents themselves can't use Remote Control:
+it refuses the long-lived token they sign in with.
+
 ## Stopping, starting, deleting
 
 ```

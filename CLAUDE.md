@@ -127,8 +127,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
   chosen.
 - The machine folder stays `/root/crab-student` (the onstart command and the dead-man switch name it);
   the agent reads its brief at `/root/BRIEF.md` and never needs the folder.
-- Remote Control is not implemented: it refuses the long-lived token agents use, and the user has yet to
-  decide what to do.
+- Agents don't use Remote Control: it refuses the long-lived token they sign in with, and a full login on
+  a rented machine is not worth the risk. The user steers agents from their phone through their own
+  Claude Code session's Remote Control, which runs crab-student commands (README).
 - `crab-student open` (without `--vscode`) is interactive: the user runs it in their own terminal, Claude
   never does. `open --vscode` only starts VS Code, so Claude may run it for an interactive agent.
 - `init` needs re-running after the skill or the permission rules change.

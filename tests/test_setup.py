@@ -55,6 +55,7 @@ def terminal(fake_vast, fake_github, monkeypatch) -> tuple[list[str], list[list[
     monkeypatch.setattr(setup.getpass, "getpass", ask)
     monkeypatch.setattr(core, "tool", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(core, "run", keygen)
+    monkeypatch.setattr(setup, "claude_version", lambda: setup.FORK_VERSION)
     return answers, keygens
 
 
@@ -113,8 +114,15 @@ def test_install_merges_the_rules_into_the_users_settings(isolated):
     assert settings["permissions"]["ask"] == ["Bash(rm:*)", *setup.ASK]
     skill = isolated / ".claude" / "skills" / "crab-student" / "SKILL.md"
     assert skill.read_text(encoding="utf-8") == (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
-    agent = isolated / ".claude" / setup.LAUNCHER_AGENT
-    assert agent.read_text(encoding="utf-8") == (setup.DATA / "launcher.md").read_text(encoding="utf-8")
+
+
+def test_install_removes_the_launcher_agent_of_older_versions(isolated):
+    old = isolated / ".claude" / setup.OLD_LAUNCHER_AGENT
+    old.parent.mkdir(parents=True)
+    old.write_text("an older launcher")
+    setup.install_claude_files()
+    assert not old.exists()
+    setup.install_claude_files()  # (nothing left to remove)
 
 
 def test_settings_that_are_not_json_are_left_alone(isolated):
@@ -147,6 +155,7 @@ def test_the_permission_rules():
                  "secret set HF_TOKEN", "secret delete HF_TOKEN"]  # fmt: skip
     launcher = ["guide launch", "offers --gpus 1", "list --json", "secret list", "launch job1 --hours 2",
                 "start job1 --json", "status job1 --json"]  # fmt: skip
+    assert not any("extend" in rule for rule in setup.ALLOW + setup.ASK)  # (there is no time limit)
     for command in ask_first:
         line = f"crab-student {command}"
         assert any(line.startswith(p) for p in ask), command
@@ -161,9 +170,10 @@ def test_the_skill_and_the_launch_guide():
     head = skill.split("---\n")
     assert head[0] == "" and re.search(r"^name: crab-student$", head[1], re.M)
     description = re.search(r"^description: (.+)$", head[1], re.M).group(1)
-    assert len(description) > 100 and len(skill.splitlines()) <= 120  # (the description says when to use it)
+    assert len(description) > 100 and len(skill) < 10000  # (the description says when to use it)
+    raw = (setup.DATA / "launch.md").read_text(encoding="utf-8")
     guide = setup.guide("launch")
-    assert guide == (setup.DATA / "launch.md").read_text(encoding="utf-8") and len(guide.splitlines()) <= 130
+    assert len(raw) < 12000 and "{{" not in guide
     assert skill.isascii() and guide.isascii()  # (printed as ASCII: nothing may be lost)
     with pytest.raises(core.CrabError) as e:
         setup.guide("dashboard")
@@ -184,9 +194,107 @@ def test_the_markdown_and_the_rules_name_only_real_commands_and_flags():
     assert set(re.findall(r"--[a-z][a-z-]+", skill)) <= every_flag
 
 
-def test_the_skill_starts_the_launcher_agent_that_init_installs():
-    agent = (setup.DATA / "launcher.md").read_text(encoding="utf-8")
-    name = re.search(r"^name: (.+)$", agent, re.M).group(1)
-    assert setup.LAUNCHER_AGENT.endswith(f"/{name}.md") and re.search(r"^tools: .*Bash", agent, re.M)
-    assert f'subagent_type: "{name}"' in (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
-    assert agent.isascii() and "crab-student guide launch" in agent
+def test_the_guide_names_the_approval_price_from_the_settings():
+    raw = (setup.DATA / "launch.md").read_text(encoding="utf-8")
+    assert "{{approve_above_usd_per_hour}}" in raw and "$5/hr" in setup.guide("launch")
+    core.set_config("approve_above_usd_per_hour", "7.5")
+    assert "$7.5/hr" in setup.guide("launch")
+
+
+def test_the_skill_starts_a_fork_that_follows_the_guide():
+    skill = (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
+    assert 'subagent_type: "fork"' in skill and "`crab-student guide launch`" in skill
+    assert not re.search(r"\$\d", skill)  # (the approval price is a setting, not a number in the text)
+    assert not (setup.DATA / "launcher.md").exists()
+
+
+# ---- the version check and VS Code -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "output, version",
+    [("2.1.285 (Claude Code)\n", (2, 1, 285)), ("claude 2.1.9", (2, 1, 9)), ("no version here", None)],
+)
+def test_claude_version_is_read_from_its_output(output, version, monkeypatch):
+    monkeypatch.setattr(core, "tool", lambda name: "/usr/bin/claude")
+    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=output))
+    assert setup.claude_version() == version
+
+
+def test_an_older_claude_code_is_warned_about(monkeypatch, capsys):
+    monkeypatch.setattr(setup, "claude_version", lambda: (2, 1, 100))
+    setup._claude_version_step()
+    assert "claude update" in capsys.readouterr().out
+    monkeypatch.setattr(setup, "claude_version", lambda: setup.FORK_VERSION)
+    setup._claude_version_step()
+    assert "Warning" not in capsys.readouterr().out
+
+
+@pytest.fixture
+def vscode(isolated, monkeypatch, capsys):
+    """VS Code's user settings in the temporary home; the test says what the user types (a list of answers)
+    and whether it is a terminal. Returns (settings path, answers)."""
+    path = setup.vscode_settings_file()
+    path.parent.mkdir(parents=True)
+    answers: list[str] = []
+
+    def ask(prompt: str = "") -> str:
+        assert answers, f"asked: {prompt}"
+        return answers.pop(0)
+
+    monkeypatch.setattr("builtins.input", ask)
+    monkeypatch.setattr(setup, "interactive", lambda: True)
+    return path, answers
+
+
+def extensions(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8")).get(setup.VSCODE_EXTENSIONS)
+
+
+def test_vscode_gets_the_claude_extension_on_machines_when_the_user_agrees(vscode):
+    path, answers = vscode
+    path.write_text(json.dumps({"editor.fontSize": 14}))
+    answers.append("")
+    setup._vscode_step()
+    assert extensions(path) == [setup.CLAUDE_EXTENSION]
+    assert json.loads(path.read_text())["editor.fontSize"] == 14
+    setup._vscode_step()  # (already there: nothing is asked)
+
+
+def test_vscode_extensions_the_user_already_lists_are_kept(vscode):
+    path, answers = vscode
+    path.write_text(json.dumps({setup.VSCODE_EXTENSIONS: ["ms-python.python"]}))
+    answers.append("y")
+    setup._vscode_step()
+    assert extensions(path) == ["ms-python.python", setup.CLAUDE_EXTENSION]
+
+
+def test_vscode_settings_are_created_when_there_are_none(vscode):
+    path, answers = vscode
+    answers.append("yes")
+    setup._vscode_step()
+    assert extensions(path) == [setup.CLAUDE_EXTENSION]
+
+
+@pytest.mark.parametrize("how", ["declined", "not a terminal", "with comments", "not a list"])
+def test_vscode_settings_are_left_alone_unless_the_edit_is_safe_and_agreed(how, vscode, monkeypatch, capsys):
+    path, answers = vscode
+    texts = {
+        "with comments": '{\n  // my settings\n  "editor.fontSize": 14,\n}\n',
+        "not a list": json.dumps({setup.VSCODE_EXTENSIONS: "anthropic.claude-code"}),
+    }
+    text = texts.get(how, "{}")
+    path.write_text(text)
+    if how == "declined":
+        answers.append("n")
+    if how == "not a terminal":
+        monkeypatch.setattr(setup, "interactive", lambda: False)
+    setup._vscode_step()
+    assert path.read_text() == text
+    assert setup.CLAUDE_EXTENSION in capsys.readouterr().out  # (it says what to add instead)
+
+
+def test_without_vscode_nothing_is_created(isolated, capsys):
+    setup._vscode_step()
+    assert not setup.vscode_settings_file().parent.exists()
+    assert capsys.readouterr().out.isascii()

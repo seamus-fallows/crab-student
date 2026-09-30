@@ -14,7 +14,7 @@ import pytest
 from fake_gh import FakeGitHub, git
 from fake_vast import FakeVast, serve
 
-from crab_student import core, github, launch, machine, vast
+from crab_student import agents, core, github, launch, machine, vast
 
 
 class MemoryKeyring(keyring.backend.KeyringBackend):
@@ -53,12 +53,21 @@ def isolated(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(vast, "DELAYS", (0.01, 0.01))
     monkeypatch.setattr(launch, "POLL", 0.01)
     monkeypatch.setattr(launch, "LABEL_WAIT", 0.3)
+    monkeypatch.setattr(agents, "FOLLOW_POLL", 0.01)
 
     def no_gh(*args):
         raise AssertionError(f"a test ran gh without the fake_github fixture: {args}")
 
     monkeypatch.setattr(github, "gh", no_gh)
     return home
+
+
+@pytest.fixture(autouse=True)
+def windows(monkeypatch) -> list[list[str]]:
+    """The launch windows crab-student would open (the agents each followed), never opened for real."""
+    opened: list[list[str]] = []
+    monkeypatch.setattr(machine, "open_launch_windows", lambda names: opened.append(list(names)) or True)
+    return opened
 
 
 @pytest.fixture
@@ -126,7 +135,7 @@ def machines(monkeypatch) -> FakeMachines:
     fake = FakeMachines()
     monkeypatch.setattr(machine, "remote", fake.remote)
     monkeypatch.setattr(machine, "upload_and_setup", fake.upload_and_setup)
-    monkeypatch.setattr(machine, "reachable", lambda name: fake.reachable)
+    monkeypatch.setattr(machine, "reachable", lambda name, addr=None: fake.reachable)
     monkeypatch.setattr(machine, "forget_host_key", lambda name: None)
     return fake
 

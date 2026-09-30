@@ -191,11 +191,8 @@ def _tools_step() -> bool:
     need = {n: core.tool(n) for n in ("ssh", "ssh-keygen", "git", "gh")}
     missing = [n for n, path in need.items() if not path]
     extra = "wt" if sys.platform == "win32" else "tmux"
-    split = (
-        f"{extra} found (open --all works)"
-        if core.tool(extra)
-        else f"no {extra} (only needed for open --all)"
-    )
+    uses = "the window that follows a launch, and open --all" if extra == "wt" else "open --all"
+    split = f"{extra} found (for {uses})" if core.tool(extra) else f"no {extra} (only needed for {uses})"
     _say("Tools", f"missing: {', '.join(missing)}" if missing else f"ssh, git, gh ok; {split}")
     return not missing
 

@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from crab_student import core, machine
+from crab_student.machine import open_launch_windows  # (the real one: conftest replaces it for every test)
 
 
 @pytest.fixture(autouse=True)
@@ -293,6 +294,42 @@ def test_open_all_on_windows_makes_two_columns_of_equal_panes(monkeypatch):
     assert [p[p.index("--size") + 1] for p in panes if "--size" in p] == ["0.667", "0.500", "0.500"]
     assert sum("-V" in p for p in panes) == 1
     assert ["move-focus", "left"] in groups and ["move-focus", "right"] in groups
+
+
+def test_a_racing_machine_is_checked_at_its_address_without_keeping_its_host_key(monkeypatch):
+    ran = []
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0)
+    )
+    assert machine.reachable("job1", ("203.0.113.9", 41022))
+    ((_, *argv),) = ran
+    assert "root@203.0.113.9" in argv and argv[argv.index("-p") + 1] == "41022" and argv[-1] == "true"
+    assert machine.alias("job1") not in argv  # (only the winner's host key is kept, under the alias)
+    known = next(a.split("=", 1)[1] for a in argv if a.startswith("UserKnownHostsFile="))
+    assert known != str(core.ssh_dir() / "known_hosts").replace("\\", "/")
+
+
+@pytest.mark.parametrize("system", ["windows", "macos", "linux", "windows without wt"])
+def test_launch_windows_follow_each_agent(system, monkeypatch):
+    monkeypatch.setattr(machine.os, "name", "nt" if system.startswith("windows") else "posix")
+    monkeypatch.setattr(machine.sys, "platform", {"macos": "darwin", "linux": "linux"}.get(system, "win32"))
+    monkeypatch.setattr(core, "tool", lambda name: None if system == "windows without wt" else f"/bin/{name}")
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
+    opened = open_launch_windows(["job1", "job2"])
+    assert opened is (system in ("windows", "macos"))
+    if system == "windows":  # one window, a tab per agent, each following its launch with open
+        ((wt, *argv),) = started
+        tabs = [g.split("\0") for g in "\0".join(argv).split("\0;\0")]
+        assert wt == "/bin/wt" and all(
+            t[-2:] == ["open", n] and "new-tab" in t for t, n in zip(tabs, ["job1", "job2"], strict=True)
+        )
+    elif system == "macos":  # a Terminal window per agent
+        scripts = [argv[-1] for argv in started]
+        assert [argv[0] for argv in started] == ["/bin/osascript"] * 2
+        assert "open job1" in scripts[0] and "open job2" in scripts[1]
+    else:
+        assert not started
 
 
 # ---- VS Code -------------------------------------------------------------------------------------

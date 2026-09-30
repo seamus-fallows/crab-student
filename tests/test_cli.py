@@ -423,6 +423,50 @@ def test_after_a_hand_off_an_interactive_agent_opens_in_a_terminal(opened, machi
     assert opened == [("terminal", "job2"), ("terminals", ["job1", "job2"])]
 
 
+def launching(
+    fake_vast, monkeypatch, mode: str = "colleague", end: str = "ready", at_work: bool = True
+) -> None:
+    """Agent job3, being launched: each look at its lock moves the launch on (a line, a status line, then the
+    phase it ends in). Without `at_work`, no launch holds the lock (it was cut off)."""
+    core.save(record("job3", phase="renting", mode=mode, instance_id=None))
+    launch.append_log("job3", "Renting two machines at once: offer 1 and offer 2")
+
+    def finish() -> None:
+        rec = core.load("job3")
+        rec.update(phase=end, error="every offer failed (1: taken)" if end == "failed" else None)
+        if end == "ready":
+            rec["instance_id"] = fake_vast.add_instance(1, "job3")
+        core.save(rec)
+        launch.append_log(
+            "job3", "Ready after 1m30s." if end == "ready" else "Launch failed: every offer failed"
+        )
+
+    steps = [lambda: launch.append_log("job3", "~ Booting: loading - Pull complete (0m40s)"), finish]
+    monkeypatch.setattr(core, "is_locked", lambda name: bool(at_work and steps) and (steps.pop(0)() or True))
+
+
+def test_open_follows_a_launch_then_attaches_to_the_agent(opened, fake_vast, monkeypatch, capsys):
+    launching(fake_vast, monkeypatch)
+    rc, out, _ = run(capsys, "open", "job3")
+    assert rc == 0 and opened == [("terminal", "job3")]
+    for shown in ("Renting two machines at once", "Pull complete", "Ready after 1m30s"):
+        assert shown in out
+
+
+def test_open_follows_an_interactive_agents_launch_into_vs_code(opened, fake_vast, monkeypatch, capsys):
+    launching(fake_vast, monkeypatch, mode="interactive")
+    assert run(capsys, "open", "job3")[0] == 0 and opened == [("vscode", "job3", "interactive")]
+
+
+@pytest.mark.parametrize("end,at_work", [("failed", True), ("renting", False)])
+def test_open_on_a_launch_that_fails_or_was_cut_off_says_what_to_do(end, at_work, opened, fake_vast, monkeypatch,
+                                                                     capsys):  # fmt: skip
+    launching(fake_vast, monkeypatch, end=end, at_work=at_work)
+    rc, out, _ = run(capsys, "open", "job3")
+    assert rc == 1 and opened == [] and "crab-student start job3" in out
+    assert ("every offer failed" in out) is (end == "failed")
+
+
 # ---- guide and offers ----------------------------------------------------------------------------
 
 

@@ -391,6 +391,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_open(args: argparse.Namespace) -> int:
     if args.all == bool(args.name):
         raise core.CrabError("give an agent's NAME, or --all.", 2)
+    followed = bool(args.name) and core.load(args.name)["phase"] != "ready"
+    if followed and not agents.follow_launch(args.name):  # (a launch at work: its progress until it is ready)
+        return 1
     recs = [core.load(args.name)] if args.name else [r for r in core.all_records() if r["phase"] == "ready"]
     insts = {i["id"]: i for i in vast.instances()} if recs else {}
     live = [r for r in recs if vast.running(insts.get(r["instance_id"]))]
@@ -404,7 +407,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError(f"{args.name} is not running. Start it first: crab-student start {args.name}")
     if not live:
         raise core.CrabError("no agent is running.")
-    if args.vscode:
+    if args.vscode or (followed and live[0]["mode"] == "interactive"):
         for r in live:
             machine.open_vscode(r)
         return 0
@@ -463,7 +466,12 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("decline", cmd_decline, "drop a launch waiting for your approval").add_argument("name")
     cmd("list", cmd_list, "every agent at a glance", json_flag=True)
     cmd("status", cmd_status, "one agent in detail", json_flag=True).add_argument("name")
-    c = cmd("open", cmd_open, "attach to an agent's Claude Code in this terminal (detach: Ctrl-b d)")
+    c = cmd(
+        "open",
+        cmd_open,
+        "attach to an agent's Claude Code in this terminal (detach: Ctrl-b d); while it is launching, follow the "
+        "launch first",
+    )
     c.add_argument("name", nargs="?")
     c.add_argument("--all", action="store_true", help="every running agent side by side")
     c.add_argument(

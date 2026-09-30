@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -14,6 +16,8 @@ STOP_REASONS = {"user": "stopped by you", "idle": "idle stop", "done": "finished
 IDLE_SHOWN = 600  # seconds without work or conversation before a running agent is shown as idle
 STOP_STUCK = 300  # a machine still running this long after asking Vast to stop it gets stopped from here
 NOTE_MARGIN = 300  # a stop note must be this much newer than the last start (the clocks may differ a little)
+FOLLOW_POLL = 1.0  # how often open looks at a launch it follows
+QUIET_ENDS = 3  # looks in a row without the launch at work (its lock free) before open says it stopped
 
 
 @dataclass
@@ -50,7 +54,7 @@ def views(names: list[str] | None = None) -> list[View]:
     """Every agent (or those named) as it is now: one Vast call, and one ssh call per running machine."""
     recs = [r for r in core.all_records() if names is None or r["name"] in names]
     insts: dict | None = {}
-    if any(r.get("instance_id") for r in recs):
+    if any(r.get("instance_id") or r.get("strays") for r in recs):
         try:
             insts = {i["id"]: i for i in vast.instances()}
         except core.CrabError:
@@ -67,6 +71,8 @@ def views(names: list[str] | None = None) -> list[View]:
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
+        if not busy and rec.get("strays") and insts is not None:
+            _sweep(rec["name"], list(insts.values()))
         state, message = display_state(rec, inst, st, busy, insts is None)
         result.append(_view(rec, inst, st, state, message))
     if moved:
@@ -105,6 +111,12 @@ def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
     return False
 
 
+def _sweep(name: str, insts: list[dict]) -> None:
+    """Destroy the machines of the agent's unconfirmed rents that have shown up (another machine won its launch)."""
+    with contextlib.suppress(core.CrabError), core.locked(name):
+        launch.sweep_strays(core.load(name), insts=insts)
+
+
 def display_state(
     rec: dict, inst: dict | None, st: dict | None, busy: bool, vast_down: bool = False
 ) -> tuple[str, str]:
@@ -118,7 +130,7 @@ def display_state(
             return "starting", {"renting": "renting a machine", "booting": "booting", "setup": "setting up"}[
                 phase
             ]
-        if phase == "renting" and rec.get("rent"):
+        if phase == "renting" and any(r["instance_id"] is None for r in rec.get("rents") or []):
             return (
                 "interrupted",
                 f"the rent was not confirmed: crab-student start {name} looks for the machine",
@@ -256,15 +268,6 @@ def stop(name: str, out: launch.Progress) -> dict:
     }
 
 
-def _find_instance(rec: dict) -> dict | None:
-    if rec.get("instance_id"):
-        return vast.instance(rec["instance_id"])
-    if rec["phase"] == "renting" and rec.get("rent"):
-        iid = launch.find_by_label(rec["rent"]["label"], 0)
-        return vast.instance(iid) if iid else None
-    return None
-
-
 def _size(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1000 or unit == "GB":
@@ -301,7 +304,7 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                 "name": name,
                 "result_line": f"Deleted {name} (it was waiting for approval; nothing was rented).",
             }
-        inst = _find_instance(rec)
+        inst = vast.instance(rec["instance_id"]) if rec.get("instance_id") else None
         if inst and rec.get("uploaded") and not force:  # (a machine that received its files may hold work)
             running = vast.running(inst)
             if running:
@@ -338,10 +341,16 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     ),
                     3,
                 )
-        if inst:
-            vast.destroy(inst["id"])
-            out.line(f"Destroyed machine {inst['id']}.")
+        spare, missing = launch.spare_machines(rec)  # (rented for the launch, never uploaded to)
+        for iid in ([inst["id"]] if inst else []) + spare:
+            vast.destroy(iid)
+            out.line(f"Destroyed machine {iid}.")
         lines = [f"Deleted {name}.", *_cleanup(rec)]
+        lines += [
+            f"Warning: no machine labelled {label} was found (Vast never confirmed that rent). If one shows up at "
+            "https://cloud.vast.ai/instances/, destroy it there."
+            for label in missing
+        ]
     return {"name": name, "result_line": "\n".join(lines)}
 
 
@@ -453,3 +462,80 @@ def open_all(names: list[str]) -> int:
             "every running agent is interactive and in VS Code: crab-student open NAME --vscode"
         )
     return machine.open_all(rest)
+
+
+def follow_launch(name: str) -> bool:
+    """Show an agent's launch as it happens: its log so far, then each new line (on a terminal the status line is
+    rewritten in place), until it ends. True once the agent is ready; else False, after saying what happened
+    and what to do."""
+    tty = sys.stdout.isatty()
+    if tty and os.name == "nt":
+        os.system("")  # (turns on the escape codes that rewrite the status line)
+    print(
+        f"Launching {name}. Closing this window does not stop the launch (see it again: crab-student open {name})."
+    )
+    shown, quiet = _LogView(name, tty), 0
+    while True:
+        shown.update()
+        if not core.record_path(name).exists():
+            shown.end(f"{name} was deleted.")
+            return False
+        busy = core.is_locked(name)
+        quiet = 0 if busy else quiet + 1
+        rec = core.load(name)
+        if not busy and (rec["phase"] in ("ready", "failed", "pending") or quiet >= QUIET_ENDS):
+            shown.update()
+            shown.end(_launch_outcome(rec))
+            return rec["phase"] == "ready"
+        time.sleep(FOLLOW_POLL)
+
+
+def _launch_outcome(rec: dict) -> str:
+    name, phase = rec["name"], rec["phase"]
+    if phase == "ready":
+        return f"{name} is ready."
+    if phase == "failed":
+        return (
+            f"The launch of {name} failed: {rec.get('error') or 'see above'}. Try again: crab-student start {name} "
+            f"(or give up: crab-student delete {name})."
+        )
+    if phase == "pending":
+        return (
+            f"{name} is waiting for your approval: {rec['pending']['reason']}. Approve it: crab-student approve "
+            f"{name} (or: crab-student decline {name})."
+        )
+    return f"The launch of {name} stopped before it finished. Continue it: crab-student start {name}"
+
+
+class _LogView:
+    """The new lines of a launch log, printed as they come ("~" lines are the status line)."""
+
+    def __init__(self, name: str, tty: bool):
+        self.path, self.tty, self.pos, self.status = launch.log_file(name), tty, 0, False
+
+    def update(self) -> None:
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.pos)
+                data = f.read()
+        except OSError:
+            return
+        complete = data[: data.rfind(b"\n") + 1]  # (a line still being written waits for the next look)
+        self.pos += len(complete)
+        for line in complete.decode("utf-8", "replace").splitlines():
+            clock, _, text = line.partition(" ")
+            if text.startswith("~ ") and self.tty:
+                sys.stdout.write(f"\r\033[K{clock} {text[2:]}")
+                self.status = True
+            else:
+                self._print(f"{clock} {text[2:]}" if text.startswith("~ ") else line)
+        sys.stdout.flush()
+
+    def _print(self, text: str) -> None:
+        if self.status:
+            sys.stdout.write("\n")
+            self.status = False
+        print(core.ascii_text(text), flush=True)
+
+    def end(self, text: str) -> None:
+        self._print(text)

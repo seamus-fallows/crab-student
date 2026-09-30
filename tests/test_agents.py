@@ -26,6 +26,7 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
+            "rents": [], "strays": [],
             "instance_id": None, "dph": 0.40, "disk_usd_day": None, "mode": "colleague", "claude_settings": {},
             "machine": "1x RTX 4090",
             "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None, "stop_note": None,
@@ -105,7 +106,8 @@ DISPLAY = [  # (record fields, Vast's instance, ctl.py status, lock held) -> STA
     ({"phase": "pending", "pending": {"reason": "it would cost $6.00/hr", "max_dph": 6.0}}, None, None, False,
      "approval", "$6.00/hr"),
     ({"phase": "booting"}, None, None, True, "starting", ""),  # (a launch at work)
-    ({"phase": "renting", "rent": {"label": "cs:job1:0"}}, None, None, False, "interrupted", "start job1"),
+    ({"phase": "renting", "rents": [{"label": "cs:job1:0", "instance_id": None}]}, None, None, False, "interrupted",
+     "start job1"),
     ({"phase": "renting"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "setup"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "failed", "error": "every offer failed"}, None, None, False, "failed", "every offer failed"),
@@ -314,13 +316,41 @@ def test_a_shared_deploy_key_goes_with_the_last_agent_holding_it(fake_vast, fake
     assert fake_github.keys["ada/proj"] == {} and not github.key_file(repo["deploy_key"]).exists()
 
 
-def test_delete_destroys_the_machine_of_an_unconfirmed_rent_found_by_its_label(fake_vast):
-    iid = fake_vast.add_instance(1, "cs:job1:abcd1234", status="loading")
-    fake_vast.add_instance(1, "cs:job1:00000000", status="loading")  # (not this rent's label: left alone)
-    core.save(record(phase="renting", rent={"label": "cs:job1:abcd1234", "offer_id": 1, "at": 0}))
+def rent(label: str, instance_id: int | None = None) -> dict:
+    """A rent of the launch's race, as the record keeps it."""
+    return {"label": label, "offer_id": 1, "at": 0, "instance_id": instance_id, "running_at": None}
+
+
+def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_confirm(fake_vast):
+    racing = fake_vast.add_instance(1, "cs:job1:aaaa1111", status="loading")
+    unconfirmed = fake_vast.add_instance(1, "cs:job1:abcd1234", status="loading")
+    other = fake_vast.add_instance(1, "cs:job1:00000000", status="loading")  # (not this launch's label)
+    rents = [rent("cs:job1:aaaa1111", racing), rent("cs:job1:abcd1234"), rent("cs:job1:ffff0000")]
+    core.save(record(phase="renting", uploaded=False, rents=rents))
+    res = agents.delete("job1", False, out())
+    assert list(fake_vast.instances) == [other] and racing not in fake_vast.instances
+    assert unconfirmed not in fake_vast.instances and not core.record_path("job1").exists()
+    assert "cs:job1:ffff0000" in res["result_line"]  # (never found: the user is told to look out for it)
+
+
+def test_delete_also_destroys_a_machine_the_race_left_behind(fake_vast, machines):
+    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
+    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
+    machines.replies[("job1", "check")] = CLEAN
     agents.delete("job1", False, out())
-    assert iid not in fake_vast.instances and len(fake_vast.instances) == 1
-    assert not core.record_path("job1").exists()
+    assert iid not in fake_vast.instances and late not in fake_vast.instances
+
+
+def test_list_destroys_a_machine_the_race_left_behind_once_it_shows_up(fake_vast, machines):
+    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
+    machines.replies[("job1", "status")] = status("working")
+    agents.views()
+    assert core.load("job1")["strays"]  # (not there yet: remembered)
+    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
+    agents.views()
+    assert (
+        late not in fake_vast.instances and iid in fake_vast.instances and core.load("job1")["strays"] == []
+    )
 
 
 # ---- delete a stopped agent: from its stop note, without starting it ----------------------------

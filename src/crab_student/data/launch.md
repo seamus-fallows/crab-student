@@ -113,9 +113,11 @@ crab-student launch NAME [--hours H] [flags] [--secret NAME ...] --json <<'BRIEF
 BRIEF
 ```
 
-Use the Bash tool with a 600000 ms timeout. If the call is cut off or times out, run
-`crab-student start NAME --json`, which continues the same launch, until it returns. Never run
-`launch` twice for one task: that would make a second agent.
+Use the Bash tool with a 600000 ms timeout. The launch rents two machines at once, keeps the first
+that starts and destroys the other, and opens a window on the user's screen that follows it (you need
+not do anything about that). If the call is cut off or times out, run `crab-student start NAME --json`,
+which continues the same launch, until it returns. Never run `launch` twice for one task: that would
+make a second agent.
 
 **Several agents** (a sweep, or several separate tasks you were given together): write one brief per
 agent, each with its own name, and launch them in one call. Flags before the briefs apply to every

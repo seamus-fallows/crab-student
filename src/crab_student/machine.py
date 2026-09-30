@@ -137,8 +137,16 @@ def remote(name: str, args: list[str], *, input: bytes | None = None, timeout: f
     return data
 
 
-def reachable(name: str) -> bool:
-    cmd = [*ssh_cmd(name), "-o", "ConnectTimeout=8", "true"]
+def reachable(name: str, addr: tuple[str, int] | None = None) -> bool:
+    """ssh answers: the agent's machine through its alias, or the machine at `addr` (one of the machines racing
+    for a launch: its host key goes to a throwaway file, since only the winner's is kept under the alias)."""
+    ssh = ssh_cmd(name)
+    if addr:
+        key, hosts = core.ssh_dir() / "id_ed25519", core.ssh_dir() / "known_hosts_racing"
+        ssh = [ssh[0], "-F", "none", "-p", str(addr[1]), "-i", str(key), "-o", "IdentitiesOnly=yes",
+               "-o", f"UserKnownHostsFile={_fwd(hosts)}", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+               "-o", "LogLevel=ERROR", f"root@{addr[0]}"]  # fmt: skip
+    cmd = [*ssh, "-o", "ConnectTimeout=8", "true"]
     try:
         return subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0
     except subprocess.TimeoutExpired:
@@ -239,6 +247,32 @@ def open_one(name: str) -> int:
         print(f"Opened {name} in a new Windows Terminal window.")
         return 0
     raise core.CrabError(f'open needs a terminal: run "crab-student open {name}" in your terminal.', 2)
+
+
+def open_launch_windows(names: list[str]) -> bool:
+    """A window that follows the launches of `names` (`crab-student open NAME` in each), then shows the agents:
+    one Windows Terminal window with a tab per agent, or a Terminal window per agent on macOS. False when no
+    window could be opened (another system, or no terminal program)."""
+
+    def command(name: str) -> list[str]:
+        return [sys.executable, "-m", "crab_student", "open", name]
+
+    try:
+        if os.name == "nt" and (wt := core.tool("wt")):
+            args = ["-w", "new"]
+            for i, name in enumerate(names):
+                args += [*([";"] if i else []), "new-tab", "--title", name, *command(name)]
+            subprocess.Popen([wt, *args])
+            return True
+        if sys.platform == "darwin" and (osascript := core.tool("osascript")):
+            for name in names:  # (Terminal's tabs cannot be scripted without extra permissions)
+                text = shlex.join(command(name)).replace("\\", "\\\\").replace('"', '\\"')
+                script = f'tell application "Terminal"\n  do script "{text}"\n  activate\nend tell'
+                subprocess.Popen([osascript, "-e", script])
+            return True
+    except OSError:
+        return False
+    return False
 
 
 def _wt_column(names: list[str]) -> list[str]:

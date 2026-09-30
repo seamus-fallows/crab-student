@@ -42,9 +42,13 @@ followed by the same instruction.
 For several agents at once (a sweep, or several tasks), start ONE launcher with all of them: it writes a
 brief for each and launches them together, each on a machine of its own.
 
-Keep talking with the user meanwhile. The launcher's permission prompts, if any, appear in this
-session: say what they are for. When it finishes, show the user the brief(s) it gave, then the result
-line(s) and any `Warning:` lines, exactly as returned.
+Keep talking with the user meanwhile. Tell them that once the launch starts, a window opens on their
+screen (Windows Terminal, or Terminal on macOS; a tab per agent) that shows its progress and then the
+agent itself; elsewhere, or with the setting `open_window` off, `crab-student open NAME` in their own
+terminal does the same. A launch rents two machines at once and keeps the first that starts (the other
+is destroyed at once). The launcher's permission prompts, if any, appear in this session: say what they
+are for. When it finishes, show the user the brief(s) it gave, then the result line(s) and any
+`Warning:` lines, exactly as returned.
 
 If a result says a launch needs approval, tell the user the price per hour and why, and ask. Only after
 an explicit yes in this conversation, run `crab-student approve NAME [NAME ...] --json` (Bash timeout
@@ -53,9 +57,10 @@ they say no: `crab-student decline NAME`.
 
 ## Interactive agents
 
-The result line ends with `open it: crab-student open NAME --vscode`. Tell the user to run that in their
-own terminal: it opens VS Code on the machine with the Claude panel filled in with the task (not yet
-sent). They work with the agent there. When they are done and want it to keep going on its own, they
+When the machine is ready, the launch's window opens VS Code on it with the Claude panel filled in
+with the task (not yet sent). If it did not (no window, or they closed it), they run the command the
+result line ends with, `crab-student open NAME --vscode`, in their own terminal. They work with the
+agent there. When they are done and want it to keep going on its own, they
 type `/handoff` in that chat (optionally `autonomous` or `colleague`, and what to continue with), or
 ask for a hand-off in words. The agent commits, pushes and carries on in tmux with the whole
 conversation, after which they can close VS Code and use everything below. Before that, `send` and
@@ -81,10 +86,11 @@ follow-up, `start` it (its conversation resumes), then `send`.
 
 ## Watching
 
-Tell the user to run `crab-student open NAME` in their own terminal (or `open --all` for every running
-agent side by side, or `open NAME --vscode` for VS Code, whose terminal attaches to the agent by
-itself). It attaches to the agent's Claude Code; detaching with Ctrl-b d leaves the agent running. On
-Windows, running it yourself opens a new Windows Terminal window.
+The launch's window ends up attached to the agent. Any time later, the user runs `crab-student open NAME`
+in their own terminal (or `open --all` for every running agent side by side, or `open NAME --vscode`
+for VS Code, whose terminal attaches to the agent by itself); on an agent still launching it shows the
+progress first. It attaches to the agent's Claude Code; detaching with Ctrl-b d leaves the agent
+running. On Windows, running it yourself opens a new Windows Terminal window.
 
 ## Deleting
 

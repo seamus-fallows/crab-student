@@ -79,6 +79,7 @@ DEFAULTS: dict[str, object] = {
     "fast_mode": "",
     "workspace_repo": "crab-student-work",
     "notify_url": "",
+    "open_window": "on",
 }
 MODES = ("autonomous", "colleague", "interactive")
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -108,6 +109,7 @@ RULES = {
     "fast_mode": (lambda v: v in ("", "on", "off"), "on or off (empty: as your own Claude Code)"),
     "workspace_repo": (lambda v: bool(re.fullmatch(r"[A-Za-z0-9._-]+", v)), "a GitHub repo name"),
     "notify_url": (lambda v: v == "" or v.startswith(("http://", "https://")), "an http(s) URL, or empty"),
+    "open_window": (lambda v: v in ("on", "off"), "on or off"),
 }
 
 
@@ -208,8 +210,8 @@ def save(rec: dict) -> None:
 
 
 def remove(name: str) -> None:
-    """Forget an agent: its record and brief (its lock file may still be held)."""
-    for suffix in (".json", ".brief.md", ".lock"):
+    """Forget an agent: its record, brief and launch log (its lock file may still be held)."""
+    for suffix in (".json", ".brief.md", ".log", ".lock"):
         with contextlib.suppress(OSError):
             (agents_dir() / f"{name}{suffix}").unlink(missing_ok=True)
 

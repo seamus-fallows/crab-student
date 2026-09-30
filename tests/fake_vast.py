@@ -3,9 +3,9 @@
 Tests set its behaviour: `offers` (what searches return, filtered like Vast would unless
 `ignore_filters`), `rent_outcome[offer_id]` (ok, taken, no_credit, error_created, error_none,
 slow_created), `boot[offer_id]` (polls until running, or "never", "boot_error", "exits", "stale_error":
-runs at once, an old error still in its status message), `start_polls` (polls a machine started again
-still reads "exited", with an error, while its host makes room), and read `requests` (every call) and
-`instances`.
+runs at once, an old error still in its status message; "no_ssh": runs at once, with no ssh address),
+`start_polls` (polls a machine started again still reads "exited", with an error, while its host makes
+room), and read `requests` (every call) and `instances`.
 """
 
 from __future__ import annotations
@@ -150,6 +150,8 @@ class FakeVast:
                 inst["actual_status"] = "running"
         elif script == "exits":
             inst["actual_status"] = "exited"
+        elif script == "no_ssh":
+            inst.update(actual_status="running", ports={}, ssh_host="")
         elif script != "never" and inst["polls"] >= script:
             inst["actual_status"] = "running"
 

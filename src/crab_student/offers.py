@@ -199,9 +199,9 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
     return similar + rest
 
 
-def fallbacks(ranked: list[dict]) -> list[dict]:
-    """Up to MAX_BACKUPS backups after the pick: other machines (a boot failure is often the host's fault) at most
-    1.25x its price."""
+def fallbacks(ranked: list[dict], over_cap: bool = False) -> list[dict]:
+    """Up to MAX_BACKUPS backups after the pick, on other machines (a boot failure is often the host's fault). Any
+    price up to the approval price will do; over it (the user approves the prices shown), at most 1.25x the pick."""
     primary, picked = ranked[0], []
     seen = {primary.get("machine_id") or primary["id"]}
     for o in ranked[1:]:
@@ -209,7 +209,7 @@ def fallbacks(ranked: list[dict]) -> list[dict]:
         if (
             len(picked) < MAX_BACKUPS
             and machine not in seen
-            and o["dph_total"] <= 1.25 * primary["dph_total"]
+            and (not over_cap or o["dph_total"] <= 1.25 * primary["dph_total"])
         ):
             picked.append(o)
             seen.add(machine)
@@ -249,7 +249,7 @@ def plan(
         )
     within = [o for o in found if cap is None or o["dph_total"] <= cap]
     ranked = rank(within or found, req.gpu)
-    return Plan(req, ranked[0], fallbacks(ranked), ranked, over_cap=not within)
+    return Plan(req, ranked[0], fallbacks(ranked, over_cap=not within), ranked, over_cap=not within)
 
 
 def summary(o: dict) -> str:

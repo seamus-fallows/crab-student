@@ -157,8 +157,8 @@ re-checked on every result, plus GPU model substrings, `regions` (the country co
 more than 20% worse in dlperf per dollar than the best offer within 1.5x the cheapest price; among the
 offers within 20% of the lowest price left, best first by reliability and download speed together
 (100 x reliability + log2 of the download Mbps: a point of reliability counts as much as twice the
-speed), then price and id; the rest after them, by price. Up to 2 fallbacks on other machines at most 1.25x the
-pick's price; the first is rented at the same time as the pick (4, step 3). The pick and its fallbacks come from the offers up to `approve_above_usd_per_hour` when
+speed), then price and id; the rest after them, by price. Up to 4 fallbacks on other machines, at any price up to
+`approve_above_usd_per_hour` (over it, when the launch needs approval: at most 1.25x the pick's price); the first is rented at the same time as the pick (4, step 3). The pick and its fallbacks come from the offers up to `approve_above_usd_per_hour` when
 any fits, else from all of them (the launch then waits for approval, and `approve` plans again up to
 the price it showed). A CPU task (0 GPUs) may rent a GPU host, with `NVIDIA_DISABLE_REQUIRE=1` in its
 environment. The plan and the result carry no hour or cost estimate.

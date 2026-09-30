@@ -99,8 +99,8 @@ decide when a machine has done its job (see Money and safety).
 
 **Two machines at once.** How long a new machine takes to start varies a lot (a host that must first
 download the Docker image can take several minutes; one that has it cached, one or two). So a launch
-rents its pick and its first backup (another machine at most 1.25x the price, both within your
-approval price) at the same time, keeps whichever is ready first (running and answering ssh), and
+rents its pick and its first backup (the next best machine at any price up to your approval price)
+at the same time, keeps whichever is ready first (running and answering ssh), and
 destroys the other at once, before anything is uploaded to it. A machine that has not started within 5
 minutes, does not answer ssh within 3 minutes of starting, or fails is destroyed too and the next
 backup rented in its place, so at most two are ever in flight for one launch.

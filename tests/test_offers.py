@@ -112,7 +112,7 @@ def test_ties_are_broken_the_same_way_every_time():
     assert ids(offers.rank(same, gpu=True)) == ids(offers.rank(same[::-1], gpu=True)) == [3, 5, 9]
 
 
-def test_fallbacks_are_up_to_four_other_machines_at_most_a_quarter_dearer(fake_vast):
+def test_fallbacks_are_up_to_four_other_machines_up_to_the_approval_price(fake_vast):
     fake_vast.offers = [
         cpu_offer(1, machine_id=10, dph_total=0.40),
         cpu_offer(2, machine_id=10, dph_total=0.41),  # the pick's machine
@@ -127,7 +127,11 @@ def test_fallbacks_are_up_to_four_other_machines_at_most_a_quarter_dearer(fake_v
     p = offers.plan(Req(hours=1), cfg())
     assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5, 6, 7], 9)
     fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.51)]
-    assert offers.plan(Req(hours=1), cfg()).fallbacks == []  # over 1.25x
+    assert ids(offers.plan(Req(hours=1), cfg(), cap=5).fallbacks) == [
+        2
+    ]  # (any price up to the approval price)
+    assert offers.plan(Req(hours=1), cfg(), cap=0.45).fallbacks == []  # (never over it)
+    assert offers.plan(Req(hours=1), cfg(), cap=0.30).fallbacks == []  # (over it: at most 1.25x the pick)
 
 
 @pytest.mark.parametrize("hours, needed", [(None, 25), (3, 25), (20, 41)])

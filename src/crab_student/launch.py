@@ -417,7 +417,9 @@ def reserve_racers(plans: list[offers.Plan]) -> list[list[dict]]:
     alone. (A later backup may be another agent's racer: renting a taken offer moves on to the next.)"""
     picks, racing, kept = {p.primary["id"] for p in plans}, set(), []
     for p in plans:
-        backups = offers.fallbacks([p.primary, *(o for o in p.ranked[1:] if o["id"] not in picks | racing)])
+        backups = offers.fallbacks(
+            [p.primary, *(o for o in p.ranked[1:] if o["id"] not in picks | racing)], p.over_cap
+        )
         racing.update(o["id"] for o in backups[:1])
         kept.append([offers.kept(o) for o in (p.primary, *backups)])
     return kept

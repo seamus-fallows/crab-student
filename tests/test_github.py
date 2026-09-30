@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -203,6 +205,24 @@ def test_deploy_keys(fake_github):
     github.remove_deploy_key("ada/proj", kid)
     assert fake_github.keys["ada/proj"] == {}
     github.remove_deploy_key("ada/proj", kid)  # (already gone: GitHub answers 404)
+
+
+def test_workers_claiming_a_key_at_the_same_time_share_one(fake_github, monkeypatch):
+    fake_github.create_repo("ada/proj")
+    names = ["w1", "w2", "w3"]
+    for name in names:
+        core.save({"name": name, "repo": {"slug": "ada/proj", "deploy_key": None}})
+    add = github.add_deploy_key
+
+    def slow_add(*a):  # (a slow GitHub: the other claims arrive meanwhile)
+        time.sleep(0.3)
+        return add(*a)
+
+    monkeypatch.setattr(github, "add_deploy_key", slow_add)
+    with ThreadPoolExecutor(len(names)) as pool:
+        list(pool.map(lambda name: github.claim_deploy_key(core.load(name)), names))
+    ids = {core.load(name)["repo"]["deploy_key"]["id"] for name in names}
+    assert len(ids) == 1 and list(fake_github.keys["ada/proj"]) == list(ids)
 
 
 def test_a_branch_is_deleted_only_while_nobody_worked_on_it(fake_github, tmp_path):

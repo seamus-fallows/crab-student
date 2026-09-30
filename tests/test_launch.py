@@ -12,7 +12,7 @@ import pytest
 from fake_gh import git
 from fake_vast import cpu_offer, offer
 
-from crab_student import cli, core, launch, machine, offers, vast
+from crab_student import cli, core, github, launch, machine, offers, vast
 
 TOKEN = "sk-ant-oat01-" + "x" * 80  # (the Claude token the ready fixture stores)
 HF = "hf_the-task-secret-0042"
@@ -125,8 +125,8 @@ def test_a_launch_rents_once_and_sets_up_the_worker(fake_vast, fake_github, user
     head = git(user_repo, "rev-parse", "HEAD").strip()
     assert fake_github.branch_sha("ada/proj", "agent/job1") == rec["repo"]["start_sha"] == head
     ((key_id, key),) = fake_github.keys["ada/proj"].items()
-    public = Path(f"{launch.key_file('job1')}.pub").read_text().strip()
-    assert key_id == rec["repo"]["deploy_key_id"] and key["key"] == public and key["read_only"] == "false"
+    public = Path(f"{github.key_file(rec['repo']['deploy_key'])}.pub").read_text().strip()
+    assert key_id == rec["repo"]["deploy_key"]["id"] and key["key"] == public and key["read_only"] == "false"
     config = json.loads(machines.uploads["job1"]["config.json"][0])
     assert (config["branch"], config["limit_hours"]) == ("agent/job1", 2.0)
     assert config["session_id"] == rec["session_id"]
@@ -152,6 +152,32 @@ def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github,
         assert not any(secret.encode() in data for data in local)
 
 
+def test_workers_started_within_a_day_share_one_deploy_key(fake_github, machines):
+    go(args("job1"))
+    go(args("job2"))
+    key = core.load("job1")["repo"]["deploy_key"]
+    assert core.load("job2")["repo"]["deploy_key"] == key
+    assert list(fake_github.keys["ada/proj"]) == [key["id"]]  # (so GitHub sent one email, not two)
+    assert machines.uploads["job1"]["deploy_key"] == machines.uploads["job2"]["deploy_key"]
+
+
+def test_a_deploy_key_is_not_shared_after_a_day(fake_github):
+    go(args("job1"))
+    rec = core.load("job1")
+    rec["repo"]["deploy_key"]["created"] = "2026-01-01T00:00:00Z"
+    core.save(rec)
+    go(args("job2"))
+    assert core.load("job2")["repo"]["deploy_key"]["id"] != rec["repo"]["deploy_key"]["id"]
+    assert len(fake_github.keys["ada/proj"]) == 2
+
+
+def test_a_deploy_key_removed_on_github_is_not_shared(fake_github):
+    go(args("job1"))
+    fake_github.keys["ada/proj"].clear()  # (the user removed it in the repo's settings)
+    go(args("job2"))
+    assert list(fake_github.keys["ada/proj"]) == [core.load("job2")["repo"]["deploy_key"]["id"]]
+
+
 def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_github, user_repo):
     (user_repo / "README.md").write_text("changed\n")
     (user_repo / "notes.txt").write_text("mine\n")
@@ -172,7 +198,7 @@ def test_no_repo_works_in_a_private_workspace_repo(fake_github, machines, tmp_pa
     go(args(no_repo=True))
     rec, slug = core.load("job1"), "ada/crab-student-work"
     main = git(fake_github.bare(slug), "rev-parse", "main").strip()
-    assert rec["phase"] == "ready" and list(fake_github.keys[slug]) == [rec["repo"]["deploy_key_id"]]
+    assert rec["phase"] == "ready" and list(fake_github.keys[slug]) == [rec["repo"]["deploy_key"]["id"]]
     assert fake_github.branch_sha(slug, "agent/job1") == rec["repo"]["start_sha"] == main
     assert any(c[3] == "user/repos" and "private=true" in c for c in gh_writes(fake_github))
     config = json.loads(machines.uploads["job1"]["config.json"][0])

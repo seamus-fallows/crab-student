@@ -4,11 +4,12 @@ Vast, GitHub and the machines are the fakes."""
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 from fake_gh import git
 
-from crab_student import core, launch, machine, vast, workers
+from crab_student import core, github, launch, machine, vast, workers
 
 RUNNING = {"id": 7, "actual_status": "running", "intended_status": "running"}
 STOPPED = {"id": 7, "actual_status": "exited", "intended_status": "stopped"}
@@ -19,7 +20,7 @@ CLEAN = {"committed": 0, "pushed": True, "dirty": 0, "unpushed": 0, "error": Non
 
 def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     """A worker record with the fields workers read."""
-    repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key_id": None,
+    repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
             "instance_id": None, "dph": 0.40, "budget_usd": 2.0, "limit_hours": 5.0, "machine": "1x RTX 4090",
@@ -57,8 +58,12 @@ def repo(fake_github) -> dict:
     bare = fake_github.create_repo("ada/proj")
     sha = git(bare, "rev-parse", "main").strip()
     git(bare, "branch", "agent/job1", sha)
-    fake_github.keys["ada/proj"] = {101: {"title": "crab-student job1"}}
-    return {"slug": "ada/proj", "branch": "agent/job1", "start_sha": sha, "deploy_key_id": 101,
+    key = {"id": 101, "file": "ada--proj-0123abcd", "created": core.now_iso()}
+    fake_github.keys["ada/proj"] = {101: {"title": github.key_title(key)}}
+    github.key_file(key).parent.mkdir(parents=True, exist_ok=True)
+    github.key_file(key).write_text("private\n")
+    Path(f"{github.key_file(key)}.pub").write_text("ssh-ed25519 AAAA shared\n")
+    return {"slug": "ada/proj", "branch": "agent/job1", "start_sha": sha, "deploy_key": key,
             "branch_created": True, "dir": "/root/work/proj"}  # fmt: skip
 
 
@@ -232,7 +237,19 @@ def test_a_clean_check_destroys_the_machine_and_keeps_only_a_branch_with_work(
     assert [call[1] for call in machines.calls] == [["check"]]
     assert not fake_vast.instances and not core.record_path("job1").exists()
     assert fake_github.keys["ada/proj"] == {}  # (the deploy key is gone)
+    assert not github.key_file(repo["deploy_key"]).exists()
     assert (fake_github.branch_sha("ada/proj", "agent/job1") is not None) is worked
+
+
+def test_a_shared_deploy_key_goes_with_the_last_worker_holding_it(fake_vast, fake_github, machines, repo):
+    git(fake_github.bare("ada/proj"), "branch", "agent/job2", repo["start_sha"])
+    worker(fake_vast, repo=repo)
+    worker(fake_vast, "job2", repo={**repo, "branch": "agent/job2"})
+    machines.replies[("job1", "check")] = machines.replies[("job2", "check")] = CLEAN
+    workers.delete("job1", False, out())
+    assert list(fake_github.keys["ada/proj"]) == [101] and github.key_file(repo["deploy_key"]).exists()
+    workers.delete("job2", False, out())
+    assert fake_github.keys["ada/proj"] == {} and not github.key_file(repo["deploy_key"]).exists()
 
 
 def test_delete_destroys_the_machine_of_an_unconfirmed_rent_found_by_its_label(fake_vast):

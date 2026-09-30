@@ -44,6 +44,10 @@ def ssh_dir() -> Path:
     return home() / "ssh"
 
 
+def keys_dir() -> Path:
+    return home() / "keys"
+
+
 def vast_key_file() -> Path:
     """The Vast key the vastai CLI keeps: switching it switches every Vast tool at once."""
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "vastai" / "vast_api_key"
@@ -178,8 +182,8 @@ def save(rec: dict) -> None:
 
 
 def remove(name: str) -> None:
-    """Forget a worker: its record, brief and deploy key files (its lock file may still be held)."""
-    for suffix in (".json", ".brief.md", ".key", ".key.pub", ".lock"):
+    """Forget a worker: its record and brief (its lock file may still be held)."""
+    for suffix in (".json", ".brief.md", ".lock"):
         with contextlib.suppress(OSError):
             (workers_dir() / f"{name}{suffix}").unlink(missing_ok=True)
 

@@ -95,7 +95,7 @@ def test_records_are_listed_by_creation_and_removed_with_their_files():
     (core.workers_dir() / "junk.json").write_text("{half a record")
     assert core.load("early")["phase"] == "ready"
     assert [r["name"] for r in core.all_records()] == ["early", "late"]
-    for suffix in (".brief.md", ".key", ".key.pub", ".lock"):
+    for suffix in (".brief.md", ".lock"):
         (core.workers_dir() / f"late{suffix}").write_text("x")
     core.remove("late")
     assert sorted(p.name for p in core.workers_dir().iterdir()) == ["early.json", "junk.json"]

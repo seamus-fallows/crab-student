@@ -134,9 +134,11 @@ branch stays on GitHub.
   a rent request whose outcome is unknown (so you never pay twice).
 - **Nothing is destroyed automatically** once a worker has run on it: crab-student destroys a machine
   by itself only when it failed to boot or its first setup failed.
-- **GitHub access** is one deploy key per worker, for its one repo, removed on delete. A deploy key
-  can technically push to any branch of that repo, so crab-student's git hooks keep the worker on
-  `agent/<name>`; for extra safety, protect your `main` branch on GitHub (deploy keys obey it).
+- **GitHub access** is a deploy key for the worker's one repo. GitHub emails you about every key
+  added, so workers started on the same repo within 24 hours share one (start 100 at once: one email),
+  and it is removed from GitHub when the last worker using it is deleted. A deploy key can technically
+  push to any branch of that repo, so crab-student's git hooks keep the worker on `agent/<name>`; for
+  extra safety, protect your `main` branch on GitHub (deploy keys obey it).
 - **Secrets** for tasks (a Hugging Face or W&B token, say): `crab-student secret set HF_TOKEN` (in a
   terminal; it asks for the value), then the launch attaches it with `--secret HF_TOKEN`. The worker
   sees it as an environment variable. Secret values never go on command lines, into logs, the brief

@@ -95,6 +95,10 @@ class FakeGitHub:
             self._next_key += 1
             self.keys.setdefault(slug, {})[self._next_key] = fields
             return json.dumps({"id": self._next_key})
+        if tail[:1] == ["keys"] and len(tail) == 2 and method == "GET":
+            if int(tail[1]) not in self.keys.get(slug, {}):
+                raise self._missing()
+            return json.dumps({"id": int(tail[1]), **self.keys[slug][int(tail[1])]})
         if tail[:1] == ["keys"] and method == "DELETE":
             if self.keys.get(slug, {}).pop(int(tail[1]), None) is None:
                 raise self._missing()

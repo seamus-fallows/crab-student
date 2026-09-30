@@ -112,10 +112,6 @@ class Progress:
         self.shown = text
 
 
-def key_file(name: str) -> Path:
-    return core.workers_dir() / f"{name}.key"
-
-
 def brief_file(name: str) -> Path:
     return core.workers_dir() / f"{name}.brief.md"
 
@@ -199,7 +195,7 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
             "workspace": True,
             "branch": branch,
             "start_sha": None,
-            "deploy_key_id": None,
+            "deploy_key": None,
             "branch_created": False,
             "dir": f"/root/work/{cfg['workspace_repo']}",
         }
@@ -230,7 +226,7 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
         "local_dir": str(r.top),
         "carried": carried,
         "untracked": untracked,
-        "deploy_key_id": None,
+        "deploy_key": None,
         "branch_created": False,
         "dir": f"/root/work/{r.slug.split('/')[1]}",
     }
@@ -517,22 +513,18 @@ def discard(rec: dict, why: str, out: Progress) -> None:
 
 
 def prepare_repo(rec: dict, out: Progress) -> None:
-    """The worker's deploy key and branch on GitHub (once; the record says what is done)."""
+    """The worker's deploy key (usually shared, see github.claim_deploy_key) and its branch on GitHub (once;
+    the record says what is done)."""
     repo, name = rec["repo"], rec["name"]
     if repo["branch_created"]:
         return
     try:
-        key = key_file(name)
-        if not key.exists():
-            core.keygen(key, f"crab-student {name}")
         if repo["workspace"] and not repo["start_sha"]:
             github.ensure_workspace(*repo["slug"].split("/"))
             repo["start_sha"] = github.default_head(repo["slug"])
-        if not repo["deploy_key_id"]:
-            pub = Path(f"{key}.pub").read_text(encoding="utf-8")
-            repo["deploy_key_id"] = github.add_deploy_key(repo["slug"], f"crab-student {name}", pub)
-            core.save(rec)
-        github.create_branch(repo, key)
+        if not repo["deploy_key"]:
+            github.claim_deploy_key(rec)
+        github.create_branch(repo, github.key_file(repo["deploy_key"]))
     except core.CrabError as e:
         if rec["instance_id"] and not rec["uploaded"]:
             vast.destroy(rec["instance_id"])
@@ -545,7 +537,7 @@ def prepare_repo(rec: dict, out: Progress) -> None:
         ) from None
     repo["branch_created"] = True
     core.save(rec)
-    out.line(f"GitHub: deploy key added, {repo['branch']} created on {repo['slug']}")
+    out.line(f"GitHub: {repo['branch']} created on {repo['slug']}")
 
 
 def machine_config(rec: dict) -> dict:
@@ -579,7 +571,10 @@ def generated_files(rec: dict) -> dict[str, tuple[bytes, int]]:
         "BRIEF.md": (brief_file(rec["name"]).read_bytes(), 0o644),
         "claude.env": (claude_env.encode(), 0o600),
         "secrets.env": ("".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items()).encode(), 0o600),
-        "deploy_key": (key_file(rec["name"]).read_bytes().replace(b"\r\n", b"\n"), 0o600),
+        "deploy_key": (
+            github.key_file(rec["repo"]["deploy_key"]).read_bytes().replace(b"\r\n", b"\n"),
+            0o600,
+        ),
         "github_known_hosts": ((github.HOST_KEY + "\n").encode(), 0o644),
     }
 

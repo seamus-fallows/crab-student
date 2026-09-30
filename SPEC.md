@@ -38,7 +38,9 @@ tool is for.)
   secrets.json           {"names": [...]}: names of stored task secrets
   secrets/<key>          0600, only when no system keyring works
   workers/<name>.json    the worker's record (3); workers/<name>.lock its OS lock
-  workers/<name>.brief.md, workers/<name>.key(.pub)   the brief; the worker's deploy key (until delete)
+  workers/<name>.brief.md  the brief
+  workers/_keys-<owner>--<repo>.lock   the repo's deploy key lock (4.3)
+  keys/<owner>--<repo>-<8 hex>(.pub)   deploy keys, shared by workers on that repo (4.3)
   ssh/id_ed25519(.pub)   the key crab-student adds to machines
   ssh/config             generated Host entries (crab-student-<name>), included from ~/.ssh/config
   ssh/known_hosts        machines' host keys, under HostKeyAlias crab-student-<name>
@@ -67,15 +69,15 @@ far the launch got (only the local side writes it):
 Other fields: `req` (hours, gpus, gpu_ram_gb, gpu_models, cpus, ram_gb, disk_gb, min_down_mbps),
 `budget_usd`, `auto_budget`, `limit_hours` (budget / the rented offer's $/hr),
 `model`, `fake_claude`, `secrets` (names), `session_id`, `repo` (slug, workspace, branch, start_sha,
-local_dir, carried, untracked, deploy_key_id, branch_created, dir on the machine), `offers` (the pick
-and up to two fallbacks), `failed_offers`, `instance_id`, `dph`, `machine`, `short`, `ssh` (host,
-port), `uploaded`, `pending` (`{action: launch|start|extend, reason, hours?}`), `warnings`,
-`last_seen` (the last status seen, for display only), `image`, `idle_minutes`, `notify_url` (copied at
-launch). Decisions never rely on `last_seen`: `delete` checks the machine itself.
+local_dir, carried, untracked, deploy_key `{id, file, created}` (4.3), branch_created, dir on the
+machine), `offers` (the pick and up to two fallbacks), `failed_offers`, `instance_id`, `dph`, `machine`,
+`short`, `ssh` (host, port), `uploaded`, `pending` (`{action: launch|start|extend, reason, hours?}`),
+`warnings`, `last_seen` (the last status seen, for display only), `image`, `idle_minutes`, `notify_url`
+(copied at launch). Decisions never rely on `last_seen`: `delete` checks the machine itself.
 
 Names are 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy key title
-`crab-student <name>`; tmux session `worker`.
+`crab-student <created>`; tmux session `worker`.
 
 ## 4. The launch
 
@@ -84,8 +86,8 @@ rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy ke
 2. Under a global lock: the gate; save the record (`renting`, or `pending` and exit 3).
 3. `bring_up` (also what `approve` and `start` use for unfinished launches): for each offer not yet
    failed, save a new label, send one rent request; a definite refusal moves on; an unknown outcome is
-   looked for by label for 2 minutes. Then the deploy key and branch (once), then wait for the machine
-   (every 5 s, at most 15 minutes from the rent): gone, `exited`/`offline`, or an error in
+   looked for by label for 2 minutes. Then the deploy key (4.3) and branch (once), then wait for the
+   machine (every 5 s, at most 15 minutes from the rent): gone, `exited`/`offline`, or an error in
    `status_msg` twice in a row fail it, and it is destroyed and the next offer tried. Running with an
    address: add the ssh key, wait for ssh.
 4. Upload and setup in one ssh call (6.1). Setup's own failure destroys the machine and fails the
@@ -112,6 +114,15 @@ first; then price and id. Up to 2 fallbacks on other machines at most 1.25x the 
 only offers with `dph x hours <= budget`. A CPU task (0 GPUs) may rent a GPU host, with
 `NVIDIA_DISABLE_REQUIRE=1` in its environment.
 
+**4.3 Deploy keys.** GitHub emails a repo's admins about every deploy key added, so workers started on
+a repo within 24 hours share one: a new worker takes the newest key another worker on the same repo
+holds, if it was added less than 24 hours ago, its file is here and GitHub still has it; otherwise
+crab-student makes a new ed25519 key in `keys/` and adds it (read-write). The key is removed from GitHub
+and `keys/` when the last worker holding it is deleted (5.4). Taking and letting go of a key happen under
+the repo's key lock, with the record saved inside it, so a delete never removes a key that a launch is
+taking, and two deletes cannot each leave the key to the other. A machine's owner can copy its key, so
+sharing is bounded: every key stops working once the workers it was given to are deleted.
+
 ## 5. Workers once launched
 
 - **5.1 Views** (`list`, `status`): one Vast instance list, and one `cs.py status` over ssh per
@@ -129,8 +140,8 @@ only offers with `dph x hours <= budget`. A CPU task (0 GPUs) may rent a GPU hos
 - **5.4 delete**: pending -> removed. A machine that received its files: running -> `cs.py check`,
   refused (exit 3, with the list and a copy command) for unpushed commits, uncommitted files, files in
   `/root/outputs`, or untracked files of 100 MB+ outside git; stopped or unreachable -> needs `--force`.
-  Then destroy, remove the deploy key, remove the branch only if it still points at `start_sha`, forget
-  the host key and the record.
+  Then destroy, remove the deploy key unless another worker holds it (4.3), remove the branch only if
+  it still points at `start_sha`, forget the host key and the record.
 
 ## 6. The machine
 

@@ -5,16 +5,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from crab_student import core
 
 # github.com's ed25519 host key (https://api.github.com/meta), pinned for the workers' git.
 HOST_KEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+# Workers started on a repo within this many hours share its deploy key: GitHub emails the repo's admins
+# about every key added, so this is at most one email per repo a day instead of one per worker.
+KEY_SHARE_HOURS = 24
 _REMOTE = re.compile(
     r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
@@ -67,10 +72,10 @@ def known_hosts_file() -> Path:
     return core.ssh_dir() / "github_known_hosts"
 
 
-def ssh_command(key_file: Path) -> str:
+def ssh_command(key_path: Path) -> str:
     """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key."""
     ssh = (core.tool("ssh") or "ssh").replace("\\", "/")
-    key, hosts = str(key_file).replace("\\", "/"), str(known_hosts_file()).replace("\\", "/")
+    key, hosts = str(key_path).replace("\\", "/"), str(known_hosts_file()).replace("\\", "/")
     return (
         f'"{ssh}" -i "{key}" -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile="{hosts}" '
         f"-o StrictHostKeyChecking=yes"
@@ -236,7 +241,91 @@ def remove_deploy_key(slug: str, key_id: int) -> None:
             raise
 
 
-def create_branch(repo: dict, key_file: Path) -> None:
+def deploy_key_exists(slug: str, key_id: int) -> bool:
+    try:
+        api(f"repos/{slug}/keys/{key_id}")
+    except GhError as e:
+        if e.not_found:
+            return False
+        raise
+    return True
+
+
+# ---- deploy keys shared by the workers on a repo ----------------------------------------------------
+# A record's repo.deploy_key is {"id": GitHub's key id, "file": the private key's name in keys/,
+# "created": when it was added}. Claims and releases hold the repo's key lock, so a delete never removes
+# a key a launch is taking, and two deletes never each leave it to the other.
+
+
+def key_file(key: dict) -> Path:
+    return core.keys_dir() / key["file"]
+
+
+def key_title(key: dict) -> str:
+    return f"crab-student {key['created']}"
+
+
+def claim_deploy_key(rec: dict) -> None:
+    """Give the worker the newest deploy key another worker on its repo holds, if it was added less than
+    KEY_SHARE_HOURS ago and GitHub still has it; else a new one. Saves the record."""
+    slug = rec["repo"]["slug"]
+    with _keys_lock(slug):
+        key = max(_held_keys(slug, but=rec["name"]), key=lambda k: k["created"], default=None)
+        if not (key and _fresh(key) and key_file(key).exists() and deploy_key_exists(slug, key["id"])):
+            key = _new_deploy_key(slug)
+        rec["repo"]["deploy_key"] = key
+        core.save(rec)
+
+
+def release_deploy_key(rec: dict) -> None:
+    """The worker is going: its record lets go of its deploy key, which is removed from GitHub and this
+    computer unless another worker holds it. Saves the record."""
+    repo, key = rec["repo"], rec["repo"].get("deploy_key")
+    if not key:
+        return
+    with _keys_lock(repo["slug"]):
+        repo["deploy_key"] = None
+        core.save(rec)
+        if any(k["id"] == key["id"] for k in _held_keys(repo["slug"])):
+            return
+        _delete_key_files(key)
+        remove_deploy_key(repo["slug"], key["id"])
+
+
+def _keys_lock(slug: str):
+    return core.locked(f"_keys-{slug.replace('/', '--')}", wait=300)
+
+
+def _held_keys(slug: str, but: str | None = None) -> list[dict]:
+    return [
+        r["repo"]["deploy_key"]
+        for r in core.all_records()
+        if r["name"] != but and (r.get("repo") or {}).get("slug") == slug and r["repo"].get("deploy_key")
+    ]
+
+
+def _fresh(key: dict) -> bool:
+    return datetime.now(UTC) - datetime.fromisoformat(key["created"]) < timedelta(hours=KEY_SHARE_HOURS)
+
+
+def _new_deploy_key(slug: str) -> dict:
+    key = {"id": None, "file": f"{slug.replace('/', '--')}-{secrets.token_hex(4)}", "created": core.now_iso()}
+    core.keygen(key_file(key), key_title(key))
+    try:
+        public = Path(f"{key_file(key)}.pub").read_text(encoding="utf-8")
+        key["id"] = add_deploy_key(slug, key_title(key), public)
+    except core.CrabError:
+        _delete_key_files(key)
+        raise
+    return key
+
+
+def _delete_key_files(key: dict) -> None:
+    for path in (key_file(key), Path(f"{key_file(key)}.pub")):
+        path.unlink(missing_ok=True)
+
+
+def create_branch(repo: dict, key_path: Path) -> None:
     """Put the worker's branch on GitHub: the starting commit pushed from the user's repo with the worker's
     deploy key (no user credentials, so no prompt can block), or, for the workspace, made through the API."""
     if repo["workspace"]:
@@ -249,7 +338,7 @@ def create_branch(repo: dict, key_file: Path) -> None:
             method="POST",
         )
         return
-    env = {**os.environ, "GIT_SSH_COMMAND": ssh_command(key_file)}
+    env = {**os.environ, "GIT_SSH_COMMAND": ssh_command(key_path)}
     for attempt in range(3):  # (a new deploy key can take a moment to work)
         p = core.run(
             [

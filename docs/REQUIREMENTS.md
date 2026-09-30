@@ -101,8 +101,9 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
 8. **Secrets** (the Claude token, a deploy key, task secrets like an HF or W&B token) never appear on
    command lines, in logs, in the task brief or in git. Task secrets are stored locally by the user
    (`crab-student secret set NAME`, which always asks) and can be attached to a launch.
-9. **GitHub access** per worker is limited to the one repo it works on (a per-worker deploy key with
-   write access, removed on delete). No broad tokens on the machine.
+9. **GitHub access** per worker is limited to the one repo it works on (a deploy key with write
+   access, shared only by workers started on that repo within 24 hours, so that 100 workers do not mean
+   100 emails from GitHub; removed when the last of them is deleted). No broad tokens on the machine.
 10. **Claude Code permissions** on the user's own computer: the background launcher may run the
     read-only and in-budget commands without prompts; anything that spends beyond the gate, destroys,
     or changes settings asks the user.

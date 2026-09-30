@@ -299,11 +299,17 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
 
 
 def _cleanup(rec: dict) -> list[str]:
-    """Remove what the worker had on GitHub and locally; its branch stays unless nobody worked on it."""
-    repo, notes = rec["repo"], []
+    """Remove what the worker had on GitHub and locally: its deploy key unless another worker shares it, and
+    its branch unless somebody worked on it."""
+    repo, notes, key = rec["repo"], [], rec["repo"].get("deploy_key")
     try:
-        if repo.get("deploy_key_id"):
-            github.remove_deploy_key(repo["slug"], repo["deploy_key_id"])
+        github.release_deploy_key(rec)
+    except core.CrabError as e:
+        notes.append(
+            f"Warning: could not remove the deploy key '{github.key_title(key)}' from {repo['slug']} "
+            f"({e.message}). Remove it by hand: the repo's Settings > Deploy keys."
+        )
+    try:
         if repo.get("branch_created") and github.delete_branch_if_at(
             repo["slug"], repo["branch"], repo["start_sha"]
         ):
@@ -311,10 +317,7 @@ def _cleanup(rec: dict) -> list[str]:
         elif repo.get("branch_created"):
             notes.append(f"Branch {repo['branch']} stays on {repo['slug']}.")
     except core.CrabError as e:
-        notes.append(
-            f"Warning: could not tidy up on GitHub ({e.message}). Remove the deploy key 'crab-student "
-            f"{rec['name']}' from {repo['slug']} by hand."
-        )
+        notes.append(f"Warning: could not check {repo['branch']} on GitHub ({e.message}); it stays there.")
     machine.forget_host_key(rec["name"])
     core.remove(rec["name"])
     machine.write_ssh_config()

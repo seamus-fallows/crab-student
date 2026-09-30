@@ -404,40 +404,14 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError(f"{args.name} is not running. Start it first: crab-student start {args.name}")
     if not live:
         raise core.CrabError("no agent is running.")
-    in_vscode = {r["name"] for r in live if r["mode"] == "interactive" and _frontend(r) == "vscode"}
+    names = [r["name"] for r in live]
     if args.vscode:
-        for r in live:
-            machine.open_vscode(r)
+        if any(r["mode"] == "interactive" for r in live):
+            agents.views(names)  # (records a hand-off, so VS Code does not offer the task to Claude again)
+        for name in names:
+            machine.open_vscode(core.load(name))
         return 0
-    if args.name and in_vscode:
-        raise core.CrabError(
-            f"{args.name} is an interactive agent: it works with you in VS Code, not in a terminal. Open it with: "
-            f"crab-student open {args.name} --vscode",
-            2,
-        )
-    if args.name:
-        return machine.open_one(args.name)
-    if in_vscode:
-        say(f"Not opened here (in VS Code: crab-student open NAME --vscode): {', '.join(sorted(in_vscode))}")
-    names = [r["name"] for r in live if r["name"] not in in_vscode]
-    if not names:
-        raise core.CrabError("no agent is running in a terminal.")
-    return machine.open_all(names)
-
-
-def _frontend(rec: dict) -> str | None:
-    """Where an interactive agent's Claude Code runs: "vscode" until the hand-off, then "tmux" (None when the
-    machine does not answer). A hand-off seen here updates the record's mode, and `rec`."""
-    try:
-        st = machine.remote(rec["name"], ["status"], timeout=20)
-    except core.CrabError:
-        return None
-    if st.get("mode") in core.MODES and st["mode"] != rec["mode"]:
-        with core.locked(rec["name"], wait=30):
-            fresh = core.load(rec["name"])
-            fresh["mode"] = rec["mode"] = st["mode"]
-            core.save(fresh)
-    return st.get("frontend")
+    return agents.open_one(args.name) if args.name else agents.open_all(names)
 
 
 # ---- the parser ----------------------------------------------------------------------------------

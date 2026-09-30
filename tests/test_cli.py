@@ -398,24 +398,30 @@ def opened(fake_vast, machines, monkeypatch) -> list[tuple]:
     )
     for name, mode in (("job1", "colleague"), ("job2", "interactive")):
         core.save(record(name, mode=mode, instance_id=fake_vast.add_instance(1, name)))
-    machines.replies[("job2", "status")] = {"mode": "interactive", "frontend": "vscode"}
+        machines.replies[(name, "status")] = machine_status(mode, "tmux" if mode == "colleague" else "vscode")
     return got
 
 
-def test_an_interactive_agent_in_vs_code_opens_there_and_open_all_leaves_it_out(opened, machines, capsys):
+def machine_status(mode: str, frontend: str) -> dict:
+    """What the machine's status command says."""
+    return {"name": "job", "agent": {"state": "working", "message": "on it"}, "idle_seconds": 30, "used_hours": 0.5,
+            "mode": mode, "frontend": frontend, "stopping": None, "stop_reason": None, "stop_sent_for": None,
+            "git": {"dirty": 0, "unpushed": 0}}  # fmt: skip
+
+
+def test_an_interactive_agent_in_vs_code_opens_there_and_open_all_leaves_it_out(opened, capsys):
     assert run(capsys, "open", "job2")[0] == 2
     assert run(capsys, "open", "job2", "--vscode")[0] == 0
     rc, out, _ = run(capsys, "open", "--all")
     assert rc == 0 and "job2" in out
     assert opened == [("vscode", "job2", "interactive"), ("terminals", ["job1"])]
-    assert {call[0] for call in machines.calls} == {"job2"}  # (only an interactive agent is asked)
 
 
 def test_open_follows_a_hand_off_to_tmux(opened, machines, capsys):
-    machines.replies[("job2", "status")] = {"mode": "autonomous", "frontend": "tmux"}
-    assert run(capsys, "open", "job2")[0] == 0
-    assert opened == [("terminal", "job2")] and core.load("job2")["mode"] == "autonomous"
-    assert run(capsys, "open", "job2", "--vscode")[0] == 0 and opened[-1] == ("vscode", "job2", "autonomous")
+    machines.replies[("job2", "status")] = machine_status("autonomous", "tmux")
+    assert run(capsys, "open", "job2")[0] == 0 and opened == [("terminal", "job2")]
+    assert run(capsys, "open", "job2", "--vscode")[0] == 0  # (VS Code then offers the task to no new Claude)
+    assert opened[-1] == ("vscode", "job2", "autonomous") and core.load("job2")["mode"] == "autonomous"
 
 
 # ---- guide and offers ----------------------------------------------------------------------------

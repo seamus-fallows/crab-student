@@ -1,9 +1,10 @@
-"""`crab-student init`, the Claude Code integration (skill, launcher agent and permission rules) and readiness
-checks."""
+"""`crab-student init`, the Claude Code integration (skill, permission rules) and readiness checks."""
 
 from __future__ import annotations
 
 import getpass
+import json
+import os
 import re
 import subprocess
 import sys
@@ -12,7 +13,10 @@ from pathlib import Path
 from crab_student import core, github, vast
 
 DATA = Path(__file__).parent / "data"
-LAUNCHER_AGENT = "agents/crab-student-launcher.md"  # (in ~/.claude; its name is the skill's subagent_type)
+OLD_LAUNCHER_AGENT = "agents/crab-student-launcher.md"  # (in ~/.claude; init used to install it)
+FORK_VERSION = (2, 1, 232)  # (the first Claude Code whose forks the skill starts the launcher with)
+VSCODE_EXTENSIONS = "remote.SSH.defaultExtensions"
+CLAUDE_EXTENSION = "anthropic.claude-code"
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{60,}")
 
 # Allowed without asking: reading, and actions within the user's price rule (a launch that would need a
@@ -32,7 +36,6 @@ ALLOW = [
         "open",
         "stop",
         "start",
-        "extend",
         "secret list",
     )
 ]
@@ -77,7 +80,9 @@ def init(renew_claude_token: bool = False) -> int:
     print("crab-student setup")
     ok = all([_vast_step(), _github_step(), _ssh_step(), _claude_step(renew_claude_token)])
     install_claude_files()
-    _say("Claude Code", "skill, launcher agent and permission rules installed in ~/.claude")
+    _say("Claude Code", "skill and permission rules installed in ~/.claude")
+    _claude_version_step()
+    _vscode_step()
     ok = _tools_step() and ok
     if ok:
         print(
@@ -195,14 +200,94 @@ def _tools_step() -> bool:
     return not missing
 
 
+def claude_version() -> tuple[int, ...] | None:
+    claude = core.tool("claude")
+    if not claude:
+        return None
+    try:
+        out = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+    return tuple(int(n) for n in found.groups()) if found else None
+
+
+def _claude_version_step() -> None:
+    version = claude_version()
+    if version is None:
+        _say(
+            "Claude Code", "could not check its version; the launcher needs v2.1.232 or later (claude update)"
+        )
+    elif version < FORK_VERSION:
+        need = ".".join(map(str, FORK_VERSION))
+        _say(
+            "Claude Code",
+            f"Warning: v{'.'.join(map(str, version))} is older than v{need}, which the launcher needs "
+            "(it starts as a fork of your conversation). Run: claude update",
+        )
+    else:
+        _say("Claude Code", f"ok - v{'.'.join(map(str, version))}")
+
+
+def vscode_settings_file() -> Path:
+    home = Path.home()
+    if sys.platform == "win32":
+        base = home / "AppData" / "Roaming"
+    elif sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return base / "Code" / "User" / "settings.json"
+
+
+def _vscode_step() -> None:
+    """Offer to have VS Code install the Claude extension on every machine it connects to (Remote - SSH)."""
+    path = vscode_settings_file()
+    if not path.parent.exists():
+        _say("VS Code", "not found (only needed for open --vscode, which uses its Remote - SSH extension)")
+        return
+    hint = f'add "{VSCODE_EXTENSIONS}": ["{CLAUDE_EXTENSION}"] to {path}'
+    settings = _read_vscode_settings(path)
+    current = settings.get(VSCODE_EXTENSIONS) if settings is not None else None
+    if settings is None or (current is not None and not isinstance(current, list)):
+        _say("VS Code", f"could not edit {path} safely. So the Claude extension installs on machines: {hint}")
+    elif CLAUDE_EXTENSION in (current or []):
+        _say("VS Code", "ok - the Claude extension installs on machines by itself")
+    elif interactive() and _confirm(
+        f"  VS Code     Install the Claude extension on machines by itself ({VSCODE_EXTENSIONS})? [Y/n] "
+    ):
+        settings[VSCODE_EXTENSIONS] = [*(current or []), CLAUDE_EXTENSION]
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(settings, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+        core.replace(tmp, path)
+        _say("VS Code", f"ok - added {VSCODE_EXTENSIONS} to {path}")
+    else:
+        _say("VS Code", f"to have the Claude extension installed on machines by itself, {hint}")
+
+
+def _read_vscode_settings(path: Path) -> dict | None:
+    """The settings, or None when the file is not plain JSON (VS Code allows comments there)."""
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def _confirm(prompt: str) -> bool:
+    return input(prompt).strip().lower() in ("", "y", "yes")
+
+
 def install_claude_files() -> None:
-    """The skill, the launcher agent, and the permission rules merged into ~/.claude/settings.json (older
-    crab-student rules are replaced; everything else is kept)."""
+    """The skill, and the permission rules merged into ~/.claude/settings.json (older crab-student rules
+    are replaced; everything else is kept). The launcher agent of older versions is removed."""
     claude = Path.home() / ".claude"
-    for source, target in (("SKILL.md", "skills/crab-student/SKILL.md"), ("launcher.md", LAUNCHER_AGENT)):
-        path = claude / target
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text((DATA / source).read_text(encoding="utf-8"), encoding="utf-8")
+    (claude / OLD_LAUNCHER_AGENT).unlink(missing_ok=True)
+    path = claude / "skills/crab-student/SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text((DATA / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")
     path = claude / "settings.json"
     settings = core.read_json(path, None) if path.exists() else {}
     if not isinstance(settings, dict):
@@ -221,4 +306,6 @@ def install_claude_files() -> None:
 def guide(topic: str) -> str:
     if topic != "launch":
         raise core.CrabError("the only guide is: crab-student guide launch", 2)
-    return (DATA / "launch.md").read_text(encoding="utf-8")
+    price = core.load_config()["approve_above_usd_per_hour"]
+    text = (DATA / "launch.md").read_text(encoding="utf-8")
+    return text.replace("{{approve_above_usd_per_hour}}", f"{price:g}")

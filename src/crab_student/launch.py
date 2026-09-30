@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import secrets
 import shlex
@@ -81,6 +82,8 @@ class Progress:
     def __init__(self, stream=None):
         self.stream = stream or sys.stderr
         self.tty = getattr(self.stream, "isatty", lambda: False)()
+        if self.tty and os.name == "nt":
+            os.system("")  # (turns on the escape codes that rewrite the status line)
         self.shown: str | None = None
         self.t0 = time.monotonic()
 
@@ -169,6 +172,7 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     with core.locked("_gate", wait=120):  # (two launches must not both pass max_running_machines)
         reason = gate(plan.budget_usd, cfg, running_count())
         rec = new_record(a, cfg, plan, repo, limit)
+        rec["warnings"] = warnings  # (repeated when a launch waiting for approval goes ahead)
         if reason:
             rec.update(phase="pending", pending={"action": "launch", "reason": reason})
         brief_file(a.name).parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +336,7 @@ def replan(rec: dict, out: Progress) -> None:
         uploaded=False,
         phase="renting",
         error=None,
+        pending=None,  # (a start that waited for approval is happening now)
     )
     core.save(rec)
     out.line(
@@ -349,7 +354,7 @@ def rent_loop(rec: dict, out: Progress) -> None:
                 raise core.CrabError(rent_unknown(rec))
         else:
             rec["rent"] = {
-                "label": f"cs:{rec['name']}:{secrets.token_hex(4)}",
+                "label": f"crab-student-{rec['name']}-{secrets.token_hex(4)}",
                 "offer_id": offer["id"],
                 "at": time.time(),
             }
@@ -617,7 +622,7 @@ def approve(name: str, out: Progress) -> dict:
         rec["pending"] = None
         core.save(rec)
     if pending["action"] == "launch":
-        return bring_up(name, out)
+        return bring_up(name, out, rec.get("warnings", []))
     if pending["action"] == "start":
         return start(name, out, check_gate=False)
     return extend(name, pending["hours"], check_gate=False)
@@ -653,7 +658,8 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
     if rec["phase"] == "pending":
         raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
     if rec["phase"] == "failed" and check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
-        return _pend(rec, "start", reason)
+        with core.locked(name):
+            return _pend(core.load(name), "start", reason)
     if rec["phase"] != "ready":
         return bring_up(name, out)
     with core.locked(name):
@@ -671,6 +677,9 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
         if check_gate and (reason := gate(None, cfg, running_count(exclude=name))):
             return _pend(rec, "start", reason)
         vast.set_state(rec["instance_id"], "running")
+        if (rec.get("pending") or {}).get("action") == "start":
+            rec["pending"] = None  # (the start that waited for approval is done)
+            core.save(rec)
         out.line(f"Starting {name}...")
         if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
             raise core.CrabError(
@@ -683,6 +692,10 @@ def start(name: str, out: Progress, check_gate: bool = True) -> dict:
         machine.write_ssh_config()
         if res.get("used_hours", 0) >= rec["limit_hours"]:
             vast.set_state(rec["instance_id"], "stopped")
+            # (remembered, so the next start refuses without booting the machine again)
+            seen = {"used_hours": res["used_hours"], "stop_reason": "time-limit", "at": core.now_iso()}
+            rec["last_seen"] = {**(rec.get("last_seen") or {}), **seen}
+            core.save(rec)
             raise _time_up(rec)
         return result(rec, "working", [])
 

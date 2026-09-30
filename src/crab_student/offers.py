@@ -120,6 +120,7 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
     ok = (
         o.get("rentable") is not False
         and o.get("rented") is not True
+        and o.get("external") is not True
         and o.get("verification", "verified") == "verified"
         and bool(price and price > 0)
         and rel is not None

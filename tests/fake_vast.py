@@ -180,5 +180,5 @@ class _Handler(BaseHTTPRequestHandler):
 def serve(fake: FakeVast) -> tuple[ThreadingHTTPServer, str]:
     handler = type("Handler", (_Handler,), {"fake": fake})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, args=(0.02,), daemon=True).start()  # (a quick shutdown)
     return server, f"http://127.0.0.1:{server.server_address[1]}"

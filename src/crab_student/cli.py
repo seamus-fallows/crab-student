@@ -79,7 +79,7 @@ def cmd_config(args: argparse.Namespace) -> int:
     cfg = core.load_config()
     if args.key and (args.reset or args.value is not None):
         value = core.set_config(args.key, None if args.reset else args.value)
-        say(f"{args.key} = {_show(value)}")
+        say(json.dumps(value) if args.json else f"{args.key} = {_show(value)}")
     elif args.key:
         if args.key not in core.DEFAULTS:
             core.parse_value(args.key, "")  # (raises: unknown setting)
@@ -230,7 +230,7 @@ def cmd_secret(args: argparse.Namespace) -> int:
     if args.action == "delete":
         core.delete_secret(core.secret_key(args.name))
         core.set_secret_names([n for n in names if n != args.name])
-        say(f"Deleted {args.name}.")
+        emit({"name": args.name, "result_line": f"Deleted {args.name}."}, args.json)
         return 0
     if not setup.interactive():
         raise core.CrabError(
@@ -241,7 +241,8 @@ def cmd_secret(args: argparse.Namespace) -> int:
         raise core.CrabError("the value is empty; nothing was stored.", 2)
     core.set_secret(core.secret_key(args.name), value)
     core.set_secret_names([*names, args.name])
-    say(f"Stored {args.name}. Attach it to a launch with --secret {args.name}.")
+    line = f"Stored {args.name}. Attach it to a launch with --secret {args.name}."
+    emit({"name": args.name, "result_line": line}, args.json)
     return 0
 
 
@@ -253,17 +254,16 @@ def table(views: list[workers.View]) -> list[str]:
         return [
             "No workers yet. Ask Claude Code to run something with crab-student, or see crab-student launch --help."
         ]
+    money = [f"{'-' if v.spent is None else '~' + core.usd(v.spent)} / {core.usd(v.budget)}" for v in views]
     name_w = max(4, *(len(v.name) for v in views)) + 2
-    msg_w = max(20, shutil.get_terminal_size((110, 20)).columns - name_w - 13 - 7 - 18 - 1)
-    lines = [f"{'NAME':<{name_w}}{'STATE':<13}{'MESSAGE':<{msg_w + 2}}{'TIME':<7}SPENT / BUDGET"]
-    for v in views:
+    # STATE fits "launch failed" and TIME "999h59m" with a gap; the last column stays free (a line that fills
+    # the terminal wraps on some consoles).
+    rest = name_w + 15 + 2 + 8 + max(14, *(len(m) for m in money)) + 1
+    msg_w = max(20, shutil.get_terminal_size((110, 20)).columns - rest)
+    lines = [f"{'NAME':<{name_w}}{'STATE':<15}{'MESSAGE':<{msg_w + 2}}{'TIME':<8}SPENT / BUDGET"]
+    for v, m in zip(views, money, strict=True):
         msg = v.message if len(v.message) <= msg_w else v.message[: msg_w - 3] + "..."
-        money = (
-            f"~{core.usd(v.spent)} / {core.usd(v.budget)}"
-            if v.spent is not None
-            else f"- / {core.usd(v.budget)}"
-        )
-        lines.append(f"{v.name:<{name_w}}{v.state:<13}{msg:<{msg_w + 2}}{core.fmt_hours(v.used_h):<7}{money}")
+        lines.append(f"{v.name:<{name_w}}{v.state:<15}{msg:<{msg_w + 2}}{core.fmt_hours(v.used_h):<8}{m}")
     return lines
 
 
@@ -311,10 +311,15 @@ def watch(interval: float) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     v = workers.view(args.name)
     rec = core.load(args.name)
+    headline = f"{v.name}: {v.state} - {v.message}"
     if args.json:
-        print(json.dumps({**asdict(v), "result_line": launch.result(rec, v.state, [])["result_line"]}))
+        # The launch's line says "working on ..." or what to approve; any other state gets the headline.
+        line = headline
+        if v.state in ("working", "approval"):
+            line = launch.result(rec, v.state, [], (rec.get("pending") or {}).get("reason"))["result_line"]
+        print(json.dumps({**asdict(v), "result_line": line}))
         return 0
-    say(f"{v.name}: {v.state} - {v.message}")
+    say(headline)
     if v.machine:
         say(
             f"  machine   {v.machine} - ${v.dph:.2f}/hr (instance {rec['instance_id']}, {v.vast_status or 'unknown'})"
@@ -458,6 +463,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Briefs and messages come as UTF-8 (Git Bash too); Windows would decode a pipe with its ANSI code page.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     try:
         return args.func(args) or 0
     except core.CrabError as e:

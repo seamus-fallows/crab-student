@@ -52,7 +52,7 @@ def _ask_secret(prompt: str) -> str:
 
 
 def _say(label: str, text: str) -> None:
-    print(f"  {label:<11} {text}", flush=True)
+    print(core.ascii_text(f"  {label:<11} {text}"), flush=True)
 
 
 def check_ready(fake_claude: bool = False) -> None:
@@ -147,7 +147,7 @@ def _ssh_step() -> bool:
         )
     github.known_hosts_file().write_text(github.HOST_KEY + "\n", encoding="utf-8")
     added = ensure_ssh_include()
-    note = f" (and added the Include line to {Path('~/.ssh/config')})" if added else ""
+    note = " (and added the Include line to ~/.ssh/config)" if added else ""
     _say("SSH key", f"{'created' if made else 'ok -'} {key}{note}")
     return True
 

@@ -115,7 +115,13 @@ def fmt_hours(h: float) -> str:
 
 
 def run(args, check: bool = False, timeout: float = 120, **kw) -> subprocess.CompletedProcess:
-    p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, **kw)
+    """A program's result; a missing program (127) or a timeout (124) is a failed result, not an exception."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, **kw)
+    except FileNotFoundError:
+        p = subprocess.CompletedProcess(args, 127, "", "%s: not found" % args[0])
+    except subprocess.TimeoutExpired:
+        p = subprocess.CompletedProcess(args, 124, "", "timed out after %d s" % timeout)
     if check and p.returncode:
         raise RuntimeError("%s failed: %s" % (Path(str(args[0])).name, last_line(p.stderr or p.stdout)))
     return p
@@ -507,7 +513,7 @@ def cmd_watch() -> int:
     lock = _lock(D / "watch.lock")
     if not lock:
         return 0
-    vast_env = read_env_file(D / "vast.env")
+    vast_env = dict(container_env(), **read_env_file(D / "vast.env"))
     for key in ("CONTAINER_API_KEY", "CONTAINER_ID"):  # (the tmux server and the worker never see them)
         os.environ.pop(key, None)
     st, probe, now = load_state(), Probe(), time.time()
@@ -565,6 +571,17 @@ def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
         except Exception as e:
             log("save failed: %r" % (e,))
         vast_stop(vast_env)
+
+
+def container_env() -> dict:
+    """Vast's variables as the container's first process has them (a fallback for vast.env)."""
+    try:
+        with open("/proc/1/environ", "rb") as f:
+            items = f.read().decode("utf-8", "replace").split(chr(0))
+    except OSError:
+        return {}
+    keys = ("CONTAINER_ID", "CONTAINER_API_KEY", "CS_VAST_URL")
+    return {k: v for k, _, v in (item.partition("=") for item in items) if k in keys}
 
 
 def vast_stop(vast_env: dict) -> None:
@@ -659,8 +676,9 @@ def save(reason: str) -> dict:
     else:
         git("add", "-u")
         added = []
-        for f in untracked():
-            (res["skipped"] if (repo / f).stat().st_size > 10_000_000 else added).append(f)
+        for f in untracked():  # (a broken symlink is no file: it is added as the link it is)
+            big = (repo / f).is_file() and (repo / f).stat().st_size > 10_000_000
+            (res["skipped"] if big else added).append(f)
         if added:
             git("add", "--", *added)
         staged = [f for f in git("diff", "--cached", "--name-only", "-z").split("\0") if f]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -96,7 +97,12 @@ def local_repo(path: Path) -> Repo:
     top = Path(p.stdout.strip())
     remotes = sorted(git(top, "remote").split(), key=lambda r: r != "origin")
     slug = next(
-        (s for r in remotes if (s := parse_remote(git(top, "config", "--get", f"remote.{r}.url", check=False)))), None
+        (
+            s
+            for r in remotes
+            if (s := parse_remote(git(top, "config", "--get", f"remote.{r}.url", check=False)))
+        ),
+        None,
     )
     if not slug:
         raise core.CrabError(
@@ -132,9 +138,10 @@ def check_repo(slug: str, branch: str) -> None:
 
 
 def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str], int]:
-    """The worker's starting commit: HEAD, plus the uncommitted changes to tracked files as one commit made
-    in a temporary index (the user's index, working tree, branches and stash are untouched). Returns
-    (start sha, files carried, untracked files not carried, local commits not on any remote)."""
+    """The worker's starting commit: HEAD, plus the uncommitted changes to tracked files (what `git commit -a`
+    would commit) as one commit made in a copy of the index (the user's index, working tree, branches and
+    stash are untouched). Returns (start sha, files carried, untracked files not carried, local commits not
+    on any remote)."""
     top = repo.top
     changed = [f for f in git(top, "diff", "--name-only", "-z", "HEAD").split("\0") if f]
     untracked = [f for f in git(top, "ls-files", "--others", "--exclude-standard", "-z").split("\0") if f]
@@ -142,8 +149,9 @@ def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str]
     if not changed or not commit:
         return repo.head, changed, untracked, local
     with tempfile.TemporaryDirectory() as tmp:
-        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-        git(top, "read-tree", "HEAD", env=env)
+        index = Path(tmp) / "index"  # (a copy of the user's, so files staged but never committed come too)
+        shutil.copyfile(top / git(top, "rev-parse", "--git-path", "index").strip(), index)
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
         git(top, "add", "-u", env=env)
         tree = git(top, "write-tree", env=env).strip()
     env = dict(os.environ)

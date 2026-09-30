@@ -69,6 +69,7 @@ def fake_vast(monkeypatch) -> FakeVast:
     core.write_private(core.vast_key_file(), fake.key + "\n")
     yield fake
     server.shutdown()
+    server.server_close()
 
 
 @pytest.fixture

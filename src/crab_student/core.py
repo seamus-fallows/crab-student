@@ -302,7 +302,10 @@ def set_secret(key: str, value: str) -> str:
     """Store a secret; returns where it went ("keyring" or "file", when no keyring works)."""
     try:
         keyring.set_password(SERVICE, key, value)
+        kept = keyring.get_password(SERVICE, key) == value  # (the null backend drops it without a word)
     except (keyring.errors.KeyringError, RuntimeError):
+        kept = False
+    if not kept:
         write_private(_fallback(key), value)
         return "file"
     _fallback(key).unlink(missing_ok=True)

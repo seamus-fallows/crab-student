@@ -52,8 +52,10 @@ class FakeGitHub:
 
     def gh(self, *args: str) -> str:
         self.calls.append(args)
-        if args[:2] == ("repo", "clone"):
+        if args[:2] == ("repo", "clone"):  # (origin is GitHub's URL, as gh leaves it; git reaches the fake)
             git(".", "clone", "-q", str(self.bare(args[2])), args[3])
+            git(args[3], "remote", "set-url", "origin", f"git@github.com:{args[2]}.git")
+            git(args[3], "config", f"url.{self.root.as_posix()}/.insteadOf", "git@github.com:")
             return ""
         assert args[0] == "api", args
         rest = list(args[1:])

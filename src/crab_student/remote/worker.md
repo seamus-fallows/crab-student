@@ -42,7 +42,10 @@ start with `crab-student:` come from the machine's watchdog.
 
 ## Environment
 
-- Python is `/venv/main/bin/python` (with pip) when the image has it, else `python3`; `apt-get` works.
+- Only Claude Code and tmux were installed for you. Start by setting up what the task needs, the way the
+  repo does it (`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README).
+- Python is `/venv/main/bin/python` (with pip) when the image has it, else `python3`; `apt-get` works,
+  and you can install uv or conda if the repo uses them.
 - Secrets for this task are environment variables: {{secrets}}. Never print, log or commit their values.
 
 ## Time and money

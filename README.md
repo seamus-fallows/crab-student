@@ -13,18 +13,36 @@ when it is done or idle, so the bill stays small and bounded.
 
 ## What you need
 
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- [Claude Code](https://claude.com/claude-code) and a Claude subscription (workers use it through a
+  long-lived token; no API key)
+- Python 3.11+, and [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io) to install it
+  (plain pip works too)
 - git, the GitHub CLI [`gh`](https://cli.github.com), and an OpenSSH client (Windows has one built in)
 - A Vast.ai account with some credit, and its [API key](https://cloud.vast.ai/manage-keys/)
-- A Claude subscription (workers use it through a long-lived token; no API key)
 - For `open --all`: Windows Terminal on Windows, or `tmux` on macOS and Linux (optional)
 
 ## Install and set up
 
 ```
-uv tool install git+https://github.com/<you>/crab-student      # or, from a clone: uv tool install -e .
+uv tool install git+https://github.com/seamus-fallows/crab-student
 crab-student init
 ```
+
+Other ways to install:
+
+- With pipx: `pipx install git+https://github.com/seamus-fallows/crab-student`.
+- With plain pip: `pip install git+https://github.com/seamus-fallows/crab-student`. Use a virtual
+  environment whose `bin` (or `Scripts`) folder is on your PATH.
+- From a clone: `uv tool install -e .` (or `pip install -e .`). The installed `crab-student` then runs
+  the clone's code.
+
+The repo is private, so you need access to it. `gh auth setup-git` lets git use your `gh` login to
+fetch it.
+
+To upgrade:
+
+1. Run the same install command again with `--force`. For pip, use `--force-reinstall`.
+2. Run `crab-student init` again.
 
 `init` walks you through everything once and is safe to run again (it only asks for what is
 missing):
@@ -64,6 +82,18 @@ commits that are not on GitHub yet, and uncommitted changes to tracked files, go
 commit on the worker's branch; your own checkout is not touched). Untracked files do not; the launch
 warns about them. A task that has nothing to do with a repo (`--no-repo`) goes to a private
 `crab-student-work` repo on your GitHub.
+
+**Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
+with CUDA, Python and pip). Setup adds only what crab-student needs: tmux, Claude Code, the repo and
+its git hooks. The worker then installs your project's dependencies itself, as the first part of its
+task:
+
+- It installs them the way your repo does, e.g. `requirements.txt`, `pyproject.toml`, `uv.lock` or
+  `environment.yml`, with `pip`, `uv` or `apt-get`.
+- It can install uv or conda itself if your repo needs them.
+
+If setting up needs anything special, such as a system library, a particular CUDA or PyTorch
+version, or a private package index, say so when you ask. That goes into the worker's brief.
 
 **Several workers.** For a sweep, or several separate tasks, the launcher writes a brief for each and
 launches them together (`crab-student launch --batch`, which reads the workers from stdin, each
@@ -121,8 +151,7 @@ crab-student extend NAME HOURS   # adds HOURS to its time limit
 crab-student delete NAME         # destroys the machine and forgets the worker
 ```
 
-A stopped machine keeps its disk, and Vast bills for it, so delete
-workers you are done with: `list` and `status` show how long each stopped worker has been sitting and
+A stopped machine keeps its disk, and Vast bills for it, so delete workers you are done with: `list` and `status` show how long each stopped worker has been sitting and
 what its disk costs per day. Before a machine stops, by itself or with `stop`, it saves its work and
 writes a note of what it leaves behind (`agent-runs/<name>/stopped.json`, committed and pushed with
 that last save). So `delete` can usually check a stopped worker for work that would be lost (unpushed

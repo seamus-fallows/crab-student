@@ -143,7 +143,11 @@ def read_env_file(path: Path) -> dict:
     except OSError:
         return env
     for line in lines:
-        for word in shlex.split(line):
+        try:
+            words = shlex.split(line)
+        except ValueError:  # (a line that is not valid shell quoting is skipped, never fatal)
+            continue
+        for word in words:
             if "=" in word and word != "export":
                 key, value = word.split("=", 1)
                 env[key] = value
@@ -338,7 +342,7 @@ def cmd_claude() -> int:
 def cmd_attach() -> int:
     spawn_watchdog()
     if tmux("has-session", "-t", "worker").returncode == 0:
-        os.execvp("tmux", ["tmux", "attach", "-t", "worker"])
+        os.execvp("tmux", ["tmux", "-u", "attach", "-t", "worker"])  # (-u: UTF-8 even without a locale)
     print(
         "The worker's session is not running (see crab-student status %s). Opening a shell." % cfg()["name"]
     )
@@ -663,8 +667,9 @@ def untracked() -> list:
 
 
 def save(reason: str) -> dict:
-    """Commit and push what can safely be saved: tracked changes and untracked files up to 10 MB, never
-    during a merge or rebase, never on another branch, never past the pre-commit hook."""
+    """Commit and push what can safely be saved: tracked changes, and untracked files up to 10 MB each (at
+    most 2,000 files and 100 MB in all: a forgotten dataset folder is no work to push), never during a merge
+    or rebase, never on another branch, never past the pre-commit hook."""
     c = cfg()
     repo, branch = Path(c["repo_dir"]), c["branch"]
     res = {"committed": 0, "pushed": False, "skipped": [], "dirty": 0, "unpushed": 0, "error": None}
@@ -676,12 +681,18 @@ def save(reason: str) -> dict:
         res["error"] = "a merge or rebase is in progress" if busy else "the repo is not on %s" % branch
     else:
         git("add", "-u")
-        added = []
+        added, total, skipped = [], 0, []
         for f in untracked():  # (a broken symlink is no file: it is added as the link it is)
-            big = (repo / f).is_file() and (repo / f).stat().st_size > 10_000_000
-            (res["skipped"] if big else added).append(f)
-        if added:
-            git("add", "--", *added)
+            size = (repo / f).stat().st_size if (repo / f).is_file() else 0
+            if size > 10_000_000 or len(added) >= 2000 or total + size > 100_000_000:
+                skipped.append(f)
+            else:
+                added.append(f)
+                total += size
+        res["skipped"] = skipped[:50]
+        if added:  # (on stdin: thousands of paths would not fit on one command line)
+            run(["git", "add", "--pathspec-from-file=-", "--pathspec-file-nul"], input="\0".join(added),
+                check=True, cwd=str(repo))  # fmt: skip
         staged = [f for f in git("diff", "--cached", "--name-only", "-z").split("\0") if f]
         if staged:
             p = run(["git", "commit", "-q", "-m", "crab-student: autosave (%s)" % reason], cwd=str(repo))

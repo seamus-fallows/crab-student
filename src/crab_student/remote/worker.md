@@ -74,7 +74,7 @@ logs and checkpoints, then continue from where you were.
 ```markdown
 # {{name}}: <the task in a few words>
 
-Status: working | done | failed - Branch: {{branch}} - Updated: <UTC time>
+Status: working | done | failed - Branch: {{branch}} - Updated: <UTC time from `date -u`>
 
 ## Summary
 Two to five sentences: what was asked, what you found, the answer.
@@ -97,5 +97,5 @@ to reproduce the results.
 Limits of the results, what to try next, what the user should check.
 
 ## Log
-- <UTC time> <short progress note>   (newest last)
+- <UTC time from `date -u +%H:%M`> <short progress note>   (newest last)
 ```

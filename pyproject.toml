@@ -37,4 +37,7 @@ max-line-length = 125  # (the formatter wraps at 110; long messages may run a li
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
-markers = ["e2e: the end-to-end test (needs Docker; Linux CI)"]
+markers = [
+    "e2e: the end-to-end test (needs Docker; Linux CI)",
+    "integration: the machine side end to end in tmux (needs Linux with tmux, git, bash and pgrep; Linux CI)",
+]

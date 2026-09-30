@@ -417,11 +417,10 @@ def test_an_interactive_agent_in_vs_code_opens_there_and_open_all_leaves_it_out(
     assert opened == [("vscode", "job2", "interactive"), ("terminals", ["job1"])]
 
 
-def test_open_follows_a_hand_off_to_tmux(opened, machines, capsys):
+def test_after_a_hand_off_an_interactive_agent_opens_in_a_terminal(opened, machines, capsys):
     machines.replies[("job2", "status")] = machine_status("autonomous", "tmux")
-    assert run(capsys, "open", "job2")[0] == 0 and opened == [("terminal", "job2")]
-    assert run(capsys, "open", "job2", "--vscode")[0] == 0  # (VS Code then offers the task to no new Claude)
-    assert opened[-1] == ("vscode", "job2", "autonomous") and core.load("job2")["mode"] == "autonomous"
+    assert run(capsys, "open", "job2")[0] == 0 and run(capsys, "open", "--all")[0] == 0
+    assert opened == [("terminal", "job2"), ("terminals", ["job1", "job2"])]
 
 
 # ---- guide and offers ----------------------------------------------------------------------------

@@ -404,14 +404,11 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError(f"{args.name} is not running. Start it first: crab-student start {args.name}")
     if not live:
         raise core.CrabError("no agent is running.")
-    names = [r["name"] for r in live]
     if args.vscode:
-        if any(r["mode"] == "interactive" for r in live):
-            agents.views(names)  # (records a hand-off, so VS Code does not offer the task to Claude again)
-        for name in names:
-            machine.open_vscode(core.load(name))
+        for r in live:
+            machine.open_vscode(r)
         return 0
-    return agents.open_one(args.name) if args.name else agents.open_all(names)
+    return agents.open_one(args.name) if args.name else agents.open_all([r["name"] for r in live])
 
 
 # ---- the parser ----------------------------------------------------------------------------------

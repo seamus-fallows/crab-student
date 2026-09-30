@@ -1,5 +1,5 @@
 """Talking to machines through the system ssh: the ssh config, one-shot commands, the upload and setup,
-and terminals (open, open --all, VS Code)."""
+and terminals (open, open --all, VS Code with the Claude panel)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.parse
+import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,8 +23,11 @@ from crab_student import core
 REMOTE_DIR = "/root/crab-student"
 PY = 'exec "$(command -v python3 || echo /venv/main/bin/python)"'
 REMOTE_SRC = Path(__file__).parent / "remote"
+CLAUDE_URL = "vscode://anthropic.claude-code/open?prompt="  # (the Claude extension's panel, pre-filled)
+PROMPT_MAX = 5000
+VSCODE_URL_DELAY = 5.0  # (the new window must be open, and focused, when the panel is asked for)
 
-# The ssh config and known_hosts are shared by every worker, and a batch launch brings workers up in threads.
+# The ssh config and known_hosts are shared by every agent, and a batch launch brings agents up in threads.
 _ssh_files = threading.Lock()
 
 
@@ -66,7 +71,7 @@ def _ssh_config_text() -> str:
 
 
 def write_ssh_config() -> None:
-    """Regenerate the host entries (one per worker with an address) that ~/.ssh/config includes."""
+    """Regenerate the host entries (one per agent with an address) that ~/.ssh/config includes."""
     # (The records are read inside the lock too: a thread that read them earlier must not write last.)
     with _ssh_files:
         config_file().parent.mkdir(parents=True, exist_ok=True)
@@ -225,9 +230,9 @@ def _interactive() -> bool:
 
 
 def open_one(name: str) -> int:
-    argv = [*ssh_cmd(name, tty=True), "crab-attach"]
+    argv = [*ssh_cmd(name, tty=True), "agent-attach"]
     if _interactive():
-        print(f"Attaching to {name} (detach: Ctrl-b d - the worker keeps running).", flush=True)
+        print(f"Attaching to {name} (detach: Ctrl-b d - the agent keeps running).", flush=True)
         return subprocess.call(argv)
     if os.name == "nt" and (wt := core.tool("wt")):
         subprocess.Popen([wt, "-w", "new", "new-tab", "--title", name, *argv])
@@ -249,24 +254,24 @@ def _wt_column(names: list[str]) -> list[str]:
             "--title",
             name,
             *ssh_cmd(name, tty=True),
-            "crab-attach",
+            "agent-attach",
         ]
     return args
 
 
 def open_all(names: list[str]) -> int:
-    """Every running worker side by side: one Windows Terminal window with two columns, or a local tmux
-    session (prefix Ctrl-a, so Ctrl-b goes through to the worker's own tmux)."""
+    """Every running agent side by side: one Windows Terminal window with two columns, or a local tmux
+    session (prefix Ctrl-a, so Ctrl-b goes through to the agent's own tmux)."""
     if os.name == "nt":
         wt = core.tool("wt")
         if not wt:
             raise core.CrabError(
                 "open --all needs Windows Terminal (wt). Install it from the Microsoft Store, or open "
-                "workers one at a time: crab-student open NAME"
+                "agents one at a time: crab-student open NAME"
             )
         half = math.ceil(len(names) / 2)
         left, right = names[:half], names[half:]
-        args = ["-w", "new", "new-tab", "--title", left[0], *ssh_cmd(left[0], tty=True), "crab-attach"]
+        args = ["-w", "new", "new-tab", "--title", left[0], *ssh_cmd(left[0], tty=True), "agent-attach"]
         if right:
             args += [
                 ";",
@@ -275,14 +280,14 @@ def open_all(names: list[str]) -> int:
                 "--title",
                 right[0],
                 *ssh_cmd(right[0], tty=True),
-                "crab-attach",
+                "agent-attach",
             ]
             args += [";", "move-focus", "left"]
         args += _wt_column(left[1:])
         if right:
             args += [";", "move-focus", "right", *_wt_column(right[1:])]
         subprocess.Popen([wt, *args])
-        print(f"Opened {len(names)} worker{'s' if len(names) > 1 else ''} in a new Windows Terminal window.")
+        print(f"Opened {len(names)} agent{'s' if len(names) > 1 else ''} in a new Windows Terminal window.")
         return 0
     return _tmux_all(names)
 
@@ -292,7 +297,7 @@ def _tmux_all(names: list[str]) -> int:
     if not tmux:
         raise core.CrabError(
             "open --all needs tmux on this computer (e.g. brew install tmux, or apt install tmux). "
-            "Or open workers one at a time: crab-student open NAME"
+            "Or open agents one at a time: crab-student open NAME"
         )
     if not _interactive():
         raise core.CrabError(
@@ -306,29 +311,56 @@ def _tmux_all(names: list[str]) -> int:
     )
     base = [tmux, "-L", "crab-student", "-f", str(conf)]
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}  # (works from inside the user's own tmux too)
-    core.run([*base, "kill-session", "-t", "workers"], env=env, check=False)
+    core.run([*base, "kill-session", "-t", "agents"], env=env, check=False)
     for i, name in enumerate(names):
-        command = shlex.join([*ssh_cmd(name, tty=True), "crab-attach"])
+        command = shlex.join([*ssh_cmd(name, tty=True), "agent-attach"])
         core.run(
-            [*base, "new-session", "-d", "-s", "workers", command]
+            [*base, "new-session", "-d", "-s", "agents", command]
             if i == 0
-            else [*base, "split-window", "-t", "workers", command],
+            else [*base, "split-window", "-t", "agents", command],
             env=env,
         )
-        core.run([*base, "select-pane", "-t", "workers", "-T", name], env=env)
-        core.run([*base, "select-layout", "-t", "workers", "tiled"], env=env)
-    return subprocess.call([*base, "attach", "-t", "workers"], env=env)
+        core.run([*base, "select-pane", "-t", "agents", "-T", name], env=env)
+        core.run([*base, "select-layout", "-t", "agents", "tiled"], env=env)
+    return subprocess.call([*base, "attach", "-t", "agents"], env=env)
 
 
 def open_vscode(rec: dict) -> int:
+    """The machine in VS Code (Remote-SSH, the repo folder). For an interactive agent not handed off yet, also
+    the Claude panel, with the task typed in but not sent."""
     code = core.tool("code")
     if not code:
         raise core.CrabError(
             "VS Code's 'code' command was not found. In VS Code, run \"Shell Command: Install "
             "'code' command in PATH\" (on Windows it comes with the installer)."
         )
-    subprocess.Popen([code, "--remote", f"ssh-remote+{alias(rec['name'])}", rec["repo"]["dir"]])
+    name, folder = rec["name"], rec["repo"]["dir"]
+    subprocess.Popen([code, "--remote", f"ssh-remote+{alias(name)}", folder])
+    if _frontend(rec) != "vscode":
+        print(f"Opening {name} in VS Code ({folder}). Its terminal shows the agent (tmux).")
+        return 0
     print(
-        f"Opening {rec['name']} in VS Code ({rec['repo']['dir']}). In its terminal, crab-attach shows the worker."
+        f"Opening {name} in VS Code ({folder}), with the task typed into the Claude panel: check it and press "
+        "Enter. To leave the agent working on its own when you are done, type /handoff in the chat (or "
+        '"/handoff autonomous <what to do next>").'
     )
+    time.sleep(VSCODE_URL_DELAY)
+    webbrowser.open(CLAUDE_URL + urllib.parse.quote(_task_prompt(name), safe=""))
     return 0
+
+
+def _frontend(rec: dict) -> str:
+    """Where the agent's Claude works now: the machine knows (a hand-off moves it to tmux), else the record."""
+    try:
+        return remote(rec["name"], ["status"], timeout=20).get("frontend") or "tmux"
+    except core.CrabError:
+        return "vscode" if rec.get("mode") == "interactive" else "tmux"
+
+
+def _task_prompt(name: str) -> str:
+    """The brief, as the user would type it to Claude (the extension takes up to PROMPT_MAX characters)."""
+    brief = core.agents_dir() / f"{name}.brief.md"
+    text = brief.read_text(encoding="utf-8").strip() if brief.exists() else ""
+    return (
+        text if 0 < len(text) <= PROMPT_MAX else "The task is in /root/BRIEF.md: read it, then let's start."
+    )

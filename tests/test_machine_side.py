@@ -1,5 +1,5 @@
 """The machine side (remote/cs.py, remote/fake_claude.py) against a temporary root: CS_ROOT, CS_BIN and
-CS_PROFILE_D point into tmp_path, "GitHub" is a local bare repo, and the worker's git hooks run cs.py the way
+CS_PROFILE_D point into tmp_path, "GitHub" is a local bare repo, and the agent's git hooks run cs.py the way
 the machine's do. What needs a POSIX system (flock, sh scripts on PATH, symlinks) is skipped on Windows."""
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ HF = "hf_" + "Zq8x" * 8  # a task secret's value
 TOKEN = "sk-ant-oat01-" + "Tk7w" * 20  # the Claude token
 KEY_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"  # (deploy key, line 1)
 NOTE = "agent-runs/job1/stopped.json"  # the stop note, in the repo
+MACHINE_FILES = ("rules.md", "rules-autonomous.md", "rules-colleague.md", "handoff.md")
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX (flock, sh scripts, symlinks)")
 
 
@@ -37,21 +38,36 @@ posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX (fl
 
 @pytest.fixture
 def cs(tmp_path, monkeypatch):
-    """cs.py imported afresh with its paths under tmp_path/root, and a worker's config.json."""
+    """cs.py imported afresh with its paths under tmp_path/root, and an agent's config.json."""
     root = tmp_path / "root"
     monkeypatch.setenv("CS_ROOT", str(root))
     monkeypatch.setenv("CS_BIN", str(tmp_path / "usr-local-bin"))
     monkeypatch.setenv("CS_PROFILE_D", str(tmp_path / "profile.d"))
     monkeypatch.setenv("CS_TICK_SECONDS", "60")
+    for var in ("CLAUDE_CODE_SESSION_ID", "TERM_PROGRAM"):  # (this test may itself run inside Claude Code)
+        monkeypatch.delenv(var, raising=False)
     spec = importlib.util.spec_from_file_location("cs", CS_PY)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.D.mkdir(parents=True)
     config = dict(name="job1", branch="agent/job1", repo_url=str(tmp_path / "origin.git"),
-                  repo_dir=str(root / "work" / "proj"), model="", fake_claude=False, session_id=str(uuid.uuid4()),
-                  idle_minutes=60, limit_hours=2.0, notify_url="", secret_names=["HF_TOKEN"])  # fmt: skip
+                  repo_dir=str(root / "work" / "proj"), mode="colleague", claude_settings={}, fake_claude=False,
+                  session_id=str(uuid.uuid4()), idle_minutes=60, notify_url="", secret_names=["HF_TOKEN"])  # fmt: skip
     (module.D / "config.json").write_text(json.dumps(config))
     return module
+
+
+def set_config(cs, **changes) -> dict:
+    c = dict(cs.cfg(), **changes)
+    (cs.D / "config.json").write_text(json.dumps(c))
+    return c
+
+
+def machine_files(cs) -> None:
+    """The rules, the /handoff command and the brief, as the upload leaves them in D."""
+    for name in MACHINE_FILES:
+        shutil.copy(REMOTE / name, cs.D / name)
+    (cs.D / "BRIEF.md").write_text("# Brief\n\nTrain the model.\n")
 
 
 @pytest.fixture
@@ -69,7 +85,7 @@ def bare(tmp_path) -> Path:
 
 @pytest.fixture
 def repo(cs, bare) -> Path:
-    """The worker's clone as setup leaves it, with hooks that run `cs.py hook` like the machine's."""
+    """The agent's clone as setup leaves it, with hooks that run `cs.py hook` like the machine's."""
     for hook in ("pre-commit", "pre-push"):
         sh_script(cs.D / "hooks" / hook, "hook " + hook)
     cs.setup_repository(cs.cfg(), {})
@@ -100,8 +116,8 @@ def last_json(capsys) -> dict:
     return json.loads(capsys.readouterr().out.splitlines()[-1])
 
 
-def set_worker(cs, state: str, message: str = "") -> None:
-    (cs.D / "worker.json").write_text(json.dumps({"state": state, "message": message, "at": 0}))
+def set_agent(cs, state: str, message: str = "") -> None:
+    (cs.D / "agent.json").write_text(json.dumps({"state": state, "message": message, "at": 0}))
 
 
 def secret_files(cs, secrets: dict, token: str = TOKEN) -> None:
@@ -127,10 +143,20 @@ def sized():
         path.unlink(missing_ok=True)
 
 
-def make_transcript(cs, sid: str) -> None:
-    path = cs.ROOT / ".claude" / "projects" / "-root-work-proj" / f"{sid}.jsonl"
+def make_transcript(cs, sid: str, folder: str = "-root-work-proj") -> Path:
+    path = cs.ROOT / ".claude" / "projects" / folder / f"{sid}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"type": "user"}\n')
+    return path
+
+
+def handed_off(cs, **fields) -> dict:
+    """handoff.json as agent-handoff leaves it (from: a new VS Code conversation, unless given), with changes."""
+    h = dict({"mode": "colleague", "prompt": "finish the tests", "at": 0}, **fields)
+    if "from" not in h:
+        h["from"] = make_transcript(cs, str(uuid.uuid4())).stem
+    (cs.D / "handoff.json").write_text(json.dumps(h))
+    return h
 
 
 def wait_for(condition, seconds: float) -> bool:
@@ -164,7 +190,7 @@ def watchdog(cs, **config):
     """The state right after a container start at T0, a quiet fake probe, and the config with changes."""
     st = cs.load_state()
     st.update(boot=T0, last_activity=T0, last_tick=T0, last_talk=T0, cpu_seconds=0.0)
-    return st, FakeProbe(), dict(cs.cfg(), **config)
+    return st, FakeProbe(), set_config(cs, **config)
 
 
 def run_minutes(cs, st, probe, c, minutes, before=None) -> dict:
@@ -181,10 +207,14 @@ def minutes_with(seen: dict, action: str) -> list:
     return [m for m, actions in seen.items() if action in actions]
 
 
+def first_stop(seen: dict):
+    return next(((a, m) for m, actions in seen.items() for a in actions if a.startswith("stop:")), None)
+
+
 @pytest.mark.parametrize("activity, stop", [(None, 60), ("transcript", 110), ("cpu", 110), ("gpu", 110)])
 def test_the_machine_stops_after_idle_minutes_of_quiet_ticks(cs, activity, stop):
     """Quiet: an unchanged transcript, no GPU, and idle Claude Code, tmux and sshd under a quarter core."""
-    st, probe, c = watchdog(cs, idle_minutes=60, limit_hours=10)
+    st, probe, c = watchdog(cs, idle_minutes=60)
 
     def minute(m):  # quiet, but for one kind of activity at minute 50
         probe.cpu += 15.0 if activity == "cpu" and m == 50 else 14.0
@@ -197,10 +227,33 @@ def test_the_machine_stops_after_idle_minutes_of_quiet_ticks(cs, activity, stop)
     assert not any(seen[m] for m in range(1, stop))
 
 
-@pytest.mark.parametrize("state, nudges", [("needs-you", [30, 70]), ("working", []), ("done", [])])
-def test_the_nudge_comes_once_per_quiet_stretch_and_only_for_needs_you(cs, state, nudges):
-    st, probe, c = watchdog(cs, idle_minutes=60, limit_hours=10)
-    set_worker(cs, state)
+@pytest.mark.parametrize("state, stop", [("done", "stop:done"), ("working", "stop:idle"),
+                                         ("needs-you", "stop:idle"), (None, "stop:idle")])  # fmt: skip
+def test_every_agent_stops_after_idle_minutes_done_or_not_and_the_reason_says_which(cs, state, stop):
+    st, probe, c = watchdog(cs, idle_minutes=45)
+    if state:
+        set_agent(cs, state)
+    seen = run_minutes(cs, st, probe, c, range(1, 61))
+    assert first_stop(seen) == (stop, 45)
+
+
+def test_a_running_job_keeps_a_finished_agents_machine_up(cs):
+    st, probe, c = watchdog(cs, idle_minutes=60)
+    set_agent(cs, "done")
+
+    def job_until_100(minute):  # (a job the agent left running uses the GPU until minute 100)
+        probe.gpu = minute <= 100
+
+    seen = run_minutes(cs, st, probe, c, range(1, 200), job_until_100)
+    assert first_stop(seen) == ("stop:done", 160)
+
+
+@pytest.mark.parametrize("mode, state, nudges", [("colleague", "needs-you", [30, 70]), ("colleague", "working", []),
+                                                 ("colleague", "done", []), ("autonomous", "needs-you", []),
+                                                 ("interactive", "needs-you", [])])  # fmt: skip
+def test_only_a_colleague_that_asked_is_nudged_once_per_quiet_stretch(cs, mode, state, nudges):
+    st, probe, c = watchdog(cs, idle_minutes=60, mode=mode)
+    set_agent(cs, state)
 
     def answered_at_40(minute):
         if minute == 40:
@@ -210,12 +263,14 @@ def test_the_nudge_comes_once_per_quiet_stretch_and_only_for_needs_you(cs, state
     assert minutes_with(seen, "nudge") == nudges
 
 
-@pytest.mark.parametrize("state, check_ins", [("working", [20, 60]), ("needs-you", []), ("done", [])])
-def test_a_check_in_comes_once_per_silent_stretch_however_busy_the_machine(cs, state, check_ins):
-    st, probe, c = watchdog(cs, idle_minutes=600, limit_hours=20)
-    set_worker(cs, state)
+@pytest.mark.parametrize("mode, state, check_ins", [("colleague", "working", [20, 60]), ("autonomous", "working", [20, 60]),
+                                                    ("interactive", "working", []), ("colleague", "needs-you", []),
+                                                    ("colleague", "done", [])])  # fmt: skip
+def test_a_check_in_comes_once_per_silent_stretch_to_an_agent_in_tmux(cs, mode, state, check_ins):
+    st, probe, c = watchdog(cs, idle_minutes=600, mode=mode)
+    set_agent(cs, state)
 
-    def busy_and_a_word_at_40(minute):  # (a job keeps the CPU and the GPU busy; the worker says nothing)
+    def busy_and_a_word_at_40(minute):  # (a job keeps the CPU and the GPU busy; the agent says nothing)
         probe.cpu, probe.gpu = probe.cpu + 60.0, True
         if minute == 40:
             probe.work(minute)
@@ -224,33 +279,19 @@ def test_a_check_in_comes_once_per_silent_stretch_however_busy_the_machine(cs, s
     assert minutes_with(seen, "check-in") == check_ins
 
 
-@pytest.mark.parametrize("state, stop", [("done", ("stop:done", 15)), ("working", ("stop:idle", 60)),
-                                         ("needs-you", ("stop:idle", 60))])  # fmt: skip
-def test_a_finished_worker_stops_after_15_quiet_minutes_the_others_after_idle_minutes(cs, state, stop):
-    st, probe, c = watchdog(cs, idle_minutes=60, limit_hours=10)
-    set_worker(cs, state)
-    seen = run_minutes(cs, st, probe, c, range(1, 61))
-    assert next((a, m) for m, actions in seen.items() for a in actions if a.startswith("stop:")) == stop
+def test_after_a_hand_off_the_watchdog_treats_the_agent_by_its_new_mode(cs):
+    st, probe, c = watchdog(cs, idle_minutes=600, mode="interactive")
+    set_agent(cs, "working")
+    assert "check-in" not in [
+        a for actions in run_minutes(cs, st, probe, c, range(1, 30)).values() for a in actions
+    ]
+    handed_off(cs, mode="autonomous")
+    assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux")
+    seen = run_minutes(cs, st, probe, c, range(30, 60))
+    assert minutes_with(seen, "check-in") == [30]
 
 
-def test_the_warning_comes_once_before_the_limit_and_again_after_an_extend(cs):
-    st, probe, c = watchdog(cs, limit_hours=1)
-    seen = run_minutes(cs, st, probe, c, range(1, 60), probe.work)
-    assert minutes_with(seen, "warn") == [50]  # 10 minutes before the limit
-    c["limit_hours"] = 2  # crab-student extend (set-limit)
-    seen = run_minutes(cs, st, probe, c, range(60, 121), probe.work)
-    assert minutes_with(seen, "warn") == [110]
-    assert minutes_with(seen, "stop:time-limit") == [120]
-
-
-def test_the_time_limit_stop_waits_for_the_boot_grace(cs):
-    st, probe, c = watchdog(cs, limit_hours=1)
-    st["used_seconds"] = 3600.0  # started again with no time left
-    seen = run_minutes(cs, st, probe, c, range(1, 7), probe.work)
-    assert minutes_with(seen, "stop:time-limit") == [5, 6]  # from 5 minutes after the container start
-
-
-def test_a_long_gap_counts_at_most_two_ticks_and_used_time_survives_a_restart(cs):
+def test_a_long_gap_counts_at_most_two_ticks_and_machine_time_survives_a_watchdog_restart(cs):
     st, probe, c = watchdog(cs)
     cs.tick(st, c, T0 + 60, probe)
     cs.tick(st, c, T0 + 60 + 3600, probe)  # the watchdog was not running for an hour
@@ -266,12 +307,28 @@ def test_notifications_come_once_per_transition_to_needs_you_done_or_failed(cs):
     notified = []
     for m, state in enumerate(states, 1):
         if state:
-            set_worker(cs, state)
+            set_agent(cs, state)
         notified += [a for a in cs.tick(st, c, T0 + 60 * m, probe) if a.startswith("notify:")]
     assert notified == ["notify:needs-you", "notify:needs-you", "notify:done", "notify:failed"]
 
 
-# ---- save, check, status, set-limit --------------------------------------------------------------
+def test_a_wake_file_ends_the_watchdogs_nap_at_once(cs):
+    (cs.D / "wake").write_text("")
+    started = time.time()
+    cs.nap(30)
+    assert time.time() - started < 5 and not (cs.D / "wake").exists()
+
+
+def test_conversations_count_in_tmux_and_in_vs_code_subagents_too(cs):
+    probe = cs.Probe()
+    before = probe.transcript_bytes()
+    make_transcript(cs, "vscode-session", folder="-root-work-proj")
+    grown = probe.transcript_bytes()
+    make_transcript(cs, "vscode-session/subagents/agent-1", folder="-root-work-proj")
+    assert before < grown < probe.transcript_bytes()
+
+
+# ---- save, check, status, send -------------------------------------------------------------------
 
 
 def test_save_commits_and_pushes_what_is_safe_and_skips_big_untracked_files(cs, repo, bare, sized):
@@ -281,7 +338,7 @@ def test_save_commits_and_pushes_what_is_safe_and_skips_big_untracked_files(cs, 
     res = cs.save("idle")
     assert res["error"] is None and res["pushed"] and res["committed"] == 2
     assert res["skipped"] == ["data/big.bin"] and res["dirty"] == 1 and res["unpushed"] == 0
-    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "crab-student: autosave (idle)"
+    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "Autosave (idle)"
     assert git(bare, "ls-tree", "-r", "--name-only", "agent/job1").split() == ["README.md", "notes.txt"]
 
 
@@ -316,7 +373,7 @@ def test_save_reports_a_commit_the_hook_refuses_and_leaves_nothing_staged(cs, re
     secret_files(cs, {"HF_TOKEN": HF})
     (repo / "README.md").write_text("changed\n")
     (repo / "leak.py").write_text(f"token = '{HF}'\n")
-    res = cs.save("time-limit")
+    res = cs.save("idle")
     assert res["committed"] == 0 and "HF_TOKEN" in res["error"] and HF not in res["error"]
     assert git(repo, "diff", "--cached", "--name-only") == ""
     assert head(bare, "agent/job1") == head(repo) and (repo / "leak.py").exists()
@@ -346,7 +403,7 @@ def test_a_final_save_commits_a_note_of_what_the_machine_leaves_behind(cs, repo,
     assert note["outputs"] == {"files": 1, "bytes": 2000, "sample": ["run1/model.pt"]}
     assert note["large_files"] == [{"path": "ckpt/last.pt", "bytes": 100_000_000}]
     assert (note["not_committed"], note["not_committed_count"]) == (["data/big.bin"], 1)
-    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "crab-student: autosave (idle)"
+    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "Autosave (idle)"
     assert last_commit_files(bare) == [".gitignore", "README.md", NOTE]
 
 
@@ -373,8 +430,8 @@ def test_a_refused_final_save_commits_no_note_and_restores_the_note_file(cs, rep
     earlier = cs.save("idle", final=True)["note"] if stopped_before else None
     secret_files(cs, {"HF_TOKEN": HF})
     (repo / "leak.py").write_text(f"token = '{HF}'\n")
-    res = cs.save("time-limit", final=True)
-    assert "HF_TOKEN" in res["error"] and res["note"]["reason"] == "time-limit" and not res["note_committed"]
+    res = cs.save("done", final=True)
+    assert "HF_TOKEN" in res["error"] and res["note"]["reason"] == "done" and not res["note_committed"]
     assert head(bare, "agent/job1") == head(repo)
     assert (json.loads((repo / NOTE).read_text()) if (repo / NOTE).exists() else None) == earlier
     assert git(repo, "status", "--porcelain").split() == ["??", "leak.py"]  # (no stale note left)
@@ -400,43 +457,56 @@ def test_check_reports_outputs_large_untracked_files_and_unpushed_commits(cs, re
 
 def test_status_reports_the_documented_fields(cs, repo, capsys):
     cs.save_state(dict(cs.load_state(), used_seconds=5400.0, last_activity=time.time() - 120))
-    set_worker(cs, "working", "epoch 3/10")
+    set_agent(cs, "working", "epoch 3/10")
     (repo / "a.txt").write_text("a\n")
     git(repo, "add", "a.txt")
     git(repo, "commit", "-q", "-m", "a")
     (repo / "README.md").write_text("changed\n")
     assert cs.cmd_status() == 0
     st = last_json(capsys)
-    assert set(st) == {"name", "worker", "idle_seconds", "used_hours", "limit_hours", "stopping",
+    assert set(st) == {"name", "mode", "frontend", "agent", "idle_seconds", "used_hours", "stopping",
                        "stop_reason", "stop_sent_for", "git"}  # fmt: skip
     assert st["git"] == {"branch": "agent/job1", "head": head(repo)[:7], "dirty": 1, "unpushed": 1}
-    assert st["worker"]["message"] == "epoch 3/10" and st["stop_sent_for"] is None
-    assert (st["used_hours"], st["limit_hours"]) == (1.5, 2.0) and 120 <= st["idle_seconds"] < 180
+    assert st["agent"]["message"] == "epoch 3/10" and st["stop_sent_for"] is None
+    assert (st["mode"], st["frontend"]) == ("colleague", "tmux")
+    assert st["used_hours"] == 1.5 and 120 <= st["idle_seconds"] < 180
 
 
-def test_set_limit_changes_only_the_limit(cs, capsys):
-    before = cs.cfg()
-    assert cs.cmd_set_limit(8.5) == 0
-    assert cs.cfg() == dict(before, limit_hours=8.5) and last_json(capsys)["limit_hours"] == 8.5
-    if os.name == "posix":  # (notify_url may hold a webhook secret)
-        assert (cs.D / "config.json").stat().st_mode & 0o777 == 0o600
+def test_status_shows_an_interactive_agent_in_vs_code_until_it_is_handed_off(cs, repo, capsys):
+    def where() -> tuple:
+        assert cs.cmd_status() == 0
+        st = last_json(capsys)
+        return st["mode"], st["frontend"]
+
+    set_config(cs, mode="interactive")
+    assert where() == ("interactive", "vscode")
+    handed_off(cs, mode="autonomous")
+    assert where() == ("autonomous", "tmux")
+
+
+def test_send_to_an_agent_in_vs_code_says_where_to_type(cs, capsys, monkeypatch):
+    set_config(cs, mode="interactive")
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello\n"))
+    assert cs.main(["send"]) == 1
+    assert "--vscode" in last_json(capsys)["error"]
 
 
 def test_a_failing_command_prints_one_json_error(cs, capsys):
     assert cs.main(["no-such-command"]) == 2
+    assert cs.main(["set-limit", "3"]) == 2  # (there is no time limit)
     (cs.D / "config.json").unlink()
-    assert cs.main(["set-limit", "3"]) == 1 and "error" in last_json(capsys)
+    assert cs.main(["status"]) == 1 and "error" in last_json(capsys)
 
 
-# ---- crab-status and the git hooks ---------------------------------------------------------------
+# ---- agent-status and the git hooks --------------------------------------------------------------
 
 
 def test_declare_done_needs_the_report_committed_and_everything_pushed(cs, repo, capsys):
     assert cs.cmd_declare(["working", "training"]) == 0
-    before = cs.read_worker()
+    before = cs.read_agent()
 
     def refused() -> bool:
-        return cs.cmd_declare(["done", "all good"]) == 1 and cs.read_worker() == before
+        return cs.cmd_declare(["done", "all good"]) == 1 and cs.read_agent() == before
 
     assert refused()  # no report
     report = repo / "agent-runs" / "job1" / "REPORT.md"
@@ -450,23 +520,30 @@ def test_declare_done_needs_the_report_committed_and_everything_pushed(cs, repo,
     git(repo, "commit", "-q", "-am", "readme")
     assert refused()  # a commit is not pushed
     git(repo, "push", "-q")
-    assert cs.cmd_declare(["done", "all good"]) == 0 and cs.read_worker()["state"] == "done"
+    assert cs.cmd_declare(["done", "all good"]) == 0 and cs.read_agent()["state"] == "done"
 
 
 def test_declare_checks_the_state_and_keeps_the_message_to_one_short_line(cs, capsys):
-    assert cs.cmd_declare(["finished", "x"]) == 2 and not (cs.D / "worker.json").exists()
+    assert cs.cmd_declare(["finished", "x"]) == 2 and not (cs.D / "agent.json").exists()
     assert cs.cmd_declare(["needs-you", "Which\ndataset", "  should I use?", "x" * 200]) == 0
-    message = cs.read_worker()["message"]
+    message = cs.read_agent()["message"]
     assert message.startswith("Which dataset should I use? xxx") and len(message) == 120
 
 
+def test_an_autonomous_agent_cannot_ask_and_is_told_to_decide_and_record_it(cs, capsys):
+    set_config(cs, mode="autonomous")
+    assert cs.cmd_declare(["working", "training"]) == 0
+    assert cs.cmd_declare(["needs-you", "Which dataset?"]) == 1
+    assert cs.read_agent()["state"] == "working" and "Decisions" in capsys.readouterr().out
+
+
 def test_declare_alone_shows_the_status_and_the_machine_time(cs, capsys):
-    set_worker(cs, "working", "epoch 3/10")
+    set_agent(cs, "working", "epoch 3/10")
     cs.save_state(dict(cs.load_state(), used_seconds=1800))
     assert cs.cmd_declare([]) == 0
     shown = capsys.readouterr().out
     assert "working" in shown and "epoch 3/10" in shown
-    assert "0h30m" in shown and "1h30m" in shown  # used, and left of the 2-hour limit
+    assert "0h30m" in shown and "60 min" in shown  # the machine time, and when it stops by itself
 
 
 @pytest.mark.parametrize("secret", ["HF_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "the deploy key"])
@@ -502,7 +579,7 @@ SHA, ZERO = "1" * 40, "0" * 40
     (f"refs/tags/v1 {SHA} refs/tags/v1 {ZERO}", False),
     (f"(delete) {ZERO} refs/heads/agent/job1 {SHA}", False),
 ])  # fmt: skip
-def test_pre_push_allows_only_the_workers_own_branch(cs, monkeypatch, capsys, line, allowed):
+def test_pre_push_allows_only_the_agents_own_branch(cs, monkeypatch, capsys, line, allowed):
     monkeypatch.setattr(sys, "stdin", io.StringIO(line + "\n"))
     assert (cs.cmd_hook("pre-push", ["origin", "url"]) == 0) == allowed
 
@@ -517,6 +594,16 @@ def test_the_installed_hooks_stop_pushes_to_other_branches(cs, repo, bare):
     assert head(bare, "main") == main
     git(repo, "push", "-q")
     assert head(bare, "agent/job1") == head(repo)
+
+
+def test_nothing_the_agent_reads_names_the_tool(cs):
+    """Rules, prompts, watchdog and hook messages describe the situation plainly: the agent has no context
+    for the name crab-student."""
+    texts = [(REMOTE / name).read_text() for name in MACHINE_FILES]
+    texts += [cs.FIRST_PROMPT, cs.LOST, cs.RESTART_NOTE, cs.NUDGE, cs.CHECK_IN, cs.HANDOFF_PROMPT]
+    assert not any("crab" in text.lower() or "worker" in text.lower() for text in texts)
+    for message in (cs.RESTART_NOTE, cs.NUDGE, cs.CHECK_IN, cs.HANDOFF_PROMPT):
+        assert message.startswith("Automated message from the machine:")
 
 
 # ---- notifications and the watchdog's stop -------------------------------------------------------
@@ -554,7 +641,7 @@ def sink(monkeypatch):
 
 
 def test_the_watchdog_notifies_each_service_in_its_own_format(cs, sink):
-    set_worker(cs, "needs-you", "Which dataset?")
+    set_agent(cs, "needs-you", "Which dataset?")
     urls = ["", "http://ntfy.example/crab-topic", "http://hooks.slack.com/services/T0/B0/x",
             "http://discord.com/api/webhooks/1/x", "http://example.invalid/hook"]  # fmt: skip
     for url in urls:  # ("": no notify_url, nothing is sent)
@@ -566,7 +653,7 @@ def test_the_watchdog_notifies_each_service_in_its_own_format(cs, sink):
     assert list(json.loads(slack)) == ["text"] and "Which dataset?" in json.loads(slack)["text"]
     assert list(json.loads(discord)) == ["content"] and "Which dataset?" in json.loads(discord)["content"]
     payload = json.loads(generic)
-    assert (payload["worker"], payload["event"]) == ("job1", "needs-you") and "job1" in payload["text"]
+    assert (payload["agent"], payload["event"]) == ("job1", "needs-you") and "job1" in payload["text"]
     assert payload["message"] == "Which dataset?" and "Which dataset?" in payload["text"]
 
 
@@ -585,14 +672,14 @@ def test_a_watchdog_stop_notifies_saves_and_asks_vast_to_stop(cs, repo, bare, si
     cs.perform("stop:idle", cs.load_state(), c, vast_env)
     note, stop = sink
     assert json.loads(note["body"])["event"] == "stopped" and cs.load_state()["stopping"] == "idle"
-    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "crab-student: autosave (idle)"
+    assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "Autosave (idle)"
     assert (stop["method"], stop["url"]) == ("PUT", "http://vast.invalid/api/v0/instances/42/")
     assert json.loads(stop["body"]) == {"state": "stopped"}
     assert stop["headers"]["authorization"] == "Bearer key-42"
 
 
-def test_a_done_stop_says_finished_and_records_its_stop_call_only_once_saved(cs, repo, bare, sink, monkeypatch,
-                                                                            capsys):  # fmt: skip
+def test_a_done_stop_says_so_and_records_its_stop_call_only_once_saved(cs, repo, bare, sink, monkeypatch,
+                                                                       capsys):  # fmt: skip
     real_save, seen_while_saving = cs.save, []
 
     def save(reason, final=False):
@@ -606,14 +693,14 @@ def test_a_done_stop_says_finished_and_records_its_stop_call_only_once_saved(cs,
     cs.perform("stop:done", cs.load_state(), c, vast_env)
     note, stop = sink
     payload = json.loads(note["body"])
-    assert payload["event"] == "stopped" and "finished" in payload["message"]
+    assert payload["event"] == "stopped" and "done" in payload["message"]
     assert seen_while_saving == [None] and head(bare, "agent/job1") == head(repo) and stop["method"] == "PUT"
     assert cs.cmd_status() == 0
     st = last_json(capsys)
     assert st["stop_reason"] == "done" and 0 <= st["stop_sent_for"] < 60
 
 
-@pytest.mark.parametrize("reason", ["idle", "done", "time-limit"])
+@pytest.mark.parametrize("reason", ["idle", "done"])
 def test_a_watchdog_stop_pushes_the_stop_note_with_its_reason(cs, repo, bare, sink, reason):
     (repo / "README.md").write_text("changed\n")
     vast_env = {"CS_VAST_URL": "http://vast.invalid", "CONTAINER_ID": "42", "CONTAINER_API_KEY": "key-42"}
@@ -626,17 +713,23 @@ def test_a_watchdog_stop_pushes_the_stop_note_with_its_reason(cs, repo, bare, si
 # ---- Claude Code's environment and command line --------------------------------------------------
 
 
-def test_worker_env_drops_nesting_and_vast_variables_and_adds_the_secrets(cs, monkeypatch):
-    dropped = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CONTAINER_API_KEY", "CONTAINER_ID"}
+def test_agent_env_drops_a_parent_claudes_and_vasts_variables_and_adds_the_secrets(cs, monkeypatch):
+    dropped = {
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CONTAINER_API_KEY",
+        "CONTAINER_ID",
+    }
     for var in dropped:
         monkeypatch.setenv(var, "1")
     monkeypatch.delenv("TERM", raising=False)
     odd = "'single' and \"double\" quotes, spaces, $HOME and `x`"
     secret_files(cs, {"HF_TOKEN": HF, "ODD": odd})
-    env = cs.worker_env(cs.cfg())
+    env = cs.agent_env(cs.cfg())
     assert not dropped & set(env)
     assert env["IS_SANDBOX"] == "1" and env["DISABLE_AUTOUPDATER"] == "1" and env["TERM"]
-    assert (env["CRAB_STUDENT_NAME"], env["CRAB_STUDENT_BRANCH"]) == ("job1", "agent/job1")
+    assert (env["AGENT_NAME"], env["AGENT_BRANCH"]) == ("job1", "agent/job1")
     assert env["PATH"].startswith(str(cs.ROOT)) and env["PATH"].endswith(os.environ["PATH"])
     assert (env["CLAUDE_CODE_OAUTH_TOKEN"], env["HF_TOKEN"], env["ODD"]) == (TOKEN, HF, odd)
 
@@ -647,67 +740,263 @@ def test_claude_argv_for_a_new_a_resumed_and_a_restarted_conversation(cs):
     new = cs.claude_argv(c, sid, first=True, lost=False)
     assert new[0] == str(cs.CLAUDE) and "--dangerously-skip-permissions" in new and "--model" not in new
     assert new[-3:] == ["--session-id", sid, cs.FIRST_PROMPT]
-    assert cs.claude_argv(c, sid, first=True, lost=True)[-1] == cs.LOST_PROMPT
+    assert cs.claude_argv(c, sid, first=True, lost=True)[-1] == cs.FIRST_PROMPT + cs.LOST
     make_transcript(cs, sid)
-    c.update(model="opus", fake_claude=True)
+    c.update(fake_claude=True, claude_settings={"model": "opus"})
     restarted = cs.claude_argv(c, sid, first=True, lost=False)
-    assert restarted[:2] == [cs.PY, str(cs.D / "fake_claude.py")]
-    assert restarted[restarted.index("--model") + 1] == "opus"
+    assert restarted[:2] == [cs.PY, str(cs.D / "fake_claude.py")] and "--model" not in restarted
     assert restarted[-3:] == ["--resume", sid, cs.RESTART_NOTE]
     assert cs.claude_argv(c, sid, first=False, lost=False)[-2:] == ["--resume", sid]
+
+
+def test_claude_argv_after_a_hand_off_forks_the_vs_code_conversation(cs):
+    c = set_config(cs, mode="interactive")
+    sid, h = c["session_id"], handed_off(cs, mode="autonomous", prompt="finish the tests")
+    fork = cs.claude_argv(c, sid, first=True, lost=False)
+    assert fork[-6:-1] == ["--resume", h["from"], "--fork-session", "--session-id", sid]
+    assert fork[-1].startswith("Automated message from the machine:") and fork[-1].endswith(
+        "finish the tests"
+    )
+    assert "without asking" in fork[-1]  # (autonomous)
+    handed_off(cs, **dict(h, pin=False))
+    assert cs.claude_argv(c, sid, first=True, lost=False)[-4:-1] == ["--resume", h["from"], "--fork-session"]
 
 
 class EndOfTest(Exception):
     pass
 
 
-def test_claude_starts_a_new_conversation_when_the_saved_one_cannot_be_resumed(cs, monkeypatch):
-    old = cs.cfg()["session_id"]
-    make_transcript(cs, old)
-    calls = []
+def run_claude(cs, monkeypatch, claude, presses: int) -> list:
+    """cmd_claude with `claude(argv)` as Claude Code (its exit code); the user presses Enter after it exits
+    `presses` times, then the test ends. Returns the command lines."""
+    calls, entered = [], []
 
-    def claude(argv, cwd, env):
+    def call(argv, cwd, env):
         calls.append(argv)
-        if "--session-id" in argv:  # a new conversation is saved as soon as it starts
-            make_transcript(cs, argv[argv.index("--session-id") + 1])
-        return 1 if len(calls) == 1 else 0  # the first resume fails at once
+        return claude(argv)
 
-    def enter(*args):  # the user presses Enter after Claude Code exits (once; then the test ends)
-        if len(calls) == 3:
+    def enter(*args):
+        if len(entered) == presses:
             raise EndOfTest
+        entered.append(1)
         return ""
 
-    monkeypatch.setattr(cs.subprocess, "call", claude)
+    monkeypatch.setattr(cs.subprocess, "call", call)
     monkeypatch.setattr("builtins.input", enter)
     with pytest.raises(EndOfTest):
         cs.cmd_claude()
+    return calls
+
+
+def test_claude_starts_a_new_conversation_when_the_saved_one_cannot_be_resumed(cs, monkeypatch):
+    old = cs.cfg()["session_id"]
+    make_transcript(cs, old)
+    results = iter([1, 0, 0])  # the first resume fails at once
+
+    def claude(argv):
+        if "--session-id" in argv:  # a new conversation is saved as soon as it starts
+            make_transcript(cs, argv[argv.index("--session-id") + 1])
+        return next(results)
+
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
     new = (cs.D / "session_id").read_text().strip()
     assert new != old
     assert calls[0][-3:] == ["--resume", old, cs.RESTART_NOTE]
-    assert calls[1][-3:] == ["--session-id", new, cs.LOST_PROMPT]
+    assert calls[1][-3:] == ["--session-id", new, cs.FIRST_PROMPT + cs.LOST]
     assert calls[2][-2:] == ["--resume", new]  # (the restart note only on the first run)
+
+
+def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, monkeypatch):
+    c = set_config(cs, mode="interactive")
+    h = handed_off(cs)
+    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000001")  # (what agent-handoff chose)
+
+    def claude(argv):
+        if "--fork-session" in argv:
+            make_transcript(cs, argv[argv.index("--session-id") + 1])
+        return 0
+
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
+    new = cs.session_id(c)
+    assert new == "f0f0f0f0-0000-4000-8000-000000000001" and cs.transcript(new)
+    assert calls[0][-6:-2] == ["--resume", h["from"], "--fork-session", "--session-id"]
+    assert calls[1][-2:] == ["--resume", new]
+
+
+def test_a_fork_refused_with_session_id_is_forked_without_it_and_the_new_conversation_found(cs, monkeypatch):
+    c = set_config(cs, mode="interactive")
+    h = handed_off(cs)
+    forked = str(uuid.uuid4())
+
+    def claude(argv):
+        if "--fork-session" in argv and "--session-id" in argv:
+            return 1  # (an older Claude Code: refused at once)
+        if "--fork-session" in argv:
+            make_transcript(cs, forked)
+        return 0
+
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
+    assert "--session-id" in calls[0] and "--session-id" not in calls[1] and "--fork-session" in calls[1]
+    assert cs.session_id(c) == forked and (cs.D / "session_id").read_text() == forked
+    assert calls[2][-2:] == ["--resume", forked] and cs.read_handoff()["from"] == h["from"]
+
+
+def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_asked(cs, monkeypatch):
+    c = set_config(cs, mode="interactive")
+    handed_off(cs, prompt="finish the tests")
+
+    def claude(argv):
+        if "--fork-session" in argv:
+            return 1
+        make_transcript(cs, argv[argv.index("--session-id") + 1])
+        return 0
+
+    calls = run_claude(cs, monkeypatch, claude, presses=0)
+    assert [("--fork-session" in argv) for argv in calls] == [True, True, False]
+    assert calls[2][-1].startswith(cs.FIRST_PROMPT + cs.LOST) and calls[2][-1].endswith("finish the tests")
+    assert cs.transcript(cs.session_id(c)) and cs.read_handoff()["fork_failed"]
+    assert cs.session_id(c) != cs.read_handoff()["from"]  # (never the VS Code conversation itself)
+
+
+def test_the_forked_conversation_is_found_only_among_those_begun_since_the_fork(cs):
+    c = set_config(cs, mode="interactive")
+    h = handed_off(cs)
+    older = make_transcript(cs, str(uuid.uuid4()))
+    os.utime(older, (T0, T0))
+    handed_off(cs, **dict(h, forked_at=T0 + 60, pin=False))
+    os.utime(make_transcript(cs, h["from"]), (T0 + 120, T0 + 120))  # (VS Code wrote its last words)
+    assert cs.session_id(c) == c["session_id"]  # (nothing new yet)
+    forked = make_transcript(cs, str(uuid.uuid4()))
+    os.utime(forked, (T0 + 90, T0 + 90))
+    assert cs.session_id(c) == forked.stem and (cs.D / "session_id").read_text() == forked.stem
+
+
+# ---- the hand-off --------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def interactive(cs, monkeypatch):
+    """An interactive agent after setup: its rules files in D, the /handoff command installed, a VS Code
+    conversation, and a watchdog that starts Claude in tmux at once."""
+    machine_files(cs)
+    c = set_config(cs, mode="interactive")
+    cs.setup_settings(c, {})
+    monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
+    monkeypatch.setattr(cs, "agent_started", lambda c, seconds: True)
+    return make_transcript(cs, str(uuid.uuid4())).stem
+
+
+def test_handoff_switches_the_mode_writes_the_rules_and_wakes_the_watchdog(
+    cs, interactive, monkeypatch, capsys
+):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive)
+    assert not (cs.ROOT / ".claude" / "CLAUDE.md").exists()
+    assert cs.cmd_handoff(["autonomous", "finish", "the", "tests"]) == 0
+    assert "close VS Code" in capsys.readouterr().out
+    h = cs.read_handoff()
+    assert (h["mode"], h["from"], h["prompt"]) == ("autonomous", interactive, "finish the tests")
+    c = cs.cfg()
+    assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux") and c["mode"] == "interactive"
+    assert "## Work on your own" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
+    assert (cs.BIN / "agent-status").exists() and not (
+        cs.ROOT / ".claude" / "commands" / "handoff.md"
+    ).exists()
+    assert cs.session_id(c) not in (c["session_id"], interactive) and (cs.D / "wake").exists()
+    assert cs.cmd_handoff(["colleague"]) == 1 and cs.read_handoff() == h  # (once only)
+
+
+@pytest.mark.parametrize("given", ["argument", "environment", "newest"])
+def test_handoff_finds_the_conversation_it_runs_in(cs, interactive, monkeypatch, given):
+    other = make_transcript(cs, str(uuid.uuid4()))
+    os.utime(other, (T0, T0))  # (an older conversation)
+    args = ["colleague", "go on"]
+    if given == "argument":
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", other.stem)  # (the argument wins)
+        args.insert(0, f"--session={interactive}")
+    elif given == "environment":
+        args.insert(0, "--session=")  # (${CLAUDE_SESSION_ID} not filled in)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive)
+    assert cs.cmd_handoff(args) == 0
+    assert (cs.read_handoff()["from"], cs.read_handoff()["prompt"]) == (interactive, "go on")
+
+
+def test_handoff_defaults_to_a_colleague_continuing_the_task(cs, interactive):
+    assert cs.cmd_handoff([]) == 0
+    h = cs.read_handoff()
+    assert h["mode"] == "colleague" and h["prompt"]
+    assert "## Work like a capable colleague" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
 
 
 # ---- setup ---------------------------------------------------------------------------------------
 
 
-def test_setup_settings_fills_the_rules_and_merges_claude_json(cs):
-    shutil.copy(REMOTE / "worker.md", cs.D / "worker.md")
+@pytest.mark.parametrize("mode, section", [("colleague", "## Work like a capable colleague"),
+                                           ("autonomous", "## Work on your own")])  # fmt: skip
+def test_setup_settings_fills_the_rules_and_merges_claude_json(cs, mode, section):
+    machine_files(cs)
     (cs.ROOT / ".claude.json").write_text(json.dumps({"theme": "dark", "projects": {"/other": {"x": 1}}}))
-    c = dict(cs.cfg(), idle_minutes=47)
+    c = set_config(cs, idle_minutes=47, mode=mode)
     for _ in range(2):  # (setup runs again at every start)
         cs.setup_settings(c, {})
     rules = (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
-    assert "{{" not in rules and "}}" not in rules
-    for value in ("job1", "agent/job1", c["repo_dir"], "agent-runs/job1/REPORT.md", "HF_TOKEN", "47"):
+    assert "{{" not in rules and "}}" not in rules and section in rules
+    for value in (
+        "job1",
+        "agent/job1",
+        c["repo_dir"],
+        "agent-runs/job1/REPORT.md",
+        "HF_TOKEN",
+        "47",
+        str(cs.BRIEF),
+    ):
         assert value in rules
-    settings = json.loads((cs.ROOT / ".claude" / "settings.json").read_text())
-    assert settings["env"]["IS_SANDBOX"] == "1" and settings["permissions"]["deny"]
+    assert cs.BRIEF.read_text() == (cs.D / "BRIEF.md").read_text()
+    assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
     state = json.loads((cs.ROOT / ".claude.json").read_text())
     assert state["theme"] == "dark" and state["projects"]["/other"] == {"x": 1}
     assert state["hasCompletedOnboarding"] and state["bypassPermissionsModeAccepted"]
     trusted = {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}
     assert state["projects"][c["repo_dir"]] == trusted
+
+
+def test_an_interactive_agent_gets_no_rules_but_the_handoff_command(cs):
+    machine_files(cs)
+    cs.setup_settings(set_config(cs, mode="interactive"), {})
+    assert not (cs.ROOT / ".claude" / "CLAUDE.md").exists()
+    command = (cs.ROOT / ".claude" / "commands" / "handoff.md").read_text()
+    assert "agent-handoff --session=${CLAUDE_SESSION_ID}" in command and "$ARGUMENTS" in command
+
+
+def test_claude_settings_carry_the_launch_choices_the_token_and_the_secrets(cs):
+    machine_files(cs)
+    secret_files(cs, {"HF_TOKEN": HF})
+    chosen = {"model": "opus", "effortLevel": "high", "fastMode": True, "permissions": {"allow": ["*"]}}
+    cs.setup_settings(set_config(cs, claude_settings=chosen), {})
+    path = cs.ROOT / ".claude" / "settings.json"
+    settings = json.loads(path.read_text())
+    assert (settings["model"], settings["effortLevel"], settings["fastMode"]) == ("opus", "high", True)
+    assert settings["permissions"]["defaultMode"] == "bypassPermissions" and settings["permissions"]["deny"]
+    assert "allow" not in settings["permissions"]  # (only the model, effort and fast mode are taken)
+    env = settings["env"]
+    assert (env["CLAUDE_CODE_OAUTH_TOKEN"], env["HF_TOKEN"], env["IS_SANDBOX"]) == (TOKEN, HF, "1")
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
+    vscode = json.loads((cs.ROOT / ".vscode-server" / "data" / "Machine" / "settings.json").read_text())
+    assert vscode["claudeCode.initialPermissionMode"] == "bypassPermissions"
+    profile = vscode["terminal.integrated.defaultProfile.linux"]
+    assert vscode["terminal.integrated.profiles.linux"][profile]["path"] == str(cs.BIN / "agent-attach")
+
+
+@pytest.mark.parametrize("mode, tools", [("colleague", {"agent-attach", "agent-status"}),
+                                         ("interactive", {"agent-attach", "agent-handoff"})])  # fmt: skip
+def test_setup_environment_installs_the_tools_the_mode_uses(cs, monkeypatch, mode, tools):
+    monkeypatch.setattr(
+        cs.shutil, "which", lambda name: "/usr/bin/" + name
+    )  # (tmux is there: nothing to install)
+    cs.setup_environment(set_config(cs, mode=mode, fake_claude=True), {})
+    assert {p.name for p in cs.BIN.iterdir()} == tools
+    profile = (cs.PROFILE_D / "agent.sh").read_text()
+    assert "claude.env" in profile and "secrets.env" in profile and TOKEN not in profile
 
 
 def test_setup_repository_clones_the_branch_once_and_configures_it(cs, bare):
@@ -740,6 +1029,41 @@ def test_setup_refuses_a_machine_vast_gave_no_key_to_stop_itself(cs):
     assert not (cs.D / "setup-done").exists()  # (so no watchdog, and no later setup takes it as done)
 
 
+def test_setup_of_an_interactive_agent_starts_no_claude_in_tmux(cs, monkeypatch):
+    (cs.D / "vast.env").write_text("export CONTAINER_ID=42\nexport CONTAINER_API_KEY=key-42\n")
+    monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
+    monkeypatch.setattr(cs, "agent_started", lambda c, seconds: pytest.fail("waited for Claude in tmux"))
+    cs.setup_start(set_config(cs, mode="interactive"), {})
+    assert (cs.D / "setup-done").exists()
+
+
+# ---- agent-attach --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode, session, term, shown, program", [
+    ("colleague", True, "", "", "tmux"),
+    ("colleague", False, "", "not running", "bash"),
+    ("interactive", False, "", "--vscode", "bash"),
+    ("interactive", False, "vscode", "", "bash"),  # (a terminal in VS Code: a plain shell)
+])  # fmt: skip
+def test_attach_opens_the_agents_tmux_or_a_shell(
+    cs, monkeypatch, capsys, mode, session, term, shown, program
+):
+    set_config(cs, mode=mode)
+    monkeypatch.setenv("TERM_PROGRAM", term)
+    monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
+    monkeypatch.setattr(cs, "tmux", lambda *a: subprocess.CompletedProcess(a, 0 if session else 1, "", ""))
+
+    def execvp(file, argv):
+        raise EndOfTest(file)
+
+    monkeypatch.setattr(cs.os, "execvp", execvp)
+    with pytest.raises(EndOfTest) as e:
+        cs.cmd_attach()
+    out = capsys.readouterr().out
+    assert str(e.value) == program and (shown in out if shown else out == "")
+
+
 # ---- the fake Claude and the watchdog process ----------------------------------------------------
 
 
@@ -749,9 +1073,9 @@ def test_fake_claude_cannot_resume_a_conversation_that_was_never_saved(cs, tmp_p
 
 
 @posix_only
-def test_fake_claude_works_a_tiny_task_through_to_done(cs, repo, bare, tmp_path):
-    sh_script(tmp_path / "tools" / "crab-status", "declare")
-    env = dict(cs.worker_env(cs.cfg()), FAKE_CLAUDE_SLEEP="0")
+def test_fake_claude_works_a_tiny_task_through_to_done_and_forks_like_claude(cs, repo, bare, tmp_path):
+    sh_script(tmp_path / "tools" / "agent-status", "declare")
+    env = dict(cs.agent_env(cs.cfg()), FAKE_CLAUDE_SLEEP="0")
     env["PATH"] = f"{tmp_path / 'tools'}{os.pathsep}{env['PATH']}"
     sid, log = str(uuid.uuid4()), tmp_path / "fake-claude.log"
 
@@ -760,32 +1084,33 @@ def test_fake_claude_works_a_tiny_task_through_to_done(cs, repo, bare, tmp_path)
             return subprocess.Popen([sys.executable, str(FAKE_CLAUDE), "--dangerously-skip-permissions", *args],
                                     cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=out)  # fmt: skip
 
-    fake = start("--session-id", sid, cs.FIRST_PROMPT)
-    try:
-        wait_for(lambda: cs.read_worker().get("state") == "done" or fake.poll() is not None, 60)
-    finally:
-        fake.kill()
-        fake.wait()
-    assert cs.read_worker().get("state") == "done", log.read_text()
+    def run_until(condition, *args: str) -> None:
+        fake = start(*args)
+        try:
+            assert wait_for(condition, 60), log.read_text()
+        finally:
+            fake.kill()
+            fake.wait()
+
+    run_until(lambda: cs.read_agent().get("state") == "done", "--session-id", sid, cs.FIRST_PROMPT)
     pushed = set(git(bare, "ls-tree", "-r", "--name-only", "agent/job1").split())
     assert {"agent-runs/job1/REPORT.md", "agent-runs/job1/result.txt"} <= pushed
     assert (cs.OUTPUTS / "fake-output.bin").exists()
     [transcript] = (cs.ROOT / ".claude" / "projects").glob(f"*/{sid}.jsonl")
     steps = [(s["type"], s["text"]) for s in map(json.loads, transcript.read_text().splitlines())]
     assert ("early-done", "1") in steps  # its "done" before writing the report was refused
-    resumed = start("--resume", sid, cs.RESTART_NOTE)
-    try:
-        assert wait_for(lambda: '"resumed"' in transcript.read_text(), 30)
-    finally:
-        resumed.kill()
-        resumed.wait()
+    run_until(lambda: '"resumed"' in transcript.read_text(), "--resume", sid, cs.RESTART_NOTE)
+    fork = transcript.with_name(str(uuid.uuid4()) + ".jsonl")
+    run_until(lambda: fork.exists() and '"forked"' in fork.read_text(),
+              "--resume", sid, "--fork-session", "--session-id", fork.stem, "go on")  # fmt: skip
+    assert fork.read_text().startswith(transcript.read_text().splitlines()[0])
 
 
 @posix_only
-def test_one_watchdog_per_container_and_it_keeps_the_used_time_across_starts(cs, tmp_path):
+def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_start(cs, tmp_path):
     tmux = tmp_path / "tools" / "tmux"
     tmux.parent.mkdir()
-    tmux.write_text("#!/bin/sh\nexit 0\n")  # the worker's session "exists"
+    tmux.write_text("#!/bin/sh\nexit 0\n")  # the agent's session "exists"
     tmux.chmod(0o755)
     (cs.D / "booted").write_text("2000\n")  # a new container start (the previous one was at 1000)
     cs.save_state(dict(cs.load_state(), used_seconds=500.0, boot=1000.0, last_tick=1000.0))
@@ -796,7 +1121,7 @@ def test_one_watchdog_per_container_and_it_keeps_the_used_time_across_starts(cs,
         assert wait_for(lambda: cs.load_state()["boot"] == 2000.0, 30)
         assert subprocess.run(watch, env=env, capture_output=True, timeout=30).returncode == 0  # left at once
         st = cs.load_state()
-        assert 500 <= st["used_seconds"] < 520 and st["stopping"] is None and (cs.D / "heartbeat").exists()
+        assert 0 <= st["used_seconds"] < 20 and st["stopping"] is None and (cs.D / "heartbeat").exists()
     finally:
         first.kill()
         first.wait()

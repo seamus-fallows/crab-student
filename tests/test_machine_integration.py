@@ -1,7 +1,8 @@
 """The machine side end to end, on Linux: the real cs.py, copied flat into <root>/crab-student as the upload
-leaves it, runs setup, the watchdog, the fake Claude in tmux, status, send and the idle stop. "GitHub" is a
-local bare repo and Vast a local HTTP server; tmux runs a server of its own (TMUX_TMPDIR). It needs tmux, git,
-bash and pgrep (Linux CI installs tmux), takes about 75 s, and `pytest -m "not integration"` leaves it out."""
+leaves it, runs setup, the watchdog, the fake Claude in tmux, status, send and the idle stop, and an interactive
+agent's hand-off from VS Code to tmux. "GitHub" is a local bare repo and Vast a local HTTP server; tmux runs a
+server of its own (TMUX_TMPDIR). It needs tmux, git, bash and pgrep (Linux CI installs tmux), takes about 90 s,
+and `pytest -m "not integration"` leaves it out."""
 
 from __future__ import annotations
 
@@ -63,16 +64,20 @@ def vast():
 
 @pytest.fixture
 def machine(tmp_path, vast):
-    """The machine's files as the upload and the onstart command leave them, and cs.py's environment. At the
-    end the watchdog's process group, the tmux server and anything else still running from D are killed."""
+    """The machine's files as the upload and the onstart command leave them (a colleague agent), and cs.py's
+    environment. At the end the watchdog's process group, the tmux server and anything else still running from
+    D are killed."""
     root, bin_dir, bare = tmp_path / "root", tmp_path / "bin", github(tmp_path)
     d, repo = root / "crab-student", root / "work" / "proj"
     d.mkdir(parents=True)
-    for name in ("cs.py", "fake_claude.py", "worker.md"):
-        shutil.copy(REMOTE / name, d / name)
+    for path in REMOTE.iterdir():  # (the machine code, as the bundle carries it)
+        if path.suffix in (".py", ".md"):
+            shutil.copy(path, d / path.name)
     sid = str(uuid.uuid4())
-    config = dict(name=NAME, branch=BRANCH, repo_url=str(bare), repo_dir=str(repo), session_id=sid, model="")
-    config.update(fake_claude=True, idle_minutes=1, limit_hours=0.5, notify_url="", secret_names=[])
+    config = dict(
+        name=NAME, branch=BRANCH, repo_url=str(bare), repo_dir=str(repo), session_id=sid, mode="colleague"
+    )
+    config.update(claude_settings={}, fake_claude=True, idle_minutes=1, notify_url="", secret_names=[])
     files = {
         "config.json": json.dumps(config),
         "BRIEF.md": "# Brief\n\nWrite result.txt and a report.\n",
@@ -90,7 +95,7 @@ def machine(tmp_path, vast):
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     for var in ("TMUX", "TMUX_PANE"):  # (inside tmux, a client would talk to that server instead)
         env.pop(var, None)
-    yield SimpleNamespace(d=d, root=root, repo=repo, bare=bare, env=env, sid=sid, vast=vast)
+    yield SimpleNamespace(d=d, root=root, bin=bin_dir, repo=repo, bare=bare, env=env, sid=sid, vast=vast)
     for pid in pids(f"{d}/cs.py watch"):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pid, signal.SIGKILL)  # (setup starts it in a session, so a process group, of its own)
@@ -143,19 +148,19 @@ def read(path: Path) -> str:
         return ""
 
 
-def worker(m) -> dict:
-    return json.loads(read(m.d / "worker.json") or "{}")
+def agent(m) -> dict:
+    return json.loads(read(m.d / "agent.json") or "{}")
 
 
-def transcript(m) -> str:
-    return "".join(read(p) for p in (m.root / ".claude" / "projects").glob(f"*/{m.sid}.jsonl"))
+def transcript(m, sid: str = "") -> str:
+    return "".join(read(p) for p in (m.root / ".claude" / "projects").glob(f"*/{sid or m.sid}.jsonl"))
 
 
 def diagnose(m) -> str:
     """The machine's logs, state, transcript and screen, for a failure message."""
     parts = [(p.name, read(p)) for p in sorted((m.d / "logs").glob("*.log"))]
-    parts += [(name, read(m.d / name)) for name in ("worker.json", "state.json")]
-    parts += [("transcript", transcript(m)), ("screen", tmux(m, "capture-pane", "-p", "-t", "worker").stdout)]
+    parts += [(name, read(m.d / name)) for name in ("agent.json", "state.json", "handoff.json", "session_id")]
+    parts += [("transcript", transcript(m)), ("screen", tmux(m, "capture-pane", "-p", "-t", "agent").stdout)]
     return "".join(f"\n--- {name}\n{text[-3000:]}" for name, text in parts)
 
 
@@ -167,38 +172,42 @@ def wait_for(condition, seconds: float, what: str, m) -> None:
         time.sleep(0.5)
 
 
-def test_a_worker_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(machine):
-    m = machine
-    # (a) setup: five steps, then {"ok": true} (the fake Claude needs no install, and tmux is there)
+def setup_ok(m) -> None:
+    """setup: five steps, then {"ok": true} (the fake Claude needs no install, and tmux is there)."""
     p = cs(m, "setup", timeout=240)
     assert (p.returncode, last_json(p)) == (0, {"ok": True}), p.stdout + p.stderr + diagnose(m)
     steps = [line.split()[1] for line in p.stdout.splitlines() if line.startswith("step ")]
     assert steps == ["1/5", "2/5", "3/5", "4/5", "5/5"], p.stdout
 
-    # (b) one watchdog, detached from setup; it keeps tmux session "worker" running the fake Claude, which
+
+def test_an_agent_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(machine):
+    m = machine
+    setup_ok(m)
+
+    # (b) one watchdog, detached from setup; it keeps tmux session "agent" running the fake Claude, which
     # commits and pushes its result and report, then declares done
     watchdogs = pids(f"{m.d}/cs.py watch")
     assert len(watchdogs) == 1, f"watchdogs: {watchdogs}{diagnose(m)}"
     assert os.getsid(watchdogs[0]) == watchdogs[0], "the watchdog should run in a session of its own"
-    assert tmux(m, "has-session", "-t", "worker").returncode == 0, diagnose(m)
-    wait_for(lambda: worker(m).get("state") == "done", 90, "the worker to declare done", m)
+    assert tmux(m, "has-session", "-t", "agent").returncode == 0, diagnose(m)
+    wait_for(lambda: agent(m).get("state") == "done", 90, "the agent to declare done", m)
     pushed = set(git(m.bare, "ls-tree", "-r", "--name-only", BRANCH).split())
     assert {f"agent-runs/{NAME}/result.txt", f"agent-runs/{NAME}/REPORT.md"} <= pushed, pushed
 
     # (c) status: done, and nothing uncommitted or unpushed
     st = last_json(cs(m, "status"))
     head = git(m.bare, "rev-parse", BRANCH).strip()[:7]
-    assert st["worker"]["state"] == "done", st
+    assert st["agent"]["state"] == "done" and (st["mode"], st["frontend"]) == ("colleague", "tmux"), st
     assert st["git"] == {"branch": BRANCH, "head": head, "dirty": 0, "unpushed": 0}, st
     assert st["stopping"] is None, st
 
-    # (d) send types the text into the worker's Claude Code
+    # (d) send types the text into the agent's Claude Code
     text, sent_at = "hello from the integration test", time.time()
     assert last_json(cs(m, "send", stdin=text + "\n")) == {"sent": True}
-    wait_for(lambda: text in transcript(m), 30, "the message in the worker's transcript", m)
+    wait_for(lambda: text in transcript(m), 30, "the message in the agent's transcript", m)
 
     # (e) then a minute without activity: the watchdog saves the work (here an uncommitted edit) and asks
-    # Vast to stop the machine with the container's own key
+    # Vast to stop the machine with the container's own key (the reason: idle while done)
     (m.repo / "README.md").write_text("edited on the machine\n")
     what = "the stop call to Vast (on a busy host outside a container, its CPU use counts as activity)"
     wait_for(lambda: m.vast.requests, 120, what, m)
@@ -206,7 +215,44 @@ def test_a_worker_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(m
     assert (method, path, json.loads(body)) == ("PUT", "/api/v0/instances/42/", {"state": "stopped"}), path
     assert headers.get("authorization") == f"Bearer {KEY}", headers
     state = json.loads((m.d / "state.json").read_text())
-    assert (state["stopping"], state["stop_reason"]) == ("idle", "idle"), state
+    assert (state["stopping"], state["stop_reason"]) == ("done", "done"), state
     idle = at - state["last_activity"]  # (the send was the last activity, unless CPU noise came later)
     assert state["last_activity"] >= sent_at and 60 <= idle < 75, f"idle {idle:.1f} s: {state}"
     assert git(m.bare, "show", f"{BRANCH}:README.md") == "edited on the machine\n", "the edit was not saved"
+
+
+def test_an_interactive_agent_is_handed_off_from_vs_code_to_an_agent_in_tmux(machine):
+    m = machine
+    config = json.loads((m.d / "config.json").read_text())
+    (m.d / "config.json").write_text(json.dumps(dict(config, mode="interactive")))
+    setup_ok(m)
+
+    # (a) no Claude in tmux: Claude works in VS Code, which has the /handoff command and no rules file
+    st = last_json(cs(m, "status"))
+    assert (st["mode"], st["frontend"]) == ("interactive", "vscode"), st
+    time.sleep(3)  # (three watchdog ticks)
+    assert tmux(m, "has-session", "-t", "agent").returncode != 0, diagnose(m)
+    assert (m.root / ".claude" / "commands" / "handoff.md").exists(), diagnose(m)
+    assert not (m.root / ".claude" / "CLAUDE.md").exists(), diagnose(m)
+
+    # (b) the conversation in VS Code (kept where the CLI keeps its own) asks for a hand-off: Claude there runs
+    # agent-handoff from its Bash tool, which has the session id in its environment
+    vscode = str(uuid.uuid4())
+    folder = m.root / ".claude" / "projects" / str(m.repo).replace("/", "-")
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{vscode}.jsonl").write_text('{"type": "user", "text": "worked on it in VS Code"}\n')
+    env = dict(m.env, CLAUDE_CODE_SESSION_ID=vscode, CLAUDECODE="1")
+    handoff = [str(m.bin / "agent-handoff"), "autonomous", "finish the task"]
+    p = subprocess.run(handoff, env=env, cwd=m.repo, capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0 and "close VS Code" in p.stdout, p.stdout + p.stderr + diagnose(m)
+
+    # (c) the watchdog forked the conversation into tmux under a new id, with the autonomous rules; the agent
+    # there carries on to done
+    st = last_json(cs(m, "status"))
+    assert (st["mode"], st["frontend"]) == ("autonomous", "tmux"), st
+    assert tmux(m, "has-session", "-t", "agent").returncode == 0, diagnose(m)
+    forked = read(m.d / "session_id").strip()
+    assert forked not in (m.sid, vscode), diagnose(m)
+    assert transcript(m, forked).startswith(transcript(m, vscode).splitlines()[0]), diagnose(m)
+    assert "## Work on your own" in read(m.root / ".claude" / "CLAUDE.md")
+    wait_for(lambda: agent(m).get("state") == "done", 90, "the handed-off agent to declare done", m)

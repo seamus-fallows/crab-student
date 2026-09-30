@@ -982,6 +982,7 @@ def test_claude_settings_carry_the_launch_choices_the_token_and_the_secrets(cs):
     assert "allow" not in settings["permissions"]  # (only the model, effort and fast mode are taken)
     env = settings["env"]
     assert (env["CLAUDE_CODE_OAUTH_TOKEN"], env["HF_TOKEN"], env["IS_SANDBOX"]) == (TOKEN, HF, "1")
+    assert env["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] == "1"  # (else the token's fast mode stays off)
     if os.name == "posix":
         assert path.stat().st_mode & 0o777 == 0o600
     vscode = json.loads((cs.ROOT / ".vscode-server" / "data" / "Machine" / "settings.json").read_text())

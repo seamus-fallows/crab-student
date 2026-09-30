@@ -344,6 +344,10 @@ def write_claude_settings(c: dict) -> None:
     started (the one VS Code starts too)."""
     settings = json.loads(json.dumps(SETTINGS))
     settings.update((k, v) for k, v in c["claude_settings"].items() if k in CLAUDE_KEYS)
+    if settings.get("fastMode"):
+        # (Claude Code's own availability check turns fast mode off for the long-lived token; the API accepts
+        # it, and falls back to standard speed where fast mode is not allowed)
+        settings["env"]["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "1"
     settings["env"].update(read_env_file(D / "claude.env"))
     settings["env"].update(read_env_file(D / "secrets.env"))
     write(ROOT / ".claude" / "settings.json", json.dumps(settings, indent=2), 0o600)

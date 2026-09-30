@@ -241,20 +241,26 @@ def _files(paths: list[str], word: str = "file") -> str:
 
 def claude_settings(a: LaunchArgs, cfg: dict) -> dict:
     """The agent's Claude Code settings: each from the launch's flag, else the setting, else the user's own
-    Claude Code settings; only those set somewhere."""
+    Claude Code settings; only those set somewhere. The user's own effort comes with its per-model levels
+    (`modelSettings`), which a chosen effort replaces."""
     own, fast_setting = core.own_claude_settings(), {"on": True, "off": False}.get(cfg["fast_mode"])
+    effort = a.effort or cfg["effort"]
     chosen = {
         "model": a.model or cfg["model"] or own.get("model"),
-        "effortLevel": a.effort or cfg["effort"] or own.get("effortLevel"),
+        "effortLevel": effort or own.get("effortLevel"),
+        "modelSettings": None if effort else own.get("modelSettings"),
         "fastMode": next((v for v in (a.fast, fast_setting, own.get("fastMode")) if v is not None), None),
     }
     return {k: v for k, v in chosen.items() if v is not None}
 
 
 def settings_text(s: dict) -> str:
-    """ "model opus, effort high, fast mode on", or what Claude Code does by itself."""
+    """ "model opus, effort high, fast mode on" (an effort per model: "high for claude-opus-5-5"), or what
+    Claude Code does by itself."""
     parts = [f"model {s['model']}"] if s.get("model") else []
-    parts += [f"effort {s['effortLevel']}"] if s.get("effortLevel") else []
+    effort = [s["effortLevel"]] if s.get("effortLevel") else []
+    effort += [f"{v['effortLevel']} for {m}" for m, v in (s.get("modelSettings") or {}).items()]
+    parts += [f"effort {', '.join(effort)}"] if effort else []
     parts += [f"fast mode {'on' if s['fastMode'] else 'off'}"] if "fastMode" in s else []
     return ", ".join(parts) or "its defaults"
 

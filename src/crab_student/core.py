@@ -150,17 +150,25 @@ def set_config(key: str, text: str | None) -> object:
 
 def own_claude_settings() -> dict:
     """What agents copy from the user's own Claude Code settings when nothing else says: `model`,
-    `effortLevel` and `fastMode`, those set with a sensible type (a missing or invalid file gives none)."""
+    `effortLevel`, `fastMode`, and the effort levels in `modelSettings` (where Claude Code keeps the effort
+    chosen for each model), those set with a sensible type (a missing or invalid file gives none)."""
     data = read_json(Path.home() / ".claude" / "settings.json", {})
     if not isinstance(data, dict):
         return {}
-    kept = {
-        k: data[k].strip()
-        for k in ("model", "effortLevel")
-        if isinstance(data.get(k), str) and data[k].strip()
-    }
+    kept: dict = {}
+    if isinstance(data.get("model"), str) and data["model"].strip():
+        kept["model"] = data["model"].strip()
+    if data.get("effortLevel") in EFFORTS:
+        kept["effortLevel"] = data["effortLevel"]
     if isinstance(data.get("fastMode"), bool):
         kept["fastMode"] = data["fastMode"]
+    per_model = data.get("modelSettings") if isinstance(data.get("modelSettings"), dict) else {}
+    if efforts := {
+        m: {"effortLevel": s["effortLevel"]}
+        for m, s in per_model.items()
+        if isinstance(s, dict) and s.get("effortLevel") in EFFORTS
+    }:
+        kept["modelSettings"] = efforts
     return kept
 
 

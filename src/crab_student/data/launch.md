@@ -45,7 +45,7 @@ you leave out keep their defaults (8 cores, 16 GB RAM, the disk and download set
 - `--gpus` above 1 only if the code already supports several GPUs.
 - `--gpu-models` only for a hard need, e.g. bf16 needs Ampere or newer:
   `"A100,H100,L40,A6000,4090,3090,L4"`.
-- `--cpus`: 8 is the default; 16 or more for heavy data processing or many parallel workers.
+- `--cpus`: 8 is the default; 16 or more for heavy data processing or many parallel processes.
 - `--ram`: at least 16 GB, and 3x what is held in memory at once.
 - `--disk`: 30 GB for the image and environment, plus the data twice over (a download and an unpacked
   or converted copy), plus checkpoints and outputs, plus 50%.

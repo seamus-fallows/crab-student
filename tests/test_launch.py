@@ -33,6 +33,9 @@ def args(name: str = "job1", req: offers.Req | None = None, **kw) -> launch.Laun
     return launch.LaunchArgs(name=name, req=req or offers.Req(), **{**fields, **kw})
 
 
+PER_MODEL = {"claude-opus-5-5": {"effortLevel": "high"}}  # (where Claude Code keeps the user's /effort)
+
+
 def own_claude_settings(**settings) -> None:
     """The user's own ~/.claude/settings.json."""
     path = Path.home() / ".claude" / "settings.json"
@@ -161,6 +164,9 @@ def test_the_mode_and_claude_settings_reach_the_machine(machines):
          {"model": "haiku", "effortLevel": "xhigh", "fastMode": True}),
         ({"model": "sonnet", "effort": "low", "fast": False}, {"model": "haiku", "fast_mode": "on"},
          {"effortLevel": "high", "fastMode": True}, {"model": "sonnet", "effortLevel": "low", "fastMode": False}),
+        ({}, {}, {"model": "opus", "modelSettings": PER_MODEL}, {"model": "opus", "modelSettings": PER_MODEL}),
+        ({"effort": "low"}, {}, {"modelSettings": PER_MODEL}, {"effortLevel": "low"}),  # (a chosen effort wins)
+        ({}, {"effort": "medium"}, {"modelSettings": PER_MODEL}, {"effortLevel": "medium"}),
     ],
 )  # fmt: skip
 def test_each_claude_setting_comes_from_the_flag_else_the_setting_else_the_users_own(

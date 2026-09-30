@@ -73,7 +73,7 @@ def check_ready(fake_claude: bool = False) -> None:
     if not (core.ssh_dir() / "id_ed25519").exists() or not github.known_hosts_file().exists():
         raise core.CrabError("crab-student is not set up yet (no SSH key). Run: crab-student init")
     if not fake_claude and not core.get_secret(core.TOKEN):
-        raise core.CrabError("crab-student has no Claude token for workers yet. Run: crab-student init")
+        raise core.CrabError("crab-student has no Claude token for agents yet. Run: crab-student init")
 
 
 def init(renew_claude_token: bool = False) -> int:
@@ -166,9 +166,9 @@ def ensure_ssh_include() -> bool:
 
 def _claude_step(renew: bool) -> bool:
     if core.get_secret(core.TOKEN) and not renew:
-        _say("Claude", "ok - a token for workers is stored")
+        _say("Claude", "ok - a token for agents is stored")
         return True
-    print("  Claude      Workers use your Claude subscription through a long-lived token.")
+    print("  Claude      Agents use your Claude subscription through a long-lived token.")
     print("              In another terminal, run: claude setup-token")
     for _ in range(3):
         token = "".join(

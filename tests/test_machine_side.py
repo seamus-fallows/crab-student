@@ -970,11 +970,14 @@ def test_an_interactive_agent_gets_no_rules_but_the_handoff_command(cs):
 def test_claude_settings_carry_the_launch_choices_the_token_and_the_secrets(cs):
     machine_files(cs)
     secret_files(cs, {"HF_TOKEN": HF})
-    chosen = {"model": "opus", "effortLevel": "high", "fastMode": True, "permissions": {"allow": ["*"]}}
+    per_model = {"claude-opus-5-5": {"effortLevel": "xhigh"}}
+    chosen = {"model": "opus", "effortLevel": "high", "fastMode": True, "modelSettings": per_model,
+              "permissions": {"allow": ["*"]}}  # fmt: skip
     cs.setup_settings(set_config(cs, claude_settings=chosen), {})
     path = cs.ROOT / ".claude" / "settings.json"
     settings = json.loads(path.read_text())
     assert (settings["model"], settings["effortLevel"], settings["fastMode"]) == ("opus", "high", True)
+    assert settings["modelSettings"] == per_model
     assert settings["permissions"]["defaultMode"] == "bypassPermissions" and settings["permissions"]["deny"]
     assert "allow" not in settings["permissions"]  # (only the model, effort and fast mode are taken)
     env = settings["env"]
@@ -985,6 +988,37 @@ def test_claude_settings_carry_the_launch_choices_the_token_and_the_secrets(cs):
     assert vscode["claudeCode.initialPermissionMode"] == "bypassPermissions"
     profile = vscode["terminal.integrated.defaultProfile.linux"]
     assert vscode["terminal.integrated.profiles.linux"][profile]["path"] == str(cs.BIN / "agent-attach")
+
+
+@pytest.mark.parametrize("mode", ["autonomous", "colleague", "interactive"])
+def test_the_machine_is_set_up_from_the_config_the_local_side_writes(cs, mode):
+    from crab_student import core, launch, offers
+
+    offer = {
+        "id": 7,
+        "dph_total": 0.42,
+        "cpu_cores_effective": 8,
+        "cpu_ram": 16000,
+        "geolocation": "Quebec, CA",
+    }
+    plan = offers.Plan(offers.Req(), offer, [], [offer], over_cap=False)
+    repo = {"slug": "ada/proj", "branch": "agent/job1", "dir": str(cs.ROOT / "work" / "proj")}
+    a = launch.LaunchArgs("job1", offers.Req(), "Train.", None, False, ["HF_TOKEN"], False, False,
+                          mode=mode, model="opus", fast=True)  # fmt: skip
+    rec = launch.new_record(a, core.load_config(), plan, repo, None)
+    (cs.D / "config.json").write_text(json.dumps(launch.machine_config(rec)))
+    machine_files(cs)
+    c = cs.cfg()
+    cs.setup_settings(c, {})
+    assert (cs.machine_mode(c), cs.frontend(c)) == (mode, "vscode" if mode == "interactive" else "tmux")
+    settings = json.loads((cs.ROOT / ".claude" / "settings.json").read_text())
+    assert (settings["model"], settings["fastMode"]) == ("opus", True)
+    rules = cs.ROOT / ".claude" / "CLAUDE.md"
+    assert rules.exists() == (mode != "interactive")
+    assert (cs.ROOT / ".claude" / "commands" / "handoff.md").exists() == (mode == "interactive")
+    assert cs.agent_env(c)["AGENT_BRANCH"] == "agent/job1"
+    st, probe, _ = watchdog(cs)
+    assert first_stop(run_minutes(cs, st, probe, cs.cfg(), range(1, 62))) == ("stop:idle", 60)
 
 
 @pytest.mark.parametrize("mode, tools", [("colleague", {"agent-attach", "agent-status"}),

@@ -34,7 +34,8 @@ GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
 STEPS = ("environment", "repository", "agent settings", "Claude Code", "starting the agent")
 SESSION = "agent"  # the tmux session Claude Code runs in
-CLAUDE_KEYS = ("model", "effortLevel", "fastMode")  # what the config's claude_settings may set
+# What the config's claude_settings may set (modelSettings: the effort Claude Code keeps for each model).
+CLAUDE_KEYS = ("model", "effortLevel", "modelSettings", "fastMode")
 
 MACHINE = "Automated message from the machine: "
 FIRST_PROMPT = (
@@ -338,9 +339,9 @@ def write_rules(c: dict, mode: str) -> None:
 
 
 def write_claude_settings(c: dict) -> None:
-    """~/.claude/settings.json (0600): the base settings, the model, effort and fast mode the launch chose,
-    and the token and task secrets in `env`, so every Claude Code here has them however it was started (the
-    one VS Code starts too)."""
+    """~/.claude/settings.json (0600): the base settings, the model, effort (also per model) and fast mode the
+    launch chose, and the token and task secrets in `env`, so every Claude Code here has them however it was
+    started (the one VS Code starts too)."""
     settings = json.loads(json.dumps(SETTINGS))
     settings.update((k, v) for k, v in c["claude_settings"].items() if k in CLAUDE_KEYS)
     settings["env"].update(read_env_file(D / "claude.env"))

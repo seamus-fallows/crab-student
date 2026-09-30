@@ -89,8 +89,11 @@ def test_agents_copy_only_the_sensible_keys_of_the_users_own_claude_settings():
     settings.parent.mkdir()
     settings.write_text('{"model": "opus", "effortLevel": "high", "fastMode": false, "theme": "dark"}')
     assert core.own_claude_settings() == {"model": "opus", "effortLevel": "high", "fastMode": False}
-    settings.write_text('{"model": " ", "effortLevel": 3, "fastMode": "on"}')
+    settings.write_text('{"model": " ", "effortLevel": "max", "fastMode": "on", "modelSettings": {"x": 1}}')
     assert core.own_claude_settings() == {}
+    per_model = {"claude-opus-5-5": {"effortLevel": "high", "maxEffortLevel": "xhigh"}, "claude-haiku": {}}
+    settings.write_text(json.dumps({"modelSettings": per_model}))  # (where /effort keeps the user's choice)
+    assert core.own_claude_settings() == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}
     for broken in ('{"model": "opus",', '["model"]'):
         settings.write_text(broken)
         assert core.own_claude_settings() == {}

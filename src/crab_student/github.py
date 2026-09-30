@@ -15,10 +15,10 @@ from pathlib import Path
 
 from crab_student import core
 
-# github.com's ed25519 host key (https://api.github.com/meta), pinned for the workers' git.
+# github.com's ed25519 host key (https://api.github.com/meta), pinned for the agents' git.
 HOST_KEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-# Workers started on a repo within this many hours share its deploy key: GitHub emails the repo's admins
-# about every key added, so this is at most one email per repo a day instead of one per worker.
+# Agents started on a repo within this many hours share its deploy key: GitHub emails the repo's admins
+# about every key added, so this is at most one email per repo a day instead of one per agent.
 KEY_SHARE_HOURS = 24
 _REMOTE = re.compile(
     r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
@@ -135,7 +135,7 @@ def check_repo(slug: str, branch: str) -> None:
         raise
     if not (info.get("permissions") or {}).get("admin"):
         raise core.CrabError(
-            f"you need admin rights on {slug} so crab-student can add a deploy key for the worker. "
+            f"you need admin rights on {slug} so crab-student can add a deploy key for the agent. "
             "Ask an owner, or run the task in your workspace repo with --no-repo."
         )
     if branch_sha(slug, branch):
@@ -143,7 +143,7 @@ def check_repo(slug: str, branch: str) -> None:
 
 
 def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str], int]:
-    """The worker's starting commit: HEAD, plus the uncommitted changes to tracked files (what `git commit -a`
+    """The agent's starting commit: HEAD, plus the uncommitted changes to tracked files (what `git commit -a`
     would commit) as one commit made in a copy of the index (the user's index, working tree, branches and
     stash are untouched). Returns (start sha, files carried, untracked files not carried, local commits not
     on any remote)."""
@@ -173,7 +173,7 @@ def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str]
         "-p",
         repo.head,
         "-m",
-        "crab-student: uncommitted changes at launch",
+        "Uncommitted changes at launch",
         env=env,
     ).strip()
     return sha, changed, untracked, local
@@ -189,7 +189,7 @@ def check_workspace(slug: str, branch: str) -> bool:
             return False
         raise
     if not info.get("private"):
-        raise core.CrabError(f"{slug} is public, so crab-student will not put workers' work there. Make it "
+        raise core.CrabError(f"{slug} is public, so crab-student will not put agents' work there. Make it "
                              "private, or choose another name: crab-student config workspace_repo NAME")  # fmt: skip
     if branch_sha(slug, branch):
         raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
@@ -251,7 +251,7 @@ def deploy_key_exists(slug: str, key_id: int) -> bool:
     return True
 
 
-# ---- deploy keys shared by the workers on a repo ----------------------------------------------------
+# ---- deploy keys shared by the agents on a repo -----------------------------------------------------
 # A record's repo.deploy_key is {"id": GitHub's key id, "file": the private key's name in keys/,
 # "created": when it was added}. Claims and releases hold the repo's key lock, so a delete never removes
 # a key a launch is taking, and two deletes never each leave it to the other.
@@ -266,7 +266,7 @@ def key_title(key: dict) -> str:
 
 
 def claim_deploy_key(rec: dict) -> None:
-    """Give the worker the newest deploy key another worker on its repo holds, if it was added less than
+    """Give the agent the newest deploy key another agent on its repo holds, if it was added less than
     KEY_SHARE_HOURS ago and GitHub still has it; else a new one. Saves the record."""
     slug = rec["repo"]["slug"]
     with _keys_lock(slug):
@@ -278,8 +278,8 @@ def claim_deploy_key(rec: dict) -> None:
 
 
 def release_deploy_key(rec: dict) -> None:
-    """The worker is going: its record lets go of its deploy key, which is removed from GitHub and this
-    computer unless another worker holds it. Saves the record."""
+    """The agent is going: its record lets go of its deploy key, which is removed from GitHub and this
+    computer unless another agent holds it. Saves the record."""
     repo, key = rec["repo"], rec["repo"].get("deploy_key")
     if not key:
         return
@@ -326,7 +326,7 @@ def _delete_key_files(key: dict) -> None:
 
 
 def create_branch(repo: dict, key_path: Path) -> None:
-    """Put the worker's branch on GitHub: the starting commit pushed from the user's repo with the worker's
+    """Put the agent's branch on GitHub: the starting commit pushed from the user's repo with the agent's
     deploy key (no user credentials, so no prompt can block), or, for the workspace, made through the API."""
     if repo["workspace"]:
         api(
@@ -382,7 +382,7 @@ def read_file(slug: str, branch: str, path: str) -> str | None:
 
 
 def pull(rec: dict, path: Path | None) -> str:
-    """Fetch the worker's branch without touching the checkout: the remote-tracking ref always, and a local
+    """Fetch the agent's branch without touching the checkout: the remote-tracking ref always, and a local
     branch of the same name when that is a fast-forward."""
     repo, branch = rec["repo"], rec["repo"]["branch"]
     top = Path(path or Path.cwd())

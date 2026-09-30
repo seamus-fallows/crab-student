@@ -1,5 +1,5 @@
-"""Launching through the fakes: the happy path and the repo, the approval gate, the rent loop's failure modes,
-interrupted launches, and start and extend."""
+"""Launching through the fakes: the happy path and the repo, the mode and Claude settings, the approval gate, the
+rent loop's failure modes, interrupted launches, and start."""
 
 from __future__ import annotations
 
@@ -17,20 +17,27 @@ from crab_student import cli, core, github, launch, machine, offers, vast
 TOKEN = "sk-ant-oat01-" + "x" * 80  # (the Claude token the ready fixture stores)
 HF = "hf_the-task-secret-0042"
 RESULT_KEYS = {"name", "state", "result_line", "warnings", "needs_approval", "instance_id", "machine", "dph",
-               "hours", "est_usd", "limit_hours", "repo", "branch"}  # fmt: skip
+               "mode", "repo", "branch"}  # fmt: skip
 
 
 @pytest.fixture(autouse=True)
 def world(fake_vast, fake_github, user_repo, machines, ready, monkeypatch):
-    """Two offers on different machines (a 1h task stops after 2 hours), from the user's repo."""
+    """Two offers on different machines, from the user's repo."""
     fake_vast.offers = [offer(1, dph_total=0.30), offer(2, dph_total=0.35)]
     monkeypatch.chdir(user_repo)
 
 
 def args(name: str = "job1", req: offers.Req | None = None, **kw) -> launch.LaunchArgs:
     fields = {"brief": "# Task\nDo the thing.\n", "repo_path": None, "no_repo": False, "secrets": [],
-              "model": None, "fake_claude": False, "dry_run": False}  # fmt: skip
-    return launch.LaunchArgs(name=name, req=req or offers.Req(hours=1), **{**fields, **kw})
+              "fake_claude": False, "dry_run": False}  # fmt: skip
+    return launch.LaunchArgs(name=name, req=req or offers.Req(), **{**fields, **kw})
+
+
+def own_claude_settings(**settings) -> None:
+    """The user's own ~/.claude/settings.json."""
+    path = Path.home() / ".claude" / "settings.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"theme": "dark", **settings}))
 
 
 def out() -> launch.Progress:
@@ -61,7 +68,7 @@ def gh_writes(fake_github) -> list:
 
 
 def machine_runs(fake_vast, name: str = "job1") -> bool:
-    """The worker's machine runs."""
+    """The agent's machine runs."""
     return vast.running(fake_vast.instances.get(core.load(name)["instance_id"]))
 
 
@@ -69,14 +76,6 @@ def stop_machine(fake_vast, name: str = "job1") -> None:
     fake_vast.instances[core.load(name)["instance_id"]].update(
         actual_status="exited", intended_status="stopped", cur_state="stopped"
     )
-
-
-def other_worker(fake_vast, status: str = "running") -> int:
-    """Another ready worker (only what the machine count reads): its instance id."""
-    down = {} if status == "running" else {"intended_status": "stopped", "cur_state": "stopped"}
-    iid = fake_vast.add_instance(9, "cs:busy:0", status=status, **down)
-    core.save({"name": "busy", "phase": "ready", "instance_id": iid})
-    return iid
 
 
 def record_spawns(monkeypatch) -> list[str]:
@@ -101,7 +100,7 @@ def user_state(repo: Path) -> list[str]:
 # ---- the happy path and the repo -----------------------------------------------------------------
 
 
-def test_a_launch_rents_once_and_sets_up_the_worker(fake_vast, fake_github, user_repo, machines, monkeypatch,
+def test_a_launch_rents_once_and_sets_up_the_agent(fake_vast, fake_github, user_repo, machines, monkeypatch,
                                                     capsys):  # fmt: skip
     labels = []  # the record's rent label at the moment Vast gets the rent request
     real_rent = fake_vast._rent
@@ -112,7 +111,7 @@ def test_a_launch_rents_once_and_sets_up_the_worker(fake_vast, fake_github, user
 
     monkeypatch.setattr(fake_vast, "_rent", rent)
     monkeypatch.setattr("sys.stdin", io.StringIO("# Task\nDo the thing.\n"))
-    code = cli.main(["launch", "job1", "--hours", "1", "--json"])
+    code = cli.main(["launch", "job1", "--json"])  # (no hours: they are optional)
     captured = capsys.readouterr()
     assert code == 0, captured.err
     res, rec = json.loads(captured.out), core.load("job1")
@@ -121,17 +120,72 @@ def test_a_launch_rents_once_and_sets_up_the_worker(fake_vast, fake_github, user
     assert list(fake_vast.instances) == [rec["instance_id"]]
     (sent,) = rents(fake_vast)
     assert sent[1] == "/api/v0/asks/1/" and labels == [sent[2]["label"]] == [rec["rent"]["label"]]
-    assert rec["limit_hours"] == 2.0 and rec["last_start"]
+    assert rec["last_start"] and rec["req"]["hours"] is None and "limit_hours" not in rec
     head = git(user_repo, "rev-parse", "HEAD").strip()
     assert fake_github.branch_sha("ada/proj", "agent/job1") == rec["repo"]["start_sha"] == head
     ((key_id, key),) = fake_github.keys["ada/proj"].items()
     public = Path(f"{github.key_file(rec['repo']['deploy_key'])}.pub").read_text().strip()
     assert key_id == rec["repo"]["deploy_key"]["id"] and key["key"] == public and key["read_only"] == "false"
     config = json.loads(machines.uploads["job1"]["config.json"][0])
-    assert (config["branch"], config["limit_hours"]) == ("agent/job1", 2.0)
-    assert config["session_id"] == rec["session_id"]
+    assert (config["branch"], config["mode"], config["claude_settings"]) == ("agent/job1", "colleague", {})
+    assert config["session_id"] == rec["session_id"] and not {"limit_hours", "model"} & config.keys()
     assert fake_vast.ssh_keys[rec["instance_id"]] == ["ssh-ed25519 AAAA test"]
     assert f"Host {machine.alias('job1')}" in machine.config_file().read_text()
+
+
+# ---- the mode and Claude settings ----------------------------------------------------------------
+
+
+def test_the_mode_and_claude_settings_reach_the_machine(machines):
+    own_claude_settings(model="opus", effortLevel="medium", fastMode=True)
+    core.set_config("effort", "low")
+    core.set_config("mode", "autonomous")
+    res = go(args(model="sonnet"))
+    rec, config = core.load("job1"), json.loads(machines.uploads["job1"]["config.json"][0])
+    expected = {
+        "model": "sonnet",
+        "effortLevel": "low",
+        "fastMode": True,
+    }  # (the flag, the setting, the user's)
+    assert rec["claude_settings"] == config["claude_settings"] == expected
+    assert rec["mode"] == config["mode"] == res["mode"] == "autonomous"
+
+
+@pytest.mark.parametrize(
+    "flags, settings, own, expected",
+    [
+        ({}, {}, None, {}),
+        ({}, {}, {"model": "opus", "effortLevel": "high", "fastMode": False},
+         {"model": "opus", "effortLevel": "high", "fastMode": False}),
+        ({}, {"model": "haiku", "effort": "xhigh", "fast_mode": "on"}, {"model": "opus", "fastMode": False},
+         {"model": "haiku", "effortLevel": "xhigh", "fastMode": True}),
+        ({"model": "sonnet", "effort": "low", "fast": False}, {"model": "haiku", "fast_mode": "on"},
+         {"effortLevel": "high", "fastMode": True}, {"model": "sonnet", "effortLevel": "low", "fastMode": False}),
+    ],
+)  # fmt: skip
+def test_each_claude_setting_comes_from_the_flag_else_the_setting_else_the_users_own(
+    flags, settings, own, expected
+):
+    for key, value in settings.items():
+        core.set_config(key, value)
+    if own is not None:
+        own_claude_settings(**own)
+    assert launch.claude_settings(args(**flags), core.load_config()) == expected
+
+
+def test_an_unreadable_claude_settings_file_is_copied_from_as_nothing():
+    path = Path.home() / ".claude" / "settings.json"
+    path.parent.mkdir()
+    path.write_text('{"model": "opus",')
+    assert launch.claude_settings(args(), core.load_config()) == {}
+
+
+def test_an_interactive_agent_is_opened_in_vs_code(machines):
+    res = go(args(mode="interactive"))
+    assert json.loads(machines.uploads["job1"]["config.json"][0])["mode"] == "interactive"
+    assert res["mode"] == "interactive" and "crab-student open job1 --vscode" in res["result_line"]
+    other = go(args("job2"))
+    assert "crab-student open job2" in other["result_line"] and "--vscode" not in other["result_line"]
 
 
 def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github, machines, monkeypatch):
@@ -152,7 +206,7 @@ def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github,
         assert not any(secret.encode() in data for data in local)
 
 
-def test_workers_started_within_a_day_share_one_deploy_key(fake_github, machines):
+def test_agents_started_within_a_day_share_one_deploy_key(fake_github, machines):
     go(args("job1"))
     go(args("job2"))
     key = core.load("job1")["repo"]["deploy_key"]
@@ -253,7 +307,7 @@ def four_offers(fake_vast) -> None:
     fake_vast.offers = [offer(i, dph_total=0.30 + i / 100) for i in (1, 2, 3, 4)]
 
 
-def test_a_batch_launches_each_worker_on_a_machine_of_its_own(fake_vast, fake_github, machines):
+def test_a_batch_launches_each_agent_on_a_machine_of_its_own(fake_vast, fake_github, machines):
     four_offers(fake_vast)
     res = launch.launch_batch([args("job1"), args("job2")], out())
     recs = [core.load(n) for n in ("job1", "job2")]
@@ -265,7 +319,7 @@ def test_a_batch_launches_each_worker_on_a_machine_of_its_own(fake_vast, fake_gi
     assert recs[0]["repo"]["start_sha"] == recs[1]["repo"]["start_sha"]  # (one snapshot for the batch)
 
 
-def test_in_a_batch_only_workers_over_the_price_wait_for_approval(fake_vast):
+def test_in_a_batch_only_agents_over_the_price_wait_for_approval(fake_vast):
     core.set_config("approve_above_usd_per_hour", "0.315")  # (only offer 1, at $0.31, is within)
     four_offers(fake_vast)
     res = launch.launch_batch([args("job1"), args("job2")], out())
@@ -320,7 +374,6 @@ def test_a_taken_offer_moves_on_to_the_next(fake_vast):
     rec = core.load("job1")
     assert rec["phase"] == "ready" and fake_vast.instances[rec["instance_id"]]["offer_id"] == 2
     assert [f["id"] for f in rec["failed_offers"]] == [1] and len(rents(fake_vast)) == 2
-    assert rec["limit_hours"] == 2.0  # (hours, whatever the backup costs)
 
 
 @pytest.mark.parametrize("boot", ["boot_error", "exits", "never"])
@@ -413,7 +466,7 @@ def test_an_interrupted_launch_is_continued_by_start(where, fake_vast, machines,
 
 
 def test_start_restarts_the_stopped_machine_of_a_launch_cut_off_during_setup(fake_vast, machines):
-    """The worker may be at work there: its machine is started again and kept, and setup runs again."""
+    """The agent may be at work there: its machine is started again and kept, and setup runs again."""
     machines.setup_result = machine.Unreachable("the upload and setup on job1 did not finish")
     fails(1, go, args())
     machines.setup_result, machines.uploads = None, {}
@@ -484,34 +537,19 @@ def test_nvidia_disable_require_only_for_a_cpu_task_on_a_gpu_host(gpus, host, di
     assert sent[2]["env"].get("NVIDIA_DISABLE_REQUIRE") == ("1" if disabled else None)
 
 
-# ---- extend and start ----------------------------------------------------------------------------
+# ---- start ---------------------------------------------------------------------------------------
 
 
-def test_extend_pushes_the_new_limit_to_a_running_machine(machines):
-    go(args())
-    res, rec = launch.extend("job1", 2), core.load("job1")
-    assert res["exit_code"] == 0 and rec["limit_hours"] == 4.0
-    assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
-
-
-def test_extend_of_a_stopped_worker_is_pushed_by_the_next_start(fake_vast, machines):
-    go(args())
-    stop_machine(fake_vast)
-    launch.extend("job1", 2)
-    assert not machines.calls
-    res = launch.start("job1", out())
-    assert res["state"] == "working" and res.keys() >= RESULT_KEYS and len(starts(fake_vast)) == 1
-    assert machines.calls == [("job1", ["set-limit", "4.0"], None)]
-
-
-def test_start_refuses_once_the_time_limit_is_used_up(fake_vast):
+def test_start_has_no_time_limit_and_never_waits_for_approval(fake_vast, machines):
     go(args())
     stop_machine(fake_vast)
     rec = core.load("job1")
-    rec["last_seen"] = {"used_hours": 2.0}
+    rec["last_seen"] = {"used_hours": 500.0, "stop_reason": "idle"}
     core.save(rec)
-    fails(3, launch.start, "job1", out())
-    assert not starts(fake_vast)
+    core.set_config("approve_above_usd_per_hour", "0")
+    res = launch.start("job1", out())
+    assert res["state"] == "working" and res["exit_code"] == 0 and res.keys() >= RESULT_KEYS
+    assert machine_runs(fake_vast) and len(starts(fake_vast)) == 1 and not machines.calls
 
 
 def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(fake_vast, machines):
@@ -525,14 +563,6 @@ def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(f
     assert core.load("job1")["last_seen"]["stop_reason"] is None and not fake_vast.calls("DELETE", "/")
 
 
-def test_start_and_extend_never_wait_for_approval(fake_vast, machines):
-    go(args())
-    stop_machine(fake_vast)
-    core.set_config("approve_above_usd_per_hour", "0")
-    assert launch.extend("job1", 10)["exit_code"] == 0 and core.load("job1")["limit_hours"] == 12.0
-    assert launch.start("job1", out())["state"] == "working" and machine_runs(fake_vast)
-
-
 def test_a_failed_launch_tried_again_asks_first_if_only_pricier_machines_are_left(fake_vast, machines):
     machines.setup_result = core.CrabError("setup failed at step 2 (repository): clone failed", 5)
     fails(5, go, args())
@@ -542,14 +572,3 @@ def test_a_failed_launch_tried_again_asks_first_if_only_pricier_machines_are_lef
     assert res["exit_code"] == 3 and core.load("job1")["phase"] == "pending" and not machine_runs(fake_vast)
     launch.approve("job1", out())
     assert core.load("job1")["phase"] == "ready" and core.load("job1")["max_dph"] == 7.5
-
-
-def test_start_stops_a_machine_that_reports_its_limit_reached(fake_vast, machines):
-    go(args())
-    stop_machine(fake_vast)
-    machines.replies[("job1", "set-limit")] = {"limit_hours": 2.0, "used_hours": 2.0}
-    fails(3, launch.start, "job1", out())
-    iid = core.load("job1")["instance_id"]
-    assert len(starts(fake_vast)) == 1 and fake_vast.instances[iid]["intended_status"] == "stopped"
-    fails(3, launch.start, "job1", out())  # (it knows now: no second boot)
-    assert len(starts(fake_vast)) == 1

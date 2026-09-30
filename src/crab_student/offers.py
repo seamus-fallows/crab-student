@@ -1,15 +1,17 @@
-"""Requirements, the offer search, the picking rule and the time limit."""
+"""Requirements, the offer search and the picking rule."""
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
 
 from crab_student import core, vast
 
-# A worker's time limit: twice its estimated hours, and at least 2 hours.
-LIMIT_FACTOR, MIN_LIMIT_HOURS = 2.0, 2.0
+# A host's lease must outlast twice the expected hours, and at least a day (plus an hour of margin).
+LEASE_FACTOR, MIN_LEASE_HOURS = 2.0, 24.0
+SIMILAR_PRICE = 1.20  # offers up to this factor over the cheapest count as the same price
 REGIONS = {  # continent -> ISO country codes; `regions` entries are these names or 2-letter codes
     "north-america": {"US", "CA", "MX"},
     "south-america": {"AR", "BR", "CL", "CO", "PE", "UY"},
@@ -24,13 +26,14 @@ REGIONS = {  # continent -> ISO country codes; `regions` entries are these names
 
 @dataclass
 class Req:
-    """What a task needs. gpus 0 is a CPU task (cheap GPU hosts may still be picked for it)."""
+    """What a task needs. gpus 0 is a CPU task (cheap GPU hosts may still be picked for it). hours, when
+    known, only sets how long the host must stay available."""
 
-    hours: float
+    hours: float | None = None
     gpus: int = 0
     gpu_ram_gb: float = 0
     gpu_models: list[str] = field(default_factory=list)
-    cpus: int = 4
+    cpus: int = 8
     ram_gb: float = 16
     disk_gb: float = 50
     min_down_mbps: float = 200
@@ -67,8 +70,9 @@ class Plan:
         return max(o["dph_total"] for o in self.offers())
 
 
-def time_limit(hours: float) -> float:
-    return max(LIMIT_FACTOR * hours, MIN_LIMIT_HOURS)
+def lease_hours(hours: float | None) -> float:
+    """How long a host must still be available for a task of `hours` (None: not known)."""
+    return max(LEASE_FACTOR * (hours or 0), MIN_LEASE_HOURS) + 1
 
 
 def image_cuda(image: str) -> float | None:
@@ -121,10 +125,14 @@ def allowed_countries(regions: list[str]) -> set[str]:
     return codes
 
 
+def reliability(o: dict) -> float | None:
+    rel = _num(o, "reliability2")
+    return _num(o, "reliability") if rel is None else rel
+
+
 def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
     """The client-side recheck of every requirement (Vast's filter is not always exact)."""
-    price, rel = _num(o, "dph_total"), _num(o, "reliability2")
-    rel = _num(o, "reliability") if rel is None else rel
+    price, rel = _num(o, "dph_total"), reliability(o)
     ok = (
         o.get("rentable") is not False
         and o.get("rented") is not True
@@ -149,16 +157,23 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
             and (not req.gpu_models or any(m.lower() in name for m in req.gpu_models))
         )
     end = _num(o, "end_date")
-    if ok and end and end < now + 3600 * (time_limit(req.hours) + 1):
+    if ok and end and end < now + 3600 * lease_hours(req.hours):
         ok = False
     if ok and cfg["regions"]:
         ok = country(o) in allowed_countries(cfg["regions"])
     return ok
 
 
+def standing(o: dict) -> float:
+    """Reliability and download speed together: a point of reliability (in percent) counts as much as twice
+    the download speed."""
+    return 100 * (reliability(o) or 0) + math.log2(max(_num(o, "inet_down") or 0, 1))
+
+
 def rank(offers: list[dict], gpu: bool) -> list[dict]:
     """The deterministic order: for GPU work, drop offers clearly worse in speed per dollar; among offers
-    within 10% of the lowest price left, the fastest download first; then by price and id."""
+    within 20% of the lowest price left, the best standing (reliability and download speed) first; then by
+    price and id."""
 
     def value(o: dict) -> float:
         return (_num(o, "dlperf") or 0) / o["dph_total"]
@@ -172,8 +187,8 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
             pool = [o for o in band if value(o) >= best / 1.2]
     floor = min(o["dph_total"] for o in pool)
     similar = sorted(
-        (o for o in pool if o["dph_total"] <= 1.10 * floor),
-        key=lambda o: (-(_num(o, "inet_down") or 0), o["dph_total"], o["id"]),
+        (o for o in pool if o["dph_total"] <= SIMILAR_PRICE * floor),
+        key=lambda o: (-standing(o), o["dph_total"], o["id"]),
     )
     rest = sorted(
         (o for o in offers if o not in similar),
@@ -214,7 +229,7 @@ def plan(
     found = [o for o in fit if o["id"] not in taken]
     if fit and not found:
         raise core.CrabError(
-            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the workers that "
+            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the agents that "
             "need one. Launch fewer at once, or loosen the requirements.",
             4,
         )
@@ -256,7 +271,7 @@ def short(o: dict) -> str:
 
 
 def kept(o: dict) -> dict:
-    """The fields of an offer a worker record keeps."""
+    """The fields of an offer an agent record keeps."""
     return {
         "id": o["id"],
         "machine_id": o.get("machine_id"),

@@ -1064,7 +1064,8 @@ def cmd_handoff(args: list) -> int:
     save_handoff({"mode": mode, "from": sid, "prompt": prompt, "at": int(time.time())})
     spawn_watchdog()
     write(D / "wake", "")
-    how = "now continues" if agent_started(c, 120) else "is starting (it can take a minute) to continue"
+    # (at most 90 s: Claude Code cuts a Bash command off after 2 minutes by default)
+    how = "now continues" if agent_started(c, 90) else "is starting (it can take a minute) to continue"
     print(
         "Handed over: a %s agent %s this conversation in tmux on this machine. Stop here: end your turn without "
         "further work, and tell the user they can close VS Code." % (mode, how)

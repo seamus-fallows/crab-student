@@ -26,7 +26,9 @@ tool is for.)
    `list`/`status` finish a stop Vast did not take within 5 minutes. Nothing on the machine ever
    destroys one.
 6. **Secrets** (the Claude token, deploy keys, task secrets) never appear on command lines, in logs,
-   the brief, records or git. They reach the machine only inside the upload stream, as 0600 files.
+   the brief, records or git. They reach the machine only inside the upload stream, as 0600 files (on
+   the machine, the token and task secrets are also copied into the 0600 `~/.claude/settings.json`,
+   6.5).
 7. **The launcher** (a background Claude Code fork, or a general-purpose background agent when forks
    are unavailable) cannot ask the user anything, and a command outside its allowed list would raise a
    permission prompt in the user's main session. So it runs only allowed commands (`setup.ALLOW`);
@@ -53,7 +55,7 @@ tool is for.)
   ssh/known_hosts        machines' host keys, under HostKeyAlias crab-student-<name>
   ssh/github_known_hosts GitHub's pinned ed25519 host key
 ~/.config/vastai/vast_api_key   the Vast key (the vastai CLI's file; XDG_CONFIG_HOME is honoured)
-~/.claude/settings.json         read by launches (never written by them) for the model, effort and fast mode to inherit
+~/.claude/settings.json         read by launches (never written by them) for the model, effort and fast mode to inherit (4.5)
 ```
 
 Secrets live in the OS keyring, service `crab-student`: `claude-oauth-token` (the Claude token for
@@ -77,7 +79,7 @@ far the launch got (only the local side writes it):
 Other fields: `req` (hours or null, gpus, gpu_ram_gb, gpu_models, cpus, ram_gb, disk_gb,
 min_down_mbps), `mode` (`autonomous`, `colleague` or `interactive`; follows the machine's mode after a
 hand-off, 6.5), `claude_settings` (only the keys that are set: any of `model`, `effortLevel`,
-`fastMode`; 4.5), `max_dph` (the most per hour it may rent at without asking again: the setting, or
+`modelSettings`, `fastMode`; 4.5), `max_dph` (the most per hour it may rent at without asking again: the setting, or
 the price approved), `fake_claude`, `secrets` (names), `session_id`, `repo` (slug, workspace, branch,
 start_sha, local_dir, carried, untracked, deploy_key `{id, file, created}` (4.3), branch_created, dir on
 the machine), `offers` (the pick and up to two fallbacks), `failed_offers`, `instance_id`, `dph`,
@@ -90,7 +92,7 @@ never rely on `last_seen`: `delete` checks the machine itself, or a stop note.
 
 Names are 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `crab-student-<name>-<8 hex>` (new for every rent request); deploy key title
-`crab-student <created>`; tmux session `agent`.
+`crab-student <created>`; tmux session `agent` on the machine (`agents` for the local `open --all`).
 
 ## 4. The launch
 
@@ -127,8 +129,9 @@ re-checked on every result, plus GPU model substrings, `regions` (the country co
 `geolocation`; continent names expand to countries) and the host's lease: `end_date` must be at least
 `max(2 x hours, 24) + 1` hours away (24 + 1 without `--hours`). Ranking: for GPU tasks, drop offers
 more than 20% worse in dlperf per dollar than the best offer within 1.5x the cheapest price; among the
-offers within 20% of the lowest price left, best first by reliability and download speed together (a
-fixed, deterministic score); then price and id. Up to 2 fallbacks on other machines at most 1.25x the
+offers within 20% of the lowest price left, best first by reliability and download speed together
+(100 x reliability + log2 of the download Mbps: a point of reliability counts as much as twice the
+speed), then price and id; the rest after them, by price. Up to 2 fallbacks on other machines at most 1.25x the
 pick's price. The pick and its fallbacks come from the offers up to `approve_above_usd_per_hour` when
 any fits, else from all of them (the launch then waits for approval, and `approve` plans again up to
 the price it showed). A CPU task (0 GPUs) may rent a GPU host, with `NVIDIA_DISABLE_REQUIRE=1` in its
@@ -147,8 +150,9 @@ sharing is bounded: every key stops working once the agents it was given to are 
 `=== NAME [flags]` (its flags over the batch's; secrets add up) and followed by its brief. All are
 planned first, so any problem stops the batch before anything is rented; they share one starting
 commit; each picks an offer no earlier agent in the batch picked (its fallbacks may be later agents'
-picks: renting a taken offer moves on to the next), searched once per kind of machine. Those over the price wait for approval; the rest are brought up side by side (one
-thread each, progress lines prefixed `[name]`), a failure in one not stopping the others. The result
+picks: renting a taken offer moves on to the next), searched once per kind of machine. Those over
+the price wait for approval; the rest are brought up side by side (one thread each, progress lines
+prefixed `[name]`), a failure in one not stopping the others. The result
 has each agent's result, all result lines, the warnings once each, and the worst exit code (a failure,
 else 3 if any waits, else 0). `approve NAME ...` plans the named agents the same way (a machine each).
 
@@ -156,16 +160,21 @@ else 3 if any waits, else 0). `approve NAME ...` plans the named agents the same
 (default `colleague`). For each of `model`, `effortLevel` and `fastMode` the value is the launch flag
 (`--model`, `--effort`, `--fast`/`--no-fast`), else the setting (`model`, `effort`, `fast_mode`), else
 the same key in the user's `~/.claude/settings.json` (a missing or invalid file gives nothing); a key
-with no value is left out. The result is `claude_settings` in the record and in the machine's
-`config.json`. A launch prints the brief and one result line, which the skill relies on:
+with no value is left out. Claude Code keeps the effort picked with `/effort` per model, under
+`modelSettings.<model>.effortLevel`: without a chosen effort (flag or setting), those per-model levels
+come along too (`modelSettings`, the effort levels only). The result is `claude_settings` in the record
+and in the machine's `config.json`. A launch prints the brief and one result line, which the skill
+relies on:
 
 ```
 NAME: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - colleague - branch agent/NAME - watch: crab-student open NAME
-NAME: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - interactive - open it: crab-student open NAME --vscode
+NAME: ready on 1x RTX 4090 (Quebec, CA) at $0.42/hr - interactive - branch agent/NAME - open it: crab-student open NAME --vscode
+NAME: NOT started - needs your approval: REASON - would rent SHORT at $X/hr - approve: crab-student approve NAME (or: crab-student decline NAME)
+NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 ```
 
-(`--json` gives `result_line` and `warnings`.) An interactive agent's brief is the task as the user
-would type it to Claude Code.
+(`--json` gives `result_line`, `warnings`, `mode` and the rest.) An interactive agent's brief is the
+task as the user would type it to Claude Code.
 
 ## 5. Agents once launched
 
@@ -173,8 +182,9 @@ would type it to Claude Code.
   running ready agent (in parallel). States: approval; starting (a launch at work, Vast starting the
   machine, or no agent status yet); interrupted (a launch cut off, or a rent not confirmed); failed (the
   launch failed, the agent says so, or the machine no longer exists); unknown (Vast unreachable, or no
-  answer over ssh); stopped (with the reason: stopped by you, idle, or done and idle; how long ago; the
-  disk's cost per day; or "stopping"); needs you (colleague mode only); done (" (not all pushed)" when
+  answer over ssh); stopped (with the reason: stopped by you, idle stop, finished (idle after done), or
+  "stopped itself" when the reason is not known here; how long ago; the disk's cost per day; or
+  "stopping"); needs you (colleague mode only); done (" (not all pushed)" when
   git is not clean); working (idle for 10+ minutes shows in the message); interactive (Claude is in
   VS Code and has no status of its own: the message says "in VS Code, active" or "in VS Code, idle
   12m", from the conversation's activity). Views show the mode, the frontend (`tmux` or `vscode`) and
@@ -191,39 +201,47 @@ would type it to Claude Code.
   `last_start`) and `agent-runs/<name>/stopped.json` on its branch (if written 5+ minutes after
   `last_start`: a stop that could not push one leaves an older one); none, or GitHub unreachable ->
   needs `--force` (unreachable too). `list`/`status` seeing a stopped machine run again (started from
-  Vast's website, say) moves `last_start` to then and drops `stop_note`. Refused (exit 3, with the list and a copy command) for unpushed commits,
-  uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. Then destroy,
+  Vast's website, say) moves `last_start` to then and drops `stop_note`. Refused (exit 3, with the list
+  and a copy command) for unpushed commits, uncommitted files, files in `/root/outputs`, or untracked
+  files of 100 MB+ outside git. Then destroy,
   remove the deploy key unless another agent holds it (4.3), remove the branch only if it still points
   at `start_sha`, forget the host key and the record.
 - **5.4 open.** `open NAME`: `agent-attach` over `ssh -t` (6.7); for an agent whose frontend is `vscode`
-  it says to use `--vscode`. `open --all`: the agents that are running, side by side; agents whose
+  it refuses (exit 2) and says to use `--vscode`. `open --all`: the agents that are running, side by
+  side (Windows Terminal panes, else a local tmux session `agents` with prefix Ctrl-a); agents whose
   frontend is `vscode` are skipped, with a note. `open NAME --vscode`: VS Code opens
-  `ssh-remote+crab-student-<name>` on the repo folder (needs the `code` command). For an interactive
-  agent not yet handed over it also opens `vscode://anthropic.claude-code/open?prompt=<the brief,
-  URL-encoded>`, which fills the Claude panel without sending; the extension is expected to be there
-  already (`init` offers `anthropic.claude-code` in `remote.SSH.defaultExtensions`).
+  `ssh-remote+crab-student-<name>` on the repo folder (needs the `code` command). When the machine's
+  `status` says the frontend is `vscode` (or, if it cannot be asked, the record's mode is interactive),
+  it then waits 5 s for the window and opens `vscode://anthropic.claude-code/open?prompt=<the brief,
+  URL-encoded>` through the OS URL handler, which fills the Claude panel without sending (a brief over
+  5,000 characters, the extension's limit, is replaced by a pointer to `/root/BRIEF.md`). The extension
+  is expected to be there already (`init` offers `anthropic.claude-code` in
+  `remote.SSH.defaultExtensions`).
 
 ## 6. The machine
 
-`D=/root/crab-student`; the repo at `/root/work/<repo>`; big outputs in `/root/outputs`.
+`D=/root/crab-student`; the repo at `/root/work/<repo>`; big outputs in `/root/outputs`; the brief
+copied to `/root/BRIEF.md`, where the agent reads it (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command: `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&
-<python> cs.py setup`, with a tar.gz on stdin: the machine code (`cs.py`, `fake_claude.py`, and the
-agent's rules: a base plus one section per mode for autonomous and colleague; interactive has none),
-`config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude, session_id,
-idle_minutes, notify_url, secret_names), `BRIEF.md`, `claude.env` and `secrets.env` (0600,
+<python> cs.py setup`, with a tar.gz on stdin: the machine code (`cs.py`, `fake_claude.py`, the agent's
+rules `rules.md` with `rules-autonomous.md` and `rules-colleague.md`, and `handoff.md`, the `/handoff`
+command), `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude,
+session_id, idle_minutes, notify_url, secret_names), `BRIEF.md`, `claude.env` and `secrets.env` (0600,
 `export K=<quoted>` lines), `deploy_key` (0600), `github_known_hosts`. Setup prints `step i/5 <label>`
 lines, then one JSON object `{"ok": true}` or `{"ok": false, "step", "label", "error"}`; on a machine
 where setup was done before, it only restarts the watchdog (`{"ok": true, "resumed": true}`). The
-steps: environment (profile, `agent-status`, `agent-attach`, `agent-handoff`, the `/handoff` command
-for Claude Code, git hooks, identity, VS Code's machine-level settings (6.5); Claude Code and tmux
-installed in the background), repository (clone the branch with the deploy key; `core.sshCommand`,
-`core.hooksPath`, a push refspec for the branch only), Claude settings (autonomous and colleague:
-`~/.claude/CLAUDE.md` from the rules for the mode; all modes: `~/.claude/settings.json` from the base
-settings with `claude_settings` merged over them, the onboarding and trust flags in `~/.claude.json`),
-Claude Code (wait for the installs; one tiny `claude -p` call checks the token), starting the agent
-(refused without the container's Vast key; `setup-done`, the watchdog; autonomous and colleague: wait
-for the conversation file; interactive: nothing runs in tmux).
+steps: `environment` (the login profile `/etc/profile.d/agent.sh`, which sets PATH and sources
+`claude.env` and `secrets.env`; `agent-attach`, plus `agent-status` for autonomous and colleague or
+`agent-handoff` for interactive; git hooks; the git identity `<name> (Claude Code agent)
+<name@agent.invalid>`; Claude Code and tmux installed in the background), `repository` (clone the
+branch with the deploy key; `core.sshCommand`, `core.hooksPath`, a push refspec for the branch only),
+`agent settings` (`/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from `rules.md`
+with the mode's section; interactive: the `/handoff` command in `~/.claude/commands/`; all modes:
+`~/.claude/settings.json` and VS Code's machine-level settings (6.5), the onboarding and trust flags
+in `~/.claude.json`), `Claude Code` (wait for the installs; one tiny `claude -p` call checks the
+token), `starting the agent` (refused without the container's Vast key; `setup-done`, the watchdog;
+autonomous and colleague: wait for the conversation file; interactive: nothing runs in tmux).
 
 **6.2 onstart** (Vast runs it as root at every container start; each command ends in `;` or `&`, so it
 works with or without line breaks): write `CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to
@@ -231,22 +249,25 @@ works with or without line breaks): write `CONTAINER_ID`, `CONTAINER_API_KEY`, `
 `setup-done` exists. **Dead-man loop:** every 60 s, if the newer of `booted` (its content, epoch
 seconds) and `heartbeat`'s mtime is more than 2,700 s old, call Vast stop with the container's key.
 
-**6.3 The watchdog** (`cs.py watch`, one per container by flock). Every 60 s: touch `heartbeat`; while
-the mode is autonomous or colleague, keep the tmux session `agent` (running `cs.py claude`) alive; add
-the elapsed time (at most two ticks) to `used_seconds` in `state.json` (shown as `used_hours`; nothing
-is decided from it). Busy = the conversation files under `~/.claude/projects` grew (their mtimes, so a
-conversation in VS Code counts as much as one in tmux), the container's own cgroup CPU grew by 0.25
-core or more, or a GPU is 10%+ busy: a running job always counts. Rules: in colleague mode, a nudge
-typed to the agent after half of `idle_minutes` of quiet while it says `needs-you` (once per quiet
-stretch); in autonomous and colleague mode, a check-in typed after 20 minutes without a word while it
-says `working` (it may have ended its turn with a job running; once per silent stretch); in interactive
-mode neither. **Stop** after `idle_minutes` of quiet, whether the agent is done or not. Typed messages
-start with `Automated message from the machine:`. A stop sets `stopping`, notifies, saves (6.6, final),
-records `stop_sent_at` and calls Vast stop with the container's key (from `vast.env`, else process 1's
-environment), retried every tick. `stop_reason` is `user` (`crab-student stop`), `idle`, or `done` (an
-idle stop while the agent's status was done). A new container start resets the idle and quiet clocks and
-the boot grace, never `used_seconds`.
-Notifications (`notify_url`): the agent entering needs-you, done or failed, and the watchdog's stops.
+**6.3 The watchdog** (`cs.py watch`, one per container by flock). Every 60 s (at once when a command
+creates the file `wake`, as `agent-handoff` does): touch `heartbeat`; while the mode is autonomous or
+colleague, keep the tmux session `agent` (running `cs.py claude`) alive; add the elapsed time (at most
+two ticks) to `used_seconds` in `state.json` (shown as `used_hours`; nothing is decided from it). Busy =
+the total size of the conversation files under `~/.claude/projects` (searched recursively, subagents'
+too) changed, so a conversation in VS Code counts as much as one in tmux; the container's own cgroup
+CPU grew by 0.25 core or more; or a GPU is 10%+ busy: a running job counts through its CPU or GPU.
+Rules: in colleague mode, a nudge typed to the agent after half of `idle_minutes` of quiet while it says
+`needs-you` (once per quiet stretch); in autonomous and colleague mode, a check-in typed after 20 minutes
+without a word while it says `working` (it may have ended its turn with a job running; once per silent
+stretch); in interactive mode neither. **Stop** after `idle_minutes` of quiet, whether the agent is done
+or not. Typed messages start with `Automated message from the machine:`. A stop sets `stopping`,
+notifies, saves (6.6, final), records `stop_sent_at` and calls Vast stop with the container's key (from
+`vast.env`, else process 1's environment), retried every tick. The watchdog's `stop_reason` is `idle`,
+or `done` (an idle stop while the agent's status was done); a stop by the user (`crab-student stop`) is
+recorded locally and in its stop note (reason `user`). A new container start resets the idle and quiet
+clocks and `used_seconds`, so `used_hours` is the machine time of the current start.
+Notifications (`notify_url`): the agent entering needs-you, done or failed, and the watchdog's stops (a
+generic JSON POST carries `agent`, `event`, `message` and `text`).
 
 **6.4 Modes.** The machine's mode starts as the launch's and changes only by hand-off (6.5).
 
@@ -268,44 +289,57 @@ stop, the idle stop and the dead-man switch apply.
 **6.5 Claude Code** in tmux runs as `claude --dangerously-skip-permissions` (the model, effort and fast
 mode come from the settings file, never from flags) with `--session-id <id> "<first prompt>"` the first
 time and `--resume <id>` after (the first resume in a pane adds a restart note). A resume that fails at
-once starts a new session that reads the report. Environment: without `CLAUDECODE`,
-`CLAUDE_CODE_ENTRYPOINT` and `CONTAINER_*`; with `IS_SANDBOX=1`, `DISABLE_AUTOUPDATER=1`, the token and
-task secrets. When Claude Code exits, the pane waits for Enter.
+once starts a new session that reads the report. Environment: without `CLAUDECODE`, `CLAUDE_CODE_*`
+(a hand-off runs inside VS Code's Claude) and `CONTAINER_*`; with `IS_SANDBOX=1`,
+`DISABLE_AUTOUPDATER=1`, `AGENT_NAME`, `AGENT_BRANCH`, the token and task secrets. When Claude Code
+exits, the pane waits for Enter.
 
-The extension in VS Code (interactive, before hand-off) is expected to skip permission prompts too
-(machine-level VS Code settings written at setup) and to find the Claude token, which the login
-profile exports so the VS Code server sees it. Setup also writes VS Code's machine-level settings
-(under `~/.vscode-server/data/Machine/`, nothing in the user's repo) so its integrated terminal
-attaches to the tmux session `agent` once there is one.
+`~/.claude/settings.json` (0600, every mode): `permissions.defaultMode: "bypassPermissions"` and deny
+rules for the obvious ways around the hooks; `env` with `IS_SANDBOX=1`, `DISABLE_AUTOUPDATER=1`, the
+token and task secrets (so a Claude Code started by VS Code has them too); and `claude_settings` merged
+over them (only `model`, `effortLevel`, `modelSettings` and `fastMode` are taken). VS Code's
+machine-level settings (`~/.vscode-server/data/Machine/settings.json`, nothing in the user's repo):
+`claudeCode.initialPermissionMode: "bypassPermissions"`, `claudeCode.allowDangerouslySkipPermissions:
+true`, and a default terminal profile that runs `agent-attach`, so a new integrated terminal shows the
+tmux session `agent` once there is one. The login profile also exports the token for the VS Code
+server. Whether the extension picks these up is to be verified on a real machine.
 
 **Hand-off** (interactive only): the user types `/handoff [autonomous|colleague] [what to continue
-with]` in the Claude panel, or asks in words. The agent commits and pushes, then runs
-`agent-handoff [autonomous|colleague] ["what to continue with"]` (default `colleague`). The command
-writes that mode's rules to `~/.claude/CLAUDE.md`, switches the machine's mode, and has the watchdog
-start Claude in tmux with `claude --resume <the conversation's current session id> --fork-session
-"<continue prompt>"`, so the tmux agent has the whole conversation under a new session id and the two
-sessions never clash. The forked session's id is recorded as the session to resume on later restarts.
-The command prints a line telling the VS Code conversation to stop and the user that they can close
-VS Code. From then on the agent is a tmux agent of that mode; losing the VS Code connection does not
-matter. `status` then reports the new mode and `tmux`, and the local record follows (5.1).
+with]` in the Claude panel, or asks in words. The command (`~/.claude/commands/handoff.md`) has
+Claude commit and push, then run `agent-handoff --session=${CLAUDE_SESSION_ID} <mode> "<what to
+continue with>"` (default `colleague`), then end its turn. `agent-handoff` refuses once handed off. It
+takes the conversation's id from `--session=` (if that transcript exists), else `CLAUDE_CODE_SESSION_ID`
+(which Claude Code sets for its Bash commands), else the newest transcript. It writes that mode's rules
+to `~/.claude/CLAUDE.md`, installs `agent-status`, removes the `/handoff` command, picks a new session
+id (`D/session_id`), writes `handoff.json` `{mode, from, prompt, at}` (the machine's mode is now its
+mode), wakes the watchdog and waits up to 90 s for Claude in tmux. The watchdog starts `claude --resume
+<from> --fork-session --session-id <new id> "<hand-off prompt>"`, so the tmux agent has the whole
+conversation under a new session id and the two sessions never clash; the hand-off prompt starts with
+`Automated message from the machine:` and has the agent read its new rules. If that fails at once, it
+forks without `--session-id` and resumes the newest conversation begun since (never the VS Code one);
+if that fails too, a new conversation starts from the brief, with what the user asked for. Later
+restarts resume the fork. The command prints a line telling the VS Code conversation to stop and the
+user that they can close VS Code. From then on the agent is a tmux agent of that mode; losing the VS
+Code connection does not matter. `status` then reports the new mode and `tmux`, and the local record
+follows (5.1).
 
 **6.6 Save before stopping**: on the agent's branch and not mid-merge or rebase: stage tracked changes
 and untracked files up to 10 MB each (at most 2,000 files and 100 MB in all; the rest are reported as
-skipped), commit `autosave (<reason>)` unless the pre-commit hook refuses, push the
-branch. A **final** save (before every stop: the watchdog's, and `crab-student stop`'s) also writes the
+skipped), commit `Autosave (<reason>)` unless the pre-commit hook refuses, push the branch. A **final** save (before every stop: the watchdog's, and `crab-student stop`'s) also writes the
 stop note `agent-runs/<name>/stopped.json` into the same commit (added even if ignored): `{stopped_at
 (epoch seconds), reason, outputs {files, bytes, sample}, large_files [{path, bytes}], not_committed
 (first 50 paths git would still list after the commit), not_committed_count}`. A refused commit commits
 no note (and puts the note file back as it was).
 
 **6.7 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
-prints `{"error": ...}` and exits 1): `status` (name, mode, frontend, agent {state, message, at}
-(absent for an interactive agent), idle_seconds, used_hours, stopping, stop_reason, stop_sent_for,
-git {branch, head, dirty, unpushed}); `save --reason R [--final]` (committed, pushed, skipped, dirty,
-unpushed, error, note, note_committed); `check` (save's fields plus outputs {files, bytes, sample} and
-large_files); `send` (text on stdin, typed into the pane as one bracketed paste; refused while Claude
-is not in tmux). `open` runs `agent-attach` with `ssh -t` (`tmux -u attach`; a shell if the session is
-gone). There is no command that changes how long a machine may run.
+prints `{"error": ...}` and exits 1): `status` (name, mode, frontend, agent {state, message, at} (`{}`
+until the agent sets a status, so always for an interactive agent in VS Code), idle_seconds,
+used_hours, stopping, stop_reason, stop_sent_for, git {branch, head, dirty, unpushed}); `save --reason R
+[--final]` (committed, pushed, skipped, dirty, unpushed, error, note, note_committed); `check` (save's
+fields plus outputs {files, bytes, sample} and large_files); `send` (text on stdin, typed into the pane
+as one bracketed paste; refused while Claude is in VS Code). `open` runs `agent-attach` with `ssh -t`
+(`tmux -u attach`; a login shell if the session is gone, or while Claude is in VS Code, with a hint).
+There is no command that changes how long a machine may run.
 
 **6.8 The agent's tools.** `agent-status working|needs-you|done|failed "<message>"` (autonomous and
 colleague) writes `agent.json`; `done` is refused until `agent-runs/<name>/REPORT.md` is committed,

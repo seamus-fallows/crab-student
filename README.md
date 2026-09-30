@@ -103,9 +103,10 @@ The branch protection, the secret and big-file checks, the save before every sto
 the dead-man switch are the same in every mode.
 
 **Claude's settings.** The agent uses the model, effort and fast mode you ask for with `--model`,
-`--effort` and `--fast` / `--no-fast`, else the `model`, `effort` and `fast_mode` settings, else your
-own `~/.claude/settings.json` (`model`, `effortLevel`, `fastMode`), so remote agents behave like your
-local Claude. `status` shows what an agent got.
+`--effort` and `--fast` / `--no-fast`, else the `model`, `effort` and `fast_mode` settings, else what
+your own Claude Code uses (from `~/.claude/settings.json`: its model, fast mode, and the effort you
+picked with `/effort`, which Claude Code keeps for each model), so remote agents behave like your local
+Claude. `status` shows what an agent got.
 
 **Your repo.** The agent starts from your current commit on a new branch `agent/<name>`. Local
 commits that are not on GitHub yet, and uncommitted changes to tracked files, go along (as one extra
@@ -166,7 +167,7 @@ connection does not matter.
 ## Keeping track
 
 ```
-crab-student list            # every agent: state, its own status line, time, money spent
+crab-student list            # every agent: mode, state, its own status line, time and money since its last start
 crab-student status NAME     # one agent in detail
 crab-student report NAME     # its REPORT.md
 crab-student pull NAME       # fetch its branch into your repo (your checkout is not touched)
@@ -210,7 +211,8 @@ branch stays on GitHub.
 ## Money and safety
 
 - **You are responsible for your machines.** There is no time limit: a machine runs until it goes
-  idle or you stop it. `list` shows what each one costs and how long it has run.
+  idle or you stop it. `list` shows what each one costs and how long it has run since it was last
+  started.
 - **Idle stop.** The machine stops itself after an hour (`idle_minutes`) with nothing happening: no
   CPU or GPU work (a running job always counts) and no activity in the conversation, whether it is in
   tmux or in VS Code. An open but unused session does not keep it up. This applies whether the agent
@@ -268,7 +270,7 @@ default.
 | `idle_minutes` | 60 | Idle stop after this long with nothing happening |
 | `mode` | `colleague` | `autonomous`, `colleague` or `interactive` for launches that do not say |
 | `model` | (yours) | The Claude model agents use; empty: your own `~/.claude/settings.json` `model`, else Claude Code's default |
-| `effort` | (yours) | `low`, `medium`, `high` or `xhigh`; empty: your `effortLevel` |
+| `effort` | (yours) | `low`, `medium`, `high` or `xhigh`; empty: the effort your own Claude Code uses |
 | `fast_mode` | (yours) | `on` or `off`; empty: your `fastMode` |
 | `image` | `vastai/base-image:cuda-12.8.1-auto` | Docker image (Ubuntu, CUDA, Python) |
 | `disk_gb` | 50 | Disk when the launch does not say |

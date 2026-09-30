@@ -35,15 +35,16 @@ service: each command runs and exits.
 | `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
-library, runs as root): `cs.py` (setup, the watchdog, Claude Code in tmux, the hand-off, and the commands
-the local side runs), `fake_claude.py` (a stand-in for `claude`, for `--fake-claude`), and the agent's
-rules (a base plus one section per mode for autonomous and colleague, which become `~/.claude/CLAUDE.md`;
-an interactive agent has none).
+library, runs as root): `cs.py` (setup, the watchdog, Claude Code in tmux, the hand-off `agent-handoff`,
+and the commands the local side runs), `fake_claude.py` (a stand-in for `claude`, for `--fake-claude`),
+`rules.md` with `rules-autonomous.md` and `rules-colleague.md` (the agent's rules and its mode's
+section, which become `~/.claude/CLAUDE.md`; an interactive agent has none) and `handoff.md` (the
+`/handoff` command an interactive agent gets).
 
 ## Tests
 
 ```
-uv run pytest -q                      # everything (the e2e test needs Docker and runs on Linux CI)
+uv run pytest -q                      # everything (the integration test needs Linux and tmux: CI runs it)
 uv run pytest -q tests/test_launch.py # one file while you work
 uv run ruff check src tests && uv run ruff format --check src tests
 ```
@@ -70,7 +71,7 @@ uv run ruff check src tests && uv run ruff format --check src tests
   errors go to stderr as `error: ...`.
 - Style: short functions, type hints, docstrings only where the name does not say it all, comments
   only for why, no dead code, no speculative options. ruff (line length 110), `ruff format`.
-- Paths are computed at call time from `Path.home()`. Records change under `core.locked(name)`: take a
+- Paths are computed at call time from `Path.home()`. Records change under `core.locked(name)`: take an
   agent's lock once per command (a second lock on the same name in one process would wait on itself).
 - A batch launch brings each agent up in its own thread (progress lines prefixed `[name]`, one failure
   not stopping the others): whatever the threads share, like the ssh config and known_hosts, is written
@@ -100,10 +101,11 @@ uv run ruff check src tests && uv run ruff format --check src tests
   stopped.
 - **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
   activity (conversation activity counts wherever the conversation is, tmux or VS Code), done or not,
-  always saving first (a final save also writes the stop note `delete` reads); the dead-man switch in the onstart
-  command stops it if the watchdog never runs or dies.
+  always saving first (a final save also writes the stop note `delete` reads); the dead-man switch in
+  the onstart command stops it if the watchdog never runs or dies.
 - **Secrets** never go on command lines, into logs, the brief, records or git. They reach the machine
-  only inside the upload stream, as 0600 files.
+  only inside the upload stream, as 0600 files (setup also copies the token and task secrets into the
+  machine's 0600 `~/.claude/settings.json`, for VS Code's Claude).
 - **The launcher** (a background fork, or a general-purpose background agent when forks are missing)
   cannot ask the user anything, and a command outside `setup.ALLOW` would raise a permission prompt in
   the user's main session. Anything that approves a pricier machine, destroys or changes settings is in
@@ -119,7 +121,12 @@ uv run ruff check src tests && uv run ruff format --check src tests
   setting; the skill and README name the setting without a number. Change the code, the guide and the
   skill together when the launch's result line, flags or modes change.
 - The model, effort and fast mode reach the machine as `claude_settings` in its `~/.claude/settings.json`
-  (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`.
+  (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`. Claude Code
+  keeps the effort picked with `/effort` per model (`modelSettings.<model>.effortLevel`; a top-level
+  `effortLevel` there is only a default), so those per-model levels come along unless an effort is
+  chosen.
+- The machine folder stays `/root/crab-student` (the onstart command and the dead-man switch name it);
+  the agent reads its brief at `/root/BRIEF.md` and never needs the folder.
 - Remote Control is not implemented: it refuses the long-lived token agents use, and the user has yet to
   decide what to do.
 - `crab-student open` (without `--vscode`) is interactive: the user runs it in their own terminal, Claude

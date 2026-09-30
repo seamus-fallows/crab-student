@@ -21,7 +21,8 @@ session you drive yourself on the machine (see Modes).
   (plain pip works too)
 - git, the GitHub CLI [`gh`](https://cli.github.com), and an OpenSSH client (Windows has one built in)
 - A Vast.ai account with some credit, and its [API key](https://cloud.vast.ai/manage-keys/)
-- For `open --all`: Windows Terminal on Windows, or `tmux` on macOS and Linux (optional)
+- For the window that follows a launch and for `open --all`: Windows Terminal on Windows (`open --all`
+  needs `tmux` on macOS and Linux) (optional)
 - For `open --vscode` and interactive agents: [VS Code](https://code.visualstudio.com) with its Remote -
   SSH extension and the `code` command (optional)
 
@@ -81,12 +82,28 @@ extra does. You then see the brief and one line like:
 ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - colleague - branch agent/ablation-lr - watch: crab-student open ablation-lr
 ```
 
+You don't have to wait for that line to see what is happening: as soon as the launch starts, a window
+opens (Windows Terminal on Windows, a tab per agent; Terminal on macOS) that shows its progress as it
+goes (the machines rented, the image download, the setup steps) and then becomes the agent's session:
+it attaches to the agent's Claude Code, or opens VS Code for an interactive agent. If the launch fails,
+the window says why and what to do. On other systems, or with `crab-student config open_window off`,
+run `crab-student open NAME` yourself: on an agent that is still launching it shows the same progress.
+(Every launch also keeps its progress, with times, in `~/.crab-student/agents/NAME.log`.)
+
 You never type a price. crab-student picks a reliable machine that fits, cheapest first (for GPU work,
 a faster GPU when it clearly pays for itself; among similar prices, the most reliable and fastest
 downloading). If every machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing
 is rented until you approve it (see Money and safety). `crab-student offers --gpus 1 --gpu-ram 24`
 shows what would be picked, without renting anything. There is no cost estimate and no time limit: you
 decide when a machine has done its job (see Money and safety).
+
+**Two machines at once.** How long a new machine takes to start varies a lot (a host that must first
+download the Docker image can take several minutes; one that has it cached, one or two). So a launch
+rents its pick and its first backup (another machine at most 1.25x the price, both within your
+approval price) at the same time, keeps whichever is ready first (running and answering ssh), and
+destroys the other at once, before anything is uploaded to it. A machine that has not started within 5
+minutes, does not answer ssh within 3 minutes of starting, or fails is destroyed too and the next
+backup rented in its place, so at most two are ever in flight for one launch.
 
 **Modes.** `crab-student launch --mode ...`, or the `mode` setting (default `colleague`), or just say
 it in your request:
@@ -129,16 +146,20 @@ version, or a private package index, say so when you ask. That goes into the age
 **Several agents.** For a sweep, or several separate tasks, the launcher writes a brief for each and
 launches them together (`crab-student launch --batch`, which reads the agents from stdin, each
 starting with a line `=== NAME [flags]` followed by its brief). Each gets a machine of its own, they
-come up side by side, and you see one line per agent. Any that would cost over the approval price wait
+come up side by side, and you see one line per agent. Each agent races two machines of its own when
+there are enough offers (else it rents one at a time). Any that would cost over the approval price wait
 for your OK while the rest go ahead.
 
 ## Watching and steering
 
 ```
-crab-student open NAME           # the agent's Claude Code, in this terminal
+crab-student open NAME           # the agent's Claude Code, in this terminal (while launching: its progress first)
 crab-student open --all          # every running agent side by side
 crab-student open NAME --vscode  # the machine in VS Code (Remote-SSH)
 ```
+
+The window a launch opens is `open NAME`, so you only need these to come back later, or when no window
+opened.
 
 `open` attaches to the agent's own Claude Code session, which runs in tmux on the machine. Watch it,
 or type to it like any Claude Code session. **Detach with Ctrl-b then d**: the agent keeps going.
@@ -237,9 +258,13 @@ branch stays on GitHub.
   launch gives `--hours`, within twice that many hours if longer) plus an hour is not picked, so the
   machine is not taken away in the middle of a job.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
-  a rent request whose outcome is unknown (so you never pay twice).
+  a rent request whose outcome is unknown (so you never pay twice). Renting two machines for a launch is
+  deliberate and bounded: at most two are in flight, both within the price you allow, and the one not
+  kept is destroyed before anything is uploaded to it. If Vast never confirms a rent and the other
+  machine wins, the launch goes ahead with a warning, and `list`, `status`, `start` and `delete` destroy
+  that machine if it shows up later.
 - **Nothing is destroyed automatically** once an agent has run on it: crab-student destroys a machine
-  by itself only when it failed to boot or its first setup failed.
+  by itself only when it lost its launch's race, failed to start, or its first setup failed.
 - **GitHub access** is a deploy key for the agent's one repo. GitHub emails you about every key
   added, so agents started on the same repo within 24 hours share one (start 100 at once: one email),
   and it is removed from GitHub when the last agent using it is deleted. A deploy key can technically
@@ -284,6 +309,7 @@ default.
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
 | `workspace_repo` | `crab-student-work` | The repo for `--no-repo` tasks |
 | `notify_url` | (none) | Where notifications go |
+| `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |
 
 `mode`, `model`, `effort`, `fast_mode`, `idle_minutes`, `notify_url` and `image` apply to agents launched
 after the change. When a launch does not say, it asks for 8 cores, 16 GB of RAM and `disk_gb` of disk.
@@ -304,8 +330,9 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
 
 ## Trouble
 
-- **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`):
-  `crab-student start NAME` continues it (for a batch, once for each agent that is not yet working).
+- **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`, and its window says
+  it stopped): `crab-student start NAME` continues it (for a batch, once for each agent that is not yet
+  working). Closing the window that follows a launch does not stop the launch.
 - **`list` says `interrupted` and "the rent was not confirmed"**: Vast did not confirm a rent.
   crab-student never rents again by itself; `crab-student start NAME` looks for the machine again, or
   `delete` gives up.

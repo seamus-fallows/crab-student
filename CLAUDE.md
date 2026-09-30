@@ -3,13 +3,15 @@
 crab-student rents Vast.ai machines and puts Claude Code agents on them. The user's Claude Code starts
 a background launcher (a fork of the session that follows `crab-student guide launch`), which estimates
 the task and runs `crab-student launch` (`launch --batch` for several agents at once): the CLI picks a
-machine, rents it, puts the agent's branch on GitHub, uploads the machine's files and sets it up in one
-ssh call. There are three modes: `autonomous` and `colleague` run the agent's Claude Code in tmux on the
+machine and a backup, rents both at once and keeps the first that starts (destroying the other), puts
+the agent's branch on GitHub, uploads the machine's files and sets it up in one ssh call. There are three modes: `autonomous` and `colleague` run the agent's Claude Code in tmux on the
 machine (the first never asks, the second asks about important choices); `interactive` gives the user a
 plain Claude Code session in VS Code on the machine, which `/handoff` later moves into tmux. On the
 machine a watchdog keeps a tmux agent alive and, after `idle_minutes` without CPU, GPU or conversation
-activity (there is no time limit), saves the work and stops the machine. The user watches with
-`crab-student open` (tmux attach over ssh) or `open --vscode`.
+activity (there is no time limit), saves the work and stops the machine. As soon as a launch starts, a
+window opens by itself (`crab-student open NAME` in Windows Terminal or macOS's Terminal) that shows the
+launch's progress (also kept in `agents/NAME.log`) and then becomes the agent's session. The user
+watches with `crab-student open` (tmux attach over ssh) or `open --vscode`.
 
 - `README.md` is for users. `SPEC.md` is the protocol reference: records, machine files, the ssh
   commands, the modes and the hand-off, the onstart and dead-man contract, the stop rules and the safety
@@ -28,9 +30,9 @@ service: each command runs and exits.
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
 | `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`), the plan under the approval price (`plan`), the host lease check |
 | `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, files read from a branch (the report, the stop note), `pull` |
-| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (with the Claude panel pre-filled for an interactive agent) |
-| `launch.py` | `launch` and `launch_batch` (agents brought up side by side), the approval rule, `bring_up` (rent, boot, repo, upload, setup), `approve` (several names), `decline`, `start` |
-| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report` |
+| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (with the Claude panel pre-filled for an interactive agent), the window that follows a launch |
+| `launch.py` | `launch` and `launch_batch` (agents brought up side by side, each racing offers of its own), the approval rule, `bring_up` (the race of two machines, repo, upload, setup), the progress lines and the launch log, `approve` (several names), `decline`, `start` |
+| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off, destroying a race's late machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report`, `open`'s view of a launch at work |
 | `setup.py` | `init` (including VS Code's `remote.SSH.defaultExtensions`), the skill and permission rules in `~/.claude`, the check of Claude Code's version (forks), `check_ready`, `guide` |
 | `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
 
@@ -53,7 +55,8 @@ uv run ruff check src tests && uv run ruff format --check src tests
   `tests/conftest.py`: a temporary home, an in-memory keyring and no network for every test (autouse),
   plus `fake_vast` (a real HTTP server, `tests/fake_vast.py`), `fake_github` (bare repos and an
   in-process `gh`, `tests/fake_gh.py`), `user_repo`, `machines` (the local side's view of machines) and
-  `ready` (what `init` leaves).
+  `ready` (what `init` leaves). The autouse `windows` records the launch windows instead of opening
+  them: tests never open real windows.
 - Test behaviour (records, calls on the fakes, files, exit codes, JSON), never wording or call order.
 - The machine side is tested by importing `cs.py` with `CS_ROOT` pointing at a temporary folder; parts
   that need Linux (fcntl, tmux, pgrep) are skipped elsewhere.
@@ -91,12 +94,17 @@ uv run ruff check src tests && uv run ruff format --check src tests
   with `start` is planned again under the same check. Only `approve` skips it, and it is an ask-rule
   command. Restarting a stopped agent has no gate, and there is no time limit and no cost estimate: the
   approval, the idle stop and the dead-man switch bound the bill. Never add a flag, default or retry
-  that rents more, or rents above the price without `approve`.
-- **Never rent twice.** A rent request is never retried; the label is saved in the record before the
-  request; an unknown outcome is resolved only by finding that exact label.
+  that rents more, or rents above the price without `approve`. Renting two machines at once for a launch
+  (the race) is deliberate and bounded, not a retry that rents more: at most two are in flight per
+  launch, both within the approved price, and the loser is destroyed before any upload.
+- **Never rent twice.** A rent request is never retried; each rent's label is saved in the record
+  (`rents`) before the request; an unknown outcome is resolved only by finding that exact label, and
+  such a rent keeps its place in the race meanwhile. No rent goes unaccounted for: one left behind
+  when another machine won stays in `strays` until a later `list`, `status`, `start` or `delete` finds
+  its machine by label and destroys it.
 - **Own machines only.** Act only on instance ids in the records (or an exact label of ours).
-- **Never destroy work.** Code destroys a machine by itself only before its upload, or after its setup
-  failed. `delete` checks for unsaved work first (a running machine itself; a stopped one from the stop
+- **Never destroy work.** Code destroys a machine by itself only before its upload (a race's loser, a
+  machine that did not start in time), or after its setup failed; `start` on a stopped agent never does. `delete` checks for unsaved work first (a running machine itself; a stopped one from the stop
   note of its latest stop); a machine that cannot be checked needs `--force`, or starting first if it is
   stopped.
 - **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
@@ -131,6 +139,7 @@ uv run ruff check src tests && uv run ruff format --check src tests
   a rented machine is not worth the risk. The user steers agents from their phone through their own
   Claude Code session's Remote Control, which runs crab-student commands (README).
 - `crab-student open` (without `--vscode`) is interactive: the user runs it in their own terminal, Claude
-  never does. `open --vscode` only starts VS Code, so Claude may run it for an interactive agent.
+  never does (a launch opens a window running it by itself, unless `open_window` is off). `open --vscode`
+  only starts VS Code, so Claude may run it for an interactive agent.
 - `init` needs re-running after the skill or the permission rules change.
 - Changes to `remote/` reach only agents launched afterwards (the files are uploaded at launch).

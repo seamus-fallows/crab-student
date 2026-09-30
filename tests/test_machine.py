@@ -1,6 +1,6 @@
-"""The local side of talking to machines, with no real ssh: the ssh config and host keys (shared by workers
+"""The local side of talking to machines, with no real ssh: the ssh config and host keys (shared by agents
 brought up in threads), addresses, the bundle, what remote() makes of ssh's answers, the upload's progress
-and failures, and opening terminals."""
+and failures, and opening terminals and VS Code."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -88,7 +89,7 @@ class Upload:
 # ---- the ssh config, host keys and addresses -----------------------------------------------------
 
 
-def test_the_ssh_config_has_a_host_for_each_worker_with_an_address():
+def test_the_ssh_config_has_a_host_for_each_agent_with_an_address():
     core.save({"name": "job1", "created": "1", "ssh": {"host": "203.0.113.7", "port": 40122}})
     core.save({"name": "job2", "created": "2", "ssh": None})
     machine.write_ssh_config()
@@ -101,7 +102,7 @@ def test_the_ssh_config_has_a_host_for_each_worker_with_an_address():
     assert f'IdentityFile "{key}"' in text and f'UserKnownHostsFile "{known}"' in text and "\\" not in text
 
 
-def test_workers_coming_up_in_threads_all_end_up_in_the_ssh_config():
+def test_agents_coming_up_in_threads_all_end_up_in_the_ssh_config():
     def come_up(i: int) -> None:
         ssh = {"host": "203.0.113.7", "port": 40000 + i}
         core.save({"name": f"job{i:02}", "created": f"{i:02}", "ssh": ssh})
@@ -116,7 +117,7 @@ def test_workers_coming_up_in_threads_all_end_up_in_the_ssh_config():
     assert [p.name for p in config.parent.iterdir() if p != config] == []  # (no temporary file left)
 
 
-def test_a_worker_saved_while_another_thread_writes_the_ssh_config_is_not_left_out(monkeypatch):
+def test_an_agent_saved_while_another_thread_writes_the_ssh_config_is_not_left_out(monkeypatch):
     def add(name: str) -> None:
         core.save({"name": name, "created": name, "ssh": {"host": "203.0.113.7", "port": 40122}})
 
@@ -180,14 +181,14 @@ def test_the_bundle_sets_modes_and_lf_endings_and_skips_dotfiles_and_folders(tmp
     src = tmp_path / "remote"
     (src / "sub").mkdir(parents=True)
     (src / "cs.py").write_bytes(b"import os\r\nprint(1)\r\n")
-    (src / "worker.md").write_bytes(b"# rules\r\n")
+    (src / "rules.md").write_bytes(b"# rules\r\n")
     (src / ".hidden").write_bytes(b"x")
     (src / "sub" / "inner.py").write_bytes(b"x")
     monkeypatch.setattr(machine, "REMOTE_SRC", src)
     files = unpack(machine.bundle({"claude.env": (b"export T=1\n", 0o600), "BRIEF.md": (b"brief\n", 0o644)}))
     assert files == {
         "cs.py": (b"import os\nprint(1)\n", 0o755),
-        "worker.md": (b"# rules\n", 0o644),
+        "rules.md": (b"# rules\n", 0o644),
         "claude.env": (b"export T=1\n", 0o600),
         "BRIEF.md": (b"brief\n", 0o644),
     }
@@ -196,7 +197,8 @@ def test_the_bundle_sets_modes_and_lf_endings_and_skips_dotfiles_and_folders(tmp
 def test_the_real_bundle_carries_the_machine_code_with_lf_endings():
     files = unpack(machine.bundle({}))
     modes = {name: mode for name, (_, mode) in files.items()}
-    assert (modes["cs.py"], modes["fake_claude.py"], modes["worker.md"]) == (0o755, 0o755, 0o644)
+    assert modes == {"cs.py": 0o755, "fake_claude.py": 0o755, "rules.md": 0o644, "rules-autonomous.md": 0o644,
+                     "rules-colleague.md": 0o644, "handoff.md": 0o644}  # fmt: skip
     assert not any(b"\r\n" in data for data, _ in files.values()) and not any("/" in name for name in files)
 
 
@@ -251,7 +253,7 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
     "last,returncode,outcome",
     [
         (b'{"ok": true}', 0, "ok"),
-        (b"step 3/5 worker settings", 255, "unreachable"),  # (the connection dropped: the launch can go on)
+        (b"step 3/5 agent settings", 255, "unreachable"),  # (the connection dropped: the launch can go on)
         (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
     ],
 )
@@ -285,9 +287,72 @@ def test_open_all_on_windows_makes_two_columns_of_equal_panes(monkeypatch):
     assert machine.open_all(["a", "b", "c", "d", "e"]) == 0
     ((wt, *argv),) = started
     groups = [g.split("\0") for g in "\0".join(argv).split("\0;\0")]
-    panes = [g for g in groups if g[-1] == "crab-attach"]
+    panes = [g for g in groups if g[-1] == "agent-attach"]
     # left column a, b, c; right column d, e; each column split into equal heights
     assert wt == "C:/Tools/wt.exe" and [p[p.index("--title") + 1] for p in panes] == ["a", "d", "b", "c", "e"]
     assert [p[p.index("--size") + 1] for p in panes if "--size" in p] == ["0.667", "0.500", "0.500"]
     assert sum("-V" in p for p in panes) == 1
     assert ["move-focus", "left"] in groups and ["move-focus", "right"] in groups
+
+
+# ---- VS Code -------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def vscode(monkeypatch) -> dict:
+    """VS Code as open --vscode drives it: the `code` command lines run, and the URLs opened."""
+    opened = {"code": [], "urls": []}
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: opened["code"].append(argv))
+    monkeypatch.setattr(machine.webbrowser, "open", opened["urls"].append)
+    monkeypatch.setattr(machine, "VSCODE_URL_DELAY", 0)
+    return opened
+
+
+def agent_record(mode: str = "interactive", brief: str = "") -> dict:
+    if brief:
+        core.agents_dir().mkdir(parents=True, exist_ok=True)
+        (core.agents_dir() / "job1.brief.md").write_text(brief, encoding="utf-8")
+    return {"name": "job1", "mode": mode, "repo": {"dir": "/root/work/proj"}}
+
+
+def panel_prompt(url: str) -> str:
+    base, _, query = url.partition("?")
+    assert base == "vscode://anthropic.claude-code/open"
+    return urllib.parse.parse_qs(query)["prompt"][0]
+
+
+def test_open_vscode_types_an_interactive_agents_task_into_the_claude_panel(machines, vscode):
+    brief = "Fix the flaky test in tests/test_io.py & get CI to 100% green.\n\nUse pytest -x + the logs."
+    machines.replies[("job1", "status")] = {"frontend": "vscode"}
+    assert machine.open_vscode(agent_record(brief=brief)) == 0
+    assert vscode["code"] == [
+        ["/usr/bin/code", "--remote", "ssh-remote+crab-student-job1", "/root/work/proj"]
+    ]
+    [url] = vscode["urls"]
+    assert panel_prompt(url) == brief.strip()
+
+
+@pytest.mark.parametrize("mode, status, panel", [
+    ("interactive", {"frontend": "tmux"}, False),  # (handed off since the record was written)
+    ("colleague", {"frontend": "tmux"}, False),
+    ("interactive", machine.Unreachable("no answer"), True),  # (the machine cannot say: the record does)
+    ("colleague", machine.Unreachable("no answer"), False),
+])  # fmt: skip
+def test_open_vscode_opens_the_claude_panel_only_while_claude_works_there(
+    machines, vscode, mode, status, panel
+):
+    machines.replies[("job1", "status")] = status
+    assert machine.open_vscode(agent_record(mode, brief="Train the model.")) == 0
+    assert len(vscode["code"]) == 1 and bool(vscode["urls"]) == panel
+
+
+def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(machines, vscode):
+    machines.replies[("job1", "status")] = {"frontend": "vscode"}
+    machine.open_vscode(agent_record(brief="Train the model. " * 400))
+    assert "/root/BRIEF.md" in panel_prompt(vscode["urls"][0])
+
+
+def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vscode):
+    monkeypatch.setattr(core, "tool", lambda name: None)
+    assert "'code' command" in fails(1, machine.open_vscode, agent_record()).message
+    assert vscode == {"code": [], "urls": []}

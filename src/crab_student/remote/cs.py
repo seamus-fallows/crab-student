@@ -348,6 +348,7 @@ def cmd_attach() -> int:
 
 def type_to_worker(text: str) -> None:
     """Type a message into the worker's Claude Code as one bracketed paste, then Enter."""
+    text = text.rstrip("\r\n")
     subprocess.run(["tmux", "load-buffer", "-b", "cs", "-"], input=text.encode(), check=True, timeout=30)
     subprocess.run(["tmux", "paste-buffer", "-p", "-d", "-b", "cs", "-t", "worker"], check=True, timeout=30)
     time.sleep(0.5)

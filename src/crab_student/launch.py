@@ -98,14 +98,14 @@ class Progress:
         print(core.ascii_text(text), file=self.stream, flush=True)
 
     def status(self, text: str) -> None:
+        """One changing line: rewritten in place (with the time so far) on a terminal, else printed when
+        it changes."""
         text = core.ascii_text(text)
-        if text == self.shown:
-            return
         if self.tty:
-            self.stream.write("\r\033[K" + text)
+            self.stream.write(f"\r\033[K{text} ({self.elapsed()})")
             self.stream.flush()
-        else:
-            print(text, file=self.stream, flush=True)
+        elif text != self.shown:
+            print(f"{text} ({self.elapsed()})", file=self.stream, flush=True)
         self.shown = text
 
 
@@ -459,7 +459,7 @@ def wait_boot(rec: dict, out: Progress, deadline: float) -> str | None:
             inst.get("actual_status") or "waiting",
             " ".join(str(inst.get("status_msg") or "").split()),
         )
-        out.status(f"Booting: {actual}{' - ' + msg[:80] if msg else ''} ({out.elapsed()})")
+        out.status(f"Booting: {actual}{' - ' + msg[:80] if msg else ''}")
         if actual in ("exited", "offline"):
             return f"status {actual}: {msg}"
         errors = errors + 1 if re.search(r"\b(error|failed)\b", msg, re.I) else 0

@@ -110,7 +110,7 @@ def display_state(
     if not vast.running(inst):
         if (inst.get("intended_status") or inst.get("cur_state")) == "running":
             return "starting", (" ".join(str(inst.get("status_msg") or "").split()) or "starting") + pend
-        why = STOP_REASONS.get(last.get("stop_reason") or "")
+        why = STOP_REASONS.get(last.get("stop_reason") or "") or _stopped_itself(rec, last)
         return "stopped", " - ".join(x for x in (why, last.get("message")) if x) + pend
     if st is None:
         return "unreachable", (last.get("message") or "no answer over ssh") + pend
@@ -130,6 +130,14 @@ def display_state(
         return "starting", "worker starting" + pend
     idle = st.get("idle_seconds") or 0
     return ("idle", f"idle {idle // 60:.0f}m - {msg}") if idle >= 600 else ("working", msg)
+
+
+def _stopped_itself(rec: dict, last: dict) -> str:
+    """Why a machine the user did not stop stopped (its watchdog's reason is on the stopped machine)."""
+    used = last.get("used_hours")
+    if used is None:
+        return ""
+    return "time limit" if used >= rec.get("limit_hours", 0) - 0.02 else "idle stop"
 
 
 def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: str) -> View:

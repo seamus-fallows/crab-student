@@ -277,12 +277,11 @@ def pull(rec: dict, path: Path | None) -> str:
     """Fetch the worker's branch without touching the checkout: the remote-tracking ref always, and a local
     branch of the same name when that is a fast-forward."""
     repo, branch = rec["repo"], rec["repo"]["branch"]
-    if repo["workspace"]:
+    top = Path(path or Path.cwd())
+    if repo["workspace"] and path is None:  # (the workspace repo has a home of its own)
         top = Path.home() / repo["slug"].split("/")[1]
         if not (top / ".git").exists():
             gh("repo", "clone", repo["slug"], str(top))
-    else:
-        top = Path(path or Path.cwd())
     top = Path(git(top, "rev-parse", "--show-toplevel", check=False).strip() or top)
     remote = next(
         (

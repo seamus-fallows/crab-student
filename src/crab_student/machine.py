@@ -436,50 +436,22 @@ def wait_for_handoff(name: str) -> bool:
 
 def remember_linux_host(name: str) -> None:
     """Tell VS Code the agent's host runs Linux (remote.SSH.remotePlatform), so Remote - SSH does not ask, and
-    drop the entries of agents that are gone. A file with comments (VS Code allows them, and trailing commas) is
-    edited as text, line by line, so the comments stay."""
+    drop the entries of agents that are gone. A file that is not plain JSON (VS Code allows comments) is left
+    alone: VS Code asks once."""
     path = core.vscode_settings_file()
     if not path.parent.exists():
         return
-    live = {alias(r["name"]) for r in core.all_records()} | {alias(name)}
     settings = core.read_vscode_settings(path)
     if settings is None:
-        _remember_linux_host_in_text(path, alias(name), live)
         return
     platforms = settings.get(REMOTE_PLATFORM, {})
     if not isinstance(platforms, dict):
         return
+    live = {alias(r["name"]) for r in core.all_records()} | {alias(name)}
     kept = {h: p for h, p in platforms.items() if not h.startswith(ALIAS_PREFIX) or h in live}
     wanted = {**kept, alias(name): "linux"}
     if wanted != platforms:
         core.write_vscode_settings(path, {**settings, REMOTE_PLATFORM: wanted})
-
-
-def _remember_linux_host_in_text(path: Path, host: str, live: set[str]) -> None:
-    """remember_linux_host for a settings file with comments: only whole lines of ours are added or removed."""
-    entry = re.compile(r'\s*"(' + re.escape(ALIAS_PREFIX) + r'[a-z0-9-]+)"\s*:\s*"linux"\s*,?\s*')
-    raw = path.read_bytes().decode("utf-8-sig")  # (bytes: the file keeps its own line endings)
-    newline, end = ("\r\n" if "\r\n" in raw else "\n"), raw[-1:] in ("\n", "\r")
-    lines = raw.splitlines()
-    kept = [s for s in lines if not ((m := entry.fullmatch(s)) and m.group(1) not in live)]
-    if not any((m := entry.fullmatch(s)) and m.group(1) == host for s in kept):
-        start = next(
-            (
-                i
-                for i, s in enumerate(kept)
-                if re.match(r'\s*"' + re.escape(REMOTE_PLATFORM) + r'"\s*:\s*\{\s*$', s)
-            ),
-            None,
-        )
-        first = next((i for i, s in enumerate(kept) if s.strip().startswith("{")), None)
-        if start is not None:
-            kept.insert(start + 1, f'        "{host}": "linux",')
-        elif first is not None and kept[first].strip() == "{":
-            kept.insert(first + 1, f'    "{REMOTE_PLATFORM}": {{"{host}": "linux"}},')
-        else:
-            return  # (a layout we don't recognise: VS Code asks once, as before)
-    if kept != lines:
-        path.write_bytes((newline.join(kept) + (newline if end else "")).encode("utf-8"))
 
 
 def agent_status(rec: dict) -> dict:

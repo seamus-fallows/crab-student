@@ -117,35 +117,17 @@ def test_opening_in_vscode_marks_the_host_as_linux_and_forgets_agents_that_are_g
     assert settings["editor.tabSize"] == 2
 
 
-def test_a_vscode_settings_file_with_comments_is_edited_line_by_line(isolated):
+def test_a_vscode_settings_file_with_comments_is_left_alone(isolated):
     path = core.vscode_settings_file()
     path.parent.mkdir(parents=True)
-    path.write_text(
-        '{\n    // my comment\n    "remote.SSH.remotePlatform": {\n        "crab-student-gone": "linux",\n'
-        '        "my-box": "linux"\n    },\n}\n'
+    raw = (
+        b'{\r\n    // my comment\r\n    "remote.SSH.remotePlatform": {\r\n        "crab-student-gone": "linux",'
+        b'\r\n        "my-box": "linux"\r\n    },\r\n}'
     )
+    path.write_bytes(raw)
     core.save({"name": "job1", "created": "1"})
     machine.remember_linux_host("job1")
-    text = path.read_text()
-    assert "// my comment" in text and '"my-box": "linux"' in text and "crab-student-gone" not in text
-    assert '"crab-student-job1": "linux",' in text
-    machine.remember_linux_host("job1")
-    assert path.read_text() == text  # (once)
-    path.write_text('{\n    // only a comment\n    "editor.tabSize": 2\n}\n')
-    machine.remember_linux_host("job1")
-    assert '"remote.SSH.remotePlatform": {"crab-student-job1": "linux"},' in path.read_text()
-
-
-@pytest.mark.parametrize("newline", ["\n", "\r\n"])
-def test_a_settings_file_with_comments_keeps_its_line_endings_and_last_line(isolated, newline):
-    path = core.vscode_settings_file()
-    path.parent.mkdir(parents=True)
-    lines = ["{", "    // c", '    "remote.SSH.remotePlatform": {', '        "box": "linux"', "    }", "}"]
-    path.write_bytes(newline.join(lines).encode())  # (no newline at the end)
-    core.save({"name": "job1", "created": "1"})
-    machine.remember_linux_host("job1")
-    want = [*lines[:3], '        "crab-student-job1": "linux",', *lines[3:]]
-    assert path.read_bytes() == newline.join(want).encode()
+    assert path.read_bytes() == raw and [p.name for p in path.parent.iterdir()] == ["settings.json"]
 
 
 def test_agents_coming_up_in_threads_all_end_up_in_the_ssh_config():

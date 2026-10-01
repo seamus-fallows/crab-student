@@ -164,7 +164,7 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     check_new(a)
     cfg = core.load_config()
     repo, repo_line, warnings = plan_repo(a, cfg, f"agent/{a.name}")
-    plan = offers.plan(a.req, cfg, cfg["approve_above_usd_per_hour"])
+    plan = offers.plan(a.req, cfg, cfg["approve_above_usd_per_hour"], mode=a.mode or cfg["mode"])
     p = plan.primary
     reason = approval_reason(plan, cfg["approve_above_usd_per_hour"])
     rec = new_record(a, cfg, plan, repo, reason)
@@ -385,7 +385,7 @@ def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
         key = json.dumps(offers.req_dict(a.req), sort_keys=True)
         if key not in found:  # (one search per kind of machine)
             found[key] = offers.search(a.req, cfg)
-        plan = offers.plan(a.req, cfg, cap, taken, found[key])
+        plan = offers.plan(a.req, cfg, cap, taken, found[key], mode=a.mode or cfg["mode"])
         taken.add(plan.primary["id"])
         reason = approval_reason(plan, cap)
         planned.append((a, new_record(a, cfg, plan, repo, reason), warnings, reason, plan))
@@ -524,7 +524,7 @@ def replan(rec: dict, out: Progress) -> None:
     """A failed launch tried again: fresh offers up to the price it may rent at, else it waits for approval."""
     cfg = core.load_config()
     cap = max(rec.get("max_dph") or 0, cfg["approve_above_usd_per_hour"])
-    plan = offers.plan(offers.Req(**rec["req"]), cfg, cap)
+    plan = offers.plan(offers.Req(**rec["req"]), cfg, cap, mode=rec["mode"])
     rec.update(
         offers=[offers.kept(o) for o in plan.offers()],
         failed_offers=[],
@@ -1035,7 +1035,9 @@ def _approve_plan(name: str, taken: set) -> dict | offers.Plan:
         repo = rec["repo"]
         if not repo["workspace"] and not repo["branch_created"]:  # (a new launch: are the checks still true?)
             github.check_repo(repo["slug"], repo["branch"])
-        plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], taken)
+        plan = offers.plan(
+            offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], taken, mode=rec["mode"]
+        )
         if plan.over_cap:  # (prices went up while it waited: ask again)
             reason = approval_reason(plan, pending["max_dph"])
             rec["pending"] = {"reason": reason, "max_dph": plan.top_price()}

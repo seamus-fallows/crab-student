@@ -106,7 +106,7 @@ def _show(value: object) -> str:
 def cmd_offers(args: argparse.Namespace) -> int:
     cfg = core.load_config()
     cap = cfg["approve_above_usd_per_hour"]
-    plan = offers.plan(_req(args, cfg), cfg, cap)
+    plan = offers.plan(_req(args, cfg), cfg, cap, mode=args.mode or cfg["mode"])
     shown, backups = plan.ranked[: args.count], {o["id"] for o in plan.fallbacks}
     if args.json:
         print(json.dumps({"offers": shown, "pick": plan.primary["id"], "fallbacks": sorted(backups)}))
@@ -442,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _req_args(c)
     c.add_argument("--hours", type=float, help=HOURS_HELP)
+    c.add_argument(
+        "--mode",
+        choices=core.MODES,
+        help="the agent's mode; interactive prefers hosts near the home setting (default: the mode setting)",
+    )
     c.add_argument("--count", type=_positive, default=10, help="how many to show (default 10)")
     c = cmd(
         "launch", cmd_launch, "start an agent on a rented machine (the task brief on stdin)", json_flag=True

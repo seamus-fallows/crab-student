@@ -92,7 +92,12 @@ run `crab-student open NAME` yourself: on an agent that is still launching it sh
 
 You never type a price. crab-student picks a reliable machine that fits, cheapest first (for GPU work,
 a faster GPU when it clearly pays for itself; among similar prices, the most reliable and fastest
-downloading). If every machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing
+downloading). For an interactive agent, when you set `home` to your country code
+(`crab-student config home CA`), among similar prices it takes a host in your country first, then one
+on your continent, since you feel the lag when you type (`init` suggests the code from your computer's
+locale). It never picks a host in a country where Anthropic's API is unavailable (mainland China, Hong
+Kong, Russia, Iran and the others missing from https://www.anthropic.com/supported-countries), since
+Claude Code could not work there. If every machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing
 is rented until you approve it (see Money and safety). `crab-student offers --gpus 1 --gpu-ram 24`
 shows what would be picked, without renting anything. There is no cost estimate and no time limit: you
 decide when a machine has done its job (see Money and safety).
@@ -307,6 +312,7 @@ default.
 | `min_reliability` | 0.98 | Only hosts at least this reliable |
 | `min_download_mbps` | 200 | Only hosts that download at least this fast |
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
+| `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): interactive agents prefer hosts in it, then on its continent, among similar prices |
 | `workspace_repo` | `crab-student-work` | The repo for `--no-repo` tasks |
 | `notify_url` | (none) | Where notifications go |
 | `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |

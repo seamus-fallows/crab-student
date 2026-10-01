@@ -70,6 +70,17 @@ def test_regions_allow_country_codes_and_continents(fake_vast):
     assert len(offers.search(Req(hours=1), cfg())) == 6  # (empty means anywhere)
 
 
+@pytest.mark.parametrize("regions", [[], ["asia", "europe", "CN", "HK", "RU"]])
+def test_hosts_where_claude_is_unavailable_never_fit(fake_vast, regions):
+    blocked = ["Guangdong, CN", "Hong Kong, HK", "Macau, MO", "Moscow, RU", "Minsk, BY", "Tehran, IR",
+               "Damascus, SY", "Havana, CU", "Caracas, VE", "Pyongyang, KP"]  # fmt: skip
+    allowed = ["Tokyo, JP", "Bavaria, DE", "Taipei, TW", "", None, "Somewhere"]
+    fake_vast.offers = [offer(i, geolocation=place) for i, place in enumerate(blocked + allowed, 1)]
+    found = offers.search(Req(hours=1), cfg(regions=regions))
+    assert {offers.country(o) for o in found} <= {"JP", "DE", "TW", None}
+    assert len(found) == (6 if not regions else 3)  # (unknown places stay allowed, as regions permits)
+
+
 def test_a_cpu_task_has_no_gpu_conditions(fake_vast):
     fake_vast.offers = [cpu_offer(1), offer(2, gpu_name="GTX 1080", gpu_ram=8192, cuda_max_good=11.0)]
     assert sorted(ids(offers.search(Req(hours=1), cfg()))) == [1, 2]
@@ -105,6 +116,39 @@ def test_among_similar_prices_reliability_and_download_speed_decide_together():
     assert ids(offers.rank([steady, fast], gpu=False)) == [1, 2]
     fast["inet_down"] = 4000
     assert ids(offers.rank([steady, fast], gpu=False)) == [2, 1]
+
+
+NEAR_AND_FAR = [
+    ("Bavaria, DE", 0.40, 0.999),  # the cheapest and most reliable
+    ("Texas, US", 0.42, 0.99),
+    ("California, US", 0.44, 0.995),
+    ("Ontario, CA", 0.46, 0.985),
+    ("", 0.41, 0.999),  # unknown place
+    ("Quebec, CA", 0.60, 0.999),  # over 20% dearer: not comparable
+]
+
+
+def near_and_far() -> list[dict]:
+    return [
+        cpu_offer(i, geolocation=g, dph_total=p, reliability2=r)
+        for i, (g, p, r) in enumerate(NEAR_AND_FAR, 1)
+    ]
+
+
+def test_an_interactive_agent_prefers_comparable_hosts_near_home(fake_vast):
+    fake_vast.offers = near_and_far()
+    # Home country first, then its continent (best standing first within each), then the rest.
+    interactive = offers.plan(Req(hours=1), cfg(home="ca"), mode="interactive")
+    assert ids(interactive.ranked) == [4, 3, 2, 1, 5, 6]
+    assert ids(offers.plan(Req(hours=1), cfg(home="MX"), mode="interactive").ranked) == [3, 2, 4, 1, 5, 6]
+    assert ids(offers.plan(Req(hours=1), cfg(home="JP"), mode="interactive").ranked)[:2] == [1, 5]
+
+
+@pytest.mark.parametrize("mode, home", [("autonomous", "CA"), ("colleague", "CA"), ("interactive", "")])
+def test_other_modes_and_no_home_rank_as_before(fake_vast, mode, home):
+    fake_vast.offers = near_and_far()
+    # By standing among the comparable offers, wherever they are.
+    assert ids(offers.plan(Req(hours=1), cfg(home=home), mode=mode).ranked) == [1, 5, 3, 2, 4, 6]
 
 
 def test_ties_are_broken_the_same_way_every_time():

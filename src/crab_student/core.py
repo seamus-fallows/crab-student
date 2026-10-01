@@ -73,6 +73,7 @@ DEFAULTS: dict[str, object] = {
     "min_reliability": 0.98,
     "min_download_mbps": 200.0,
     "regions": [],
+    "home": "",
     "mode": "colleague",
     "model": "",
     "effort": "",
@@ -102,6 +103,10 @@ RULES = {
         _regions_ok,
         "country codes (US, CA, DE, ...) or continents (north-america, south-america, "
         "europe, asia, oceania, africa), comma-separated; empty means anywhere",
+    ),
+    "home": (
+        lambda v: v == "" or bool(re.fullmatch(r"[A-Za-z]{2}", v)),
+        "your country code (CA, US, DE, ...), for interactive agents near you; empty: no preference",
     ),
     "mode": (lambda v: v in MODES, "autonomous, colleague or interactive"),
     "model": (lambda v: True, "a Claude model such as opus or sonnet (empty: as your own Claude Code)"),

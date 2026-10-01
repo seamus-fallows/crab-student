@@ -108,7 +108,9 @@ The name is a pun on "grad student": a crab (Claude Code's mascot is a crab) doi
 - A `regions` setting restricts machines to chosen countries or continents (latency for interactive
   use and git pushes); empty means anywhere. Among offers within 20% of the lowest price, prefer the
   more reliable and faster-downloading ones together (the image pull is a big part of start-up time;
-  a host that fails costs more than the difference).
+  a host that fails costs more than the difference). For an interactive agent, a `home` country
+  setting puts hosts in that country, then on its continent, first among those offers. Hosts in
+  countries where Anthropic's API is unavailable are never picked.
 - `crab-student offers ...` shows what would be picked, without renting (read-only).
 - Launch should be fast once Vast has booted the machine (upload and setup in well under a minute on
   a normal host). Show progress while it launches.

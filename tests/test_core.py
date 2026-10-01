@@ -52,6 +52,7 @@ def test_a_value_is_parsed_by_the_type_of_its_default():
         ("image", "  "),
         ("regions", "CA, mars"),
         ("regions", "USA"),
+        ("home", "CAN"),
         ("workspace_repo", "my repo"),
         ("notify_url", "ftp://example.com"),
         ("colour", "blue"),

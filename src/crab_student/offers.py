@@ -20,10 +20,13 @@ REGIONS = {  # continent -> ISO country codes; `regions` entries are these names
     "europe": set(
         "AT BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LT LU LV MT NL NO PL PT RO RS SE SI SK UA".split()
     ),
-    "asia": set("AE HK ID IL IN JP KR MY PH SG TH TR TW VN".split()),
+    "asia": set("AE ID IL IN JP KR MY PH SG TH TR TW VN".split()),
     "oceania": {"AU", "NZ"},
     "africa": {"EG", "KE", "MA", "NG", "ZA"},
 }
+# Countries where Anthropic's API is unavailable, so Claude Code on a host there cannot work: those Vast
+# could list that are missing from https://www.anthropic.com/supported-countries (checked October 2026).
+BLOCKED = {"AF", "BY", "CN", "CU", "HK", "IR", "KP", "MM", "MO", "RU", "SY", "VE", "YE"}
 
 
 @dataclass
@@ -120,6 +123,10 @@ def country(o: dict) -> str | None:
     return code if re.fullmatch(r"[A-Z]{2}", code) else None
 
 
+def continent(code: str | None) -> str | None:
+    return next((name for name, codes in REGIONS.items() if code in codes), None)
+
+
 def allowed_countries(regions: list[str]) -> set[str]:
     codes: set[str] = set()
     for r in regions:
@@ -158,6 +165,8 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
             and (cuda is None or (_num(o, "cuda_max_good") or 0) >= cuda)
             and (not req.gpu_models or any(m.lower() in name for m in req.gpu_models))
         )
+    if ok and country(o) in BLOCKED:  # (an unknown country stays allowed)
+        ok = False
     end = _num(o, "end_date")
     if ok and end and end < now + 3600 * lease_hours(req.hours):
         ok = False
@@ -172,10 +181,19 @@ def standing(o: dict) -> float:
     return 100 * (reliability(o) or 0) + math.log2(max(_num(o, "inet_down") or 0, 1))
 
 
-def rank(offers: list[dict], gpu: bool) -> list[dict]:
+def distance(o: dict, home: str) -> int:
+    """0 in the `home` country, 1 on its continent, 2 farther or unknown."""
+    where = country(o)
+    if where == home:
+        return 0
+    near = continent(where) if where else None
+    return 1 if near and near == continent(home) else 2
+
+
+def rank(offers: list[dict], gpu: bool, home: str = "") -> list[dict]:
     """The deterministic order: for GPU work, drop offers clearly worse in speed per dollar; among offers
-    within 20% of the lowest price left, the best standing (reliability and download speed) first; then by
-    price and id."""
+    within 20% of the lowest price left, the nearest to `home` first (when given), then the best standing
+    (reliability and download speed); then by price and id."""
 
     def value(o: dict) -> float:
         return (_num(o, "dlperf") or 0) / o["dph_total"]
@@ -190,7 +208,7 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
     floor = min(o["dph_total"] for o in pool)
     similar = sorted(
         (o for o in pool if o["dph_total"] <= SIMILAR_PRICE * floor),
-        key=lambda o: (-standing(o), o["dph_total"], o["id"]),
+        key=lambda o: (distance(o, home) if home else 0, -standing(o), o["dph_total"], o["id"]),
     )
     rest = sorted(
         (o for o in offers if o not in similar),
@@ -227,9 +245,11 @@ def plan(
     cap: float | None = None,
     taken: set | frozenset = frozenset(),
     found: list[dict] | None = None,
+    mode: str = "",
 ) -> Plan:
     """The machine to rent and its backups, from the offers up to `cap` $/hr (over_cap, and all offers, when
-    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given):
+    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given), near
+    the `home` setting for an interactive agent (latency matters only when the user types into it):
     CrabError(4) when nothing fits the hardware."""
     fit = search(req, cfg) if found is None else found
     found = [o for o in fit if o["id"] not in taken]
@@ -248,7 +268,8 @@ def plan(
             4,
         )
     within = [o for o in found if cap is None or o["dph_total"] <= cap]
-    ranked = rank(within or found, req.gpu)
+    home = cfg["home"].upper() if mode == "interactive" else ""
+    ranked = rank(within or found, req.gpu, home)
     return Plan(req, ranked[0], fallbacks(ranked, over_cap=not within), ranked, over_cap=not within)
 
 

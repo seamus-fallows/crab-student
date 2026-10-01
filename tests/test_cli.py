@@ -483,3 +483,10 @@ def test_offers_shows_the_pick_and_rents_nothing(fake_vast, capsys):
     rc, out, _ = run(capsys, "offers", "--gpus", "1")
     assert rc == 0 and len([line for line in out.splitlines() if "RTX 4090" in line]) == 3
     assert all(method == "POST" for method, *_ in fake_vast.requests)  # (searches only)
+
+
+def test_offers_for_an_interactive_agent_put_hosts_near_home_first(fake_vast, capsys):
+    fake_vast.offers = [offer(1, dph_total=0.30, geolocation="Bavaria, DE"), offer(2, dph_total=0.33)]
+    core.set_config("home", "CA")
+    assert json.loads(run(capsys, "offers", "--json")[1])["pick"] == 1
+    assert json.loads(run(capsys, "offers", "--mode", "interactive", "--json")[1])["pick"] == 2

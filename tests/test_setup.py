@@ -79,6 +79,23 @@ def test_init_asks_only_for_what_is_missing(terminal, fake_vast, isolated, capsy
     assert capsys.readouterr().out.isascii()
 
 
+def test_init_suggests_the_home_setting_from_the_locale(terminal, ready, monkeypatch, capsys):
+    monkeypatch.setenv("LC_ALL", "fr_CA.UTF-8")
+    assert setup.guess_country() == "CA"
+    setup.init()
+    assert (
+        "config home CA" in capsys.readouterr().out and core.load_config()["home"] == ""
+    )  # (only suggested)
+    core.set_config("home", "de")
+    setup.init()
+    assert "config home" not in capsys.readouterr().out
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setattr(setup.os, "name", "posix")
+    monkeypatch.delenv("LC_CTYPE", raising=False)
+    monkeypatch.delenv("LANG", raising=False)
+    assert setup.guess_country() == ""
+
+
 def test_init_fails_after_three_bad_tokens(terminal):
     answers, _ = terminal
     answers += ["sk-ant-oat01-short", "sk-ant-api03-" + "a" * 90, "not a token"]

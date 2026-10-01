@@ -83,6 +83,7 @@ def init(renew_claude_token: bool = False) -> int:
     _say("Claude Code", "skill and permission rules installed in ~/.claude")
     _claude_version_step()
     _vscode_step()
+    _home_step()
     ok = _tools_step() and ok
     if ok:
         print(
@@ -224,6 +225,32 @@ def _claude_version_step() -> None:
         )
     else:
         _say("Claude Code", f"ok - v{'.'.join(map(str, version))}")
+
+
+def _home_step() -> None:
+    if home := core.load_config()["home"]:
+        _say("Home", f"{home.upper()} - interactive agents get hosts near it")
+        return
+    guess = guess_country()
+    _say(
+        "Home",
+        "not set. So interactive agents get hosts near you (less lag when you type), run: "
+        f"crab-student config home {guess or 'XX'}" + ("" if guess else " (XX: your country code)"),
+    )
+
+
+def guess_country() -> str:
+    """The country of the user's locale ("fr_CA.UTF-8", or Windows' "en-CA" -> "CA"), else ""."""
+    names = [os.environ.get(k, "") for k in ("LC_ALL", "LC_CTYPE", "LANG")]
+    if os.name == "nt":
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(85)
+        names.append(buf.value if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85) else "")
+    for name in names:
+        if m := re.match(r"[a-z]{2,3}[_-]([A-Z]{2})(?![A-Za-z])", name):
+            return m.group(1)
+    return ""
 
 
 def vscode_settings_file() -> Path:

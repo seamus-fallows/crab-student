@@ -28,7 +28,7 @@ service: each command runs and exits.
 | `cli.py` | The parser, every command's handler and all terminal output (tables, status), reading the `=== NAME [flags]` text of `launch --batch` |
 | `core.py` | `CrabError`, paths, settings (mode, model, effort, fast mode, ...) and the user's own Claude settings they default to, agent records and their OS locks, secrets (keyring, file fallback), `run`, formatting |
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
-| `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`), the plan under the approval price (`plan`), the host lease check |
+| `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`; an interactive agent prefers hosts near `home`), the plan under the approval price (`plan`), the host lease check, the countries where Claude is unavailable (`BLOCKED`) |
 | `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, files read from a branch (the report, the stop note), `pull` |
 | `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (with the Claude panel pre-filled for an interactive agent), the window that follows a launch |
 | `launch.py` | `launch` and `launch_batch` (agents brought up side by side, each racing offers of its own), the approval rule, `bring_up` (the race of two machines, repo, upload, setup), the progress lines and the launch log, `approve` (several names), `decline`, `start` |

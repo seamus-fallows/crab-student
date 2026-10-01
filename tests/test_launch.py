@@ -203,6 +203,13 @@ def test_an_interactive_agent_is_opened_in_vs_code(machines):
     assert "crab-student open job2" in other["result_line"] and "--vscode" not in other["result_line"]
 
 
+def test_an_interactive_agent_rents_near_home(fake_vast):
+    fake_vast.offers = [offer(1, dph_total=0.30, geolocation="Bavaria, DE"), offer(2, dph_total=0.33)]
+    core.set_config("home", "CA")
+    assert go(args(mode="interactive", dry_run=True))["dph"] == 0.33  # (offer 2, in Quebec, CA)
+    assert go(args("job2", dry_run=True))["dph"] == 0.30  # (a colleague: the cheaper, wherever it is)
+
+
 def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github, machines, monkeypatch):
     core.set_secret(core.secret_key("HF_TOKEN"), HF)
     core.set_secret_names(["HF_TOKEN"])
@@ -631,9 +638,9 @@ def test_refused_launches_rent_nothing(case, code, fake_vast, fake_github):
 def test_a_name_another_launch_takes_while_this_one_plans_rents_nothing(fake_vast, fake_github, monkeypatch):
     real_plan, other = offers.plan, {"name": "job1", "phase": "pending"}
 
-    def plan(*a):
+    def plan(*a, **kw):
         core.save(other)  # (the other launch passes the gate first)
-        return real_plan(*a)
+        return real_plan(*a, **kw)
 
     monkeypatch.setattr(offers, "plan", plan)
     fails(2, go, args())

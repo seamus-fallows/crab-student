@@ -97,10 +97,11 @@ downloading). For an interactive agent, when you set `home` to your country code
 on your continent, since you feel the lag when you type (`init` suggests the code from your computer's
 locale). It never picks a host in a country where Anthropic's API is unavailable (mainland China, Hong
 Kong, Russia, Iran and the others missing from https://www.anthropic.com/supported-countries), since
-Claude Code could not work there. If every machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing
-is rented until you approve it (see Money and safety). `crab-student offers --gpus 1 --gpu-ram 24`
-shows what would be picked, without renting anything. There is no cost estimate and no time limit: you
-decide when a machine has done its job (see Money and safety).
+Claude Code could not work there. If every machine that fits costs more than
+`approve_above_usd_per_hour` an hour, nothing is rented until you approve it (see Money and safety).
+`crab-student offers --gpus 1 --gpu-ram 24` shows what would be picked (add `--mode interactive` to see
+an interactive agent's pick), without renting anything. There is no cost estimate and no time limit:
+you decide when a machine has done its job (see Money and safety).
 
 **Two machines at once.** How long a new machine takes to start varies a lot (a host that must first
 download the Docker image can take several minutes; one that has it cached, one or two). So a launch

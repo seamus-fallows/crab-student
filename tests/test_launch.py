@@ -228,30 +228,13 @@ def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github,
         assert not any(secret.encode() in data for data in local)
 
 
-def test_agents_started_within_a_day_share_one_deploy_key(fake_github, machines):
+def test_agents_on_a_repo_share_one_deploy_key(fake_github, machines):
     go(args("job1"))
     go(args("job2"))
     key = core.load("job1")["repo"]["deploy_key"]
     assert core.load("job2")["repo"]["deploy_key"] == key
     assert list(fake_github.keys["ada/proj"]) == [key["id"]]  # (so GitHub sent one email, not two)
     assert machines.uploads["job1"]["deploy_key"] == machines.uploads["job2"]["deploy_key"]
-
-
-def test_a_deploy_key_is_not_shared_after_a_day(fake_github):
-    go(args("job1"))
-    rec = core.load("job1")
-    rec["repo"]["deploy_key"]["created"] = "2026-01-01T00:00:00Z"
-    core.save(rec)
-    go(args("job2"))
-    assert core.load("job2")["repo"]["deploy_key"]["id"] != rec["repo"]["deploy_key"]["id"]
-    assert len(fake_github.keys["ada/proj"]) == 2
-
-
-def test_a_deploy_key_removed_on_github_is_not_shared(fake_github):
-    go(args("job1"))
-    fake_github.keys["ada/proj"].clear()  # (the user removed it in the repo's settings)
-    go(args("job2"))
-    assert list(fake_github.keys["ada/proj"]) == [core.load("job2")["repo"]["deploy_key"]["id"]]
 
 
 def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_github, user_repo):

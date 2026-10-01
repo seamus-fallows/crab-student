@@ -10,16 +10,12 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from crab_student import core
 
 # github.com's ed25519 host key (https://api.github.com/meta), pinned for the agents' git.
 HOST_KEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-# Agents started on a repo within this many hours share its deploy key: GitHub emails the repo's admins
-# about every key added, so this is at most one email per repo a day instead of one per agent.
-KEY_SHARE_HOURS = 24
 _REMOTE = re.compile(
     r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
@@ -241,20 +237,11 @@ def remove_deploy_key(slug: str, key_id: int) -> None:
             raise
 
 
-def deploy_key_exists(slug: str, key_id: int) -> bool:
-    try:
-        api(f"repos/{slug}/keys/{key_id}")
-    except GhError as e:
-        if e.not_found:
-            return False
-        raise
-    return True
-
-
-# ---- deploy keys shared by the agents on a repo -----------------------------------------------------
-# A record's repo.deploy_key is {"id": GitHub's key id, "file": the private key's name in keys/,
-# "created": when it was added}. Claims and releases hold the repo's key lock, so a delete never removes
-# a key a launch is taking, and two deletes never each leave it to the other.
+# ---- one deploy key per repo, shared by its agents --------------------------------------------------
+# GitHub emails the repo's admins about every key added, so the agents on a repo share one key. A record's
+# repo.deploy_key is {"id": GitHub's key id, "file": the private key's name in keys/, "created": when it
+# was added}. Claims and releases hold the repo's key lock, so a delete never removes a key a launch is
+# taking, and two deletes never each leave it to the other.
 
 
 def key_file(key: dict) -> Path:
@@ -266,21 +253,19 @@ def key_title(key: dict) -> str:
 
 
 def claim_deploy_key(rec: dict) -> None:
-    """Give the agent the newest deploy key another agent on its repo holds, if it was added less than
-    KEY_SHARE_HOURS ago and GitHub still has it; else a new one. Saves the record."""
+    """Give the agent the deploy key another agent on its repo holds (its private key here), else a new
+    one. Saves the record."""
     slug = rec["repo"]["slug"]
     with _keys_lock(slug):
-        key = max(_held_keys(slug, but=rec["name"]), key=lambda k: k["created"], default=None)
-        if not (key and _fresh(key) and key_file(key).exists() and deploy_key_exists(slug, key["id"])):
-            key = _new_deploy_key(slug)
-        rec["repo"]["deploy_key"] = key
+        held = (k for k in _held_keys(slug, but=rec["name"]) if key_file(k).exists())
+        rec["repo"]["deploy_key"] = next(held, None) or _new_deploy_key(slug)
         core.save(rec)
 
 
 def release_deploy_key(rec: dict) -> None:
     """The agent is going: its record lets go of its deploy key, which is removed from GitHub and this
     computer unless another agent holds it. Saves the record."""
-    repo, key = rec["repo"], rec["repo"].get("deploy_key")
+    repo, key = rec["repo"], rec["repo"]["deploy_key"]
     if not key:
         return
     with _keys_lock(repo["slug"]):
@@ -300,12 +285,8 @@ def _held_keys(slug: str, but: str | None = None) -> list[dict]:
     return [
         r["repo"]["deploy_key"]
         for r in core.all_records()
-        if r["name"] != but and (r.get("repo") or {}).get("slug") == slug and r["repo"].get("deploy_key")
+        if r["name"] != but and r["repo"]["slug"] == slug and r["repo"]["deploy_key"]
     ]
-
-
-def _fresh(key: dict) -> bool:
-    return datetime.now(UTC) - datetime.fromisoformat(key["created"]) < timedelta(hours=KEY_SHARE_HOURS)
 
 
 def _new_deploy_key(slug: str) -> dict:

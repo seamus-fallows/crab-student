@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import getpass
-import json
-import os
 import re
 import subprocess
 import sys
@@ -13,8 +11,6 @@ from pathlib import Path
 from crab_student import core, github, vast
 
 DATA = Path(__file__).parent / "data"
-OLD_LAUNCHER_AGENT = "agents/crab-student-launcher.md"  # (in ~/.claude; init used to install it)
-FORK_VERSION = (2, 1, 232)  # (the first Claude Code whose forks the skill starts the launcher with)
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{60,}")
 
 # Allowed without asking: reading, and actions within the user's price rule (a launch that would need a
@@ -79,9 +75,6 @@ def init(renew_claude_token: bool = False) -> int:
     ok = all([_vast_step(), _github_step(), _ssh_step(), _claude_step(renew_claude_token)])
     install_claude_files()
     _say("Claude Code", "skill and permission rules installed in ~/.claude")
-    _claude_version_step()
-    _vscode_step()
-    _home_step()
     ok = _tools_step() and ok
     if ok:
         print(
@@ -92,31 +85,27 @@ def init(renew_claude_token: bool = False) -> int:
 
 def _vast_step() -> bool:
     path = core.vast_key_file()
-    key = path.read_text(encoding="utf-8").strip() if path.exists() else ""
-    for attempt in range(3):
-        if not key:
-            print(
-                "  Vast        Create an API key at https://cloud.vast.ai/manage-keys/ (it is saved where the vastai "
-                "CLI keeps it)."
-            )
-            key = _ask_secret("              Paste it here (it will not be shown): ")
-        try:
-            user = vast.current_user(key=key)
-        except core.CrabError as e:
-            _say("Vast", f"that key does not work: {e.message}")
-            key = ""
-            if attempt == 2 or not interactive():
-                return False
-            continue
-        if not path.exists() or path.read_text(encoding="utf-8").strip() != key:
-            core.write_private(path, key + "\n")
-        credit = user.get("credit")
-        who = user.get("email") or user.get("username") or "your account"
-        _say("Vast", f"ok - {who}" + (f", credit ${credit:.2f}" if isinstance(credit, int | float) else ""))
-        if isinstance(credit, int | float) and credit <= 0:
-            _say("", "Add credit at https://cloud.vast.ai/billing/ before launching.")
-        return True
-    return False
+    saved = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+    if not saved:
+        print(
+            "  Vast        Create an API key at https://cloud.vast.ai/manage-keys/ (it is saved where the vastai "
+            "CLI keeps it)."
+        )
+    key = saved or _ask_secret("              Paste it here (it will not be shown): ")
+    try:
+        user = vast.current_user(key=key)
+    except core.CrabError as e:
+        _say("Vast", f"that key does not work: {e.message}")
+        _say("", f"To paste another, delete {path}, then run init again." if saved else "Run init again.")
+        return False
+    if key != saved:
+        core.write_private(path, key + "\n")
+    credit = user.get("credit")
+    who = user.get("email") or user.get("username") or "your account"
+    _say("Vast", f"ok - {who}" + (f", credit ${credit:.2f}" if isinstance(credit, int | float) else ""))
+    if isinstance(credit, int | float) and credit <= 0:
+        _say("", "Add credit at https://cloud.vast.ai/billing/ before launching.")
+    return True
 
 
 def _github_step() -> bool:
@@ -152,17 +141,13 @@ def _ssh_step() -> bool:
 
 def ensure_ssh_include() -> bool:
     """Make ~/.ssh/config include crab-student's host entries (first line: a later one could fall inside a
-    Host block). True if it was added. An Include of the same file spelled another way is replaced."""
+    Host block). True if it was added."""
     config = Path.home() / ".ssh" / "config"
-    target = core.ssh_dir() / "config"
-    line = f"Include {core.ssh_path(target)}"
+    line = f"Include {core.ssh_path(core.ssh_dir() / 'config')}"
     text = config.read_text(encoding="utf-8") if config.exists() else ""
     if text.startswith(line + "\n"):
         return False
-    tail = "/".join(target.parts[-3:])  # (".crab-student/ssh/config", however the rest is spelled)
-    kept = [
-        s for s in text.splitlines() if not (s.startswith("Include") and s.strip().strip('"').endswith(tail))
-    ]
+    kept = [s for s in text.splitlines() if s != line]
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("\n".join([line, *kept]) + "\n", encoding="utf-8")
     return True
@@ -201,95 +186,10 @@ def _tools_step() -> bool:
     return not missing
 
 
-def claude_version() -> tuple[int, ...] | None:
-    claude = core.tool("claude")
-    if not claude:
-        return None
-    try:
-        out = subprocess.run([claude, "--version"], capture_output=True, text=True, timeout=30).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    found = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
-    return tuple(int(n) for n in found.groups()) if found else None
-
-
-def _claude_version_step() -> None:
-    version = claude_version()
-    if version is None:
-        _say(
-            "Claude Code", "could not check its version; the launcher needs v2.1.232 or later (claude update)"
-        )
-    elif version < FORK_VERSION:
-        need = ".".join(map(str, FORK_VERSION))
-        _say(
-            "Claude Code",
-            f"Warning: v{'.'.join(map(str, version))} is older than v{need}, which the launcher needs "
-            "(it starts as a fork of your conversation). Run: claude update",
-        )
-    else:
-        _say("Claude Code", f"ok - v{'.'.join(map(str, version))}")
-
-
-def _home_step() -> None:
-    if home := core.load_config()["home"]:
-        _say("Home", f"{home.upper()} - interactive agents get hosts near it")
-        return
-    guess = guess_country()
-    _say(
-        "Home",
-        "not set. So interactive agents get hosts near you (less lag when you type), run: "
-        f"crab-student config home {guess or 'XX'}" + ("" if guess else " (XX: your country code)"),
-    )
-
-
-def guess_country() -> str:
-    """The country of the user's locale ("fr_CA.UTF-8", or Windows' "en-CA" -> "CA"), else ""."""
-    names = [os.environ.get(k, "") for k in ("LC_ALL", "LC_CTYPE", "LANG")]
-    if os.name == "nt":
-        import ctypes
-
-        buf = ctypes.create_unicode_buffer(85)
-        names.append(buf.value if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85) else "")
-    for name in names:
-        if m := re.match(r"[a-z]{2,3}[_-]([A-Z]{2})(?![A-Za-z])", name):
-            return m.group(1)
-    return ""
-
-
-def _vscode_step() -> None:
-    """Offer to have VS Code install the Claude extension on every machine it connects to (Remote - SSH)."""
-    path = core.vscode_settings_file()
-    if not path.parent.exists():
-        _say("VS Code", "not found (only needed for open --vscode, which uses its Remote - SSH extension)")
-        return
-    hint = f'add "{core.VSCODE_EXTENSIONS}": ["{core.CLAUDE_EXTENSION}"] to {path}'
-    settings = core.read_vscode_settings(path)
-    current = settings.get(core.VSCODE_EXTENSIONS) if settings is not None else None
-    if settings is None or (current is not None and not isinstance(current, list)):
-        _say("VS Code", f"could not edit {path} safely. So the Claude extension installs on machines: {hint}")
-    elif core.CLAUDE_EXTENSION in (current or []):
-        _say("VS Code", "ok - the Claude extension installs on machines by itself")
-    elif interactive() and _confirm(
-        f"  VS Code     Install the Claude extension on machines by itself ({core.VSCODE_EXTENSIONS})? [Y/n] "
-    ):
-        settings[core.VSCODE_EXTENSIONS] = [*(current or []), core.CLAUDE_EXTENSION]
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(settings, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-        core.replace(tmp, path)
-        _say("VS Code", f"ok - added {core.VSCODE_EXTENSIONS} to {path}")
-    else:
-        _say("VS Code", f"to have the Claude extension installed on machines by itself, {hint}")
-
-
-def _confirm(prompt: str) -> bool:
-    return input(prompt).strip().lower() in ("", "y", "yes")
-
-
 def install_claude_files() -> None:
     """The skill, and the permission rules merged into ~/.claude/settings.json (older crab-student rules
-    are replaced; everything else is kept). The launcher agent of older versions is removed."""
+    are replaced; everything else is kept)."""
     claude = Path.home() / ".claude"
-    (claude / OLD_LAUNCHER_AGENT).unlink(missing_ok=True)
     path = claude / "skills/crab-student/SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text((DATA / "SKILL.md").read_text(encoding="utf-8"), encoding="utf-8")

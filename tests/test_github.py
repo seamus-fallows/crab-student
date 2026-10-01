@@ -225,6 +225,27 @@ def test_agents_claiming_a_key_at_the_same_time_share_one(fake_github, monkeypat
     assert len(ids) == 1 and list(fake_github.keys["ada/proj"]) == list(ids)
 
 
+def test_an_agent_reuses_the_key_another_agent_on_its_repo_holds_however_old(fake_github):
+    fake_github.create_repo("ada/proj")
+    fake_github.create_repo("ada/other")
+    for name, slug in (("w1", "ada/proj"), ("w2", "ada/proj"), ("w3", "ada/other"), ("w4", "ada/proj")):
+        core.save({"name": name, "repo": {"slug": slug, "deploy_key": None}})
+    github.claim_deploy_key(core.load("w1"))
+    first = core.load("w1")
+    first["repo"]["deploy_key"]["created"] = "2026-01-01T00:00:00Z"  # (months ago)
+    core.save(first)
+    key = first["repo"]["deploy_key"]
+    github.claim_deploy_key(core.load("w2"))
+    assert core.load("w2")["repo"]["deploy_key"] == key
+    assert list(fake_github.keys["ada/proj"]) == [key["id"]]  # (GitHub emailed the repo's admins once)
+    github.claim_deploy_key(core.load("w3"))  # (another repo: a key of its own)
+    assert core.load("w3")["repo"]["deploy_key"]["id"] in fake_github.keys["ada/other"]
+    github.key_file(key).unlink()  # (a key whose private half is not on this computer cannot be given)
+    github.claim_deploy_key(core.load("w4"))
+    assert core.load("w4")["repo"]["deploy_key"]["id"] != key["id"]
+    assert len(fake_github.keys["ada/proj"]) == 2
+
+
 def test_a_branch_is_deleted_only_while_nobody_worked_on_it(fake_github, tmp_path):
     bare = fake_github.create_repo("ada/proj")
     start = fake_github.branch_sha("ada/proj", "main")

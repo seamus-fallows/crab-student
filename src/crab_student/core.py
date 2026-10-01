@@ -76,10 +76,6 @@ def tool(name: str) -> str | None:
 # ---- VS Code's user settings ---------------------------------------------------------------------
 
 
-VSCODE_EXTENSIONS = "remote.SSH.defaultExtensions"  # (the extensions Remote - SSH installs on every host)
-CLAUDE_EXTENSION = "anthropic.claude-code"
-
-
 def vscode_settings_file() -> Path:
     home = Path.home()
     if sys.platform == "win32":
@@ -250,9 +246,7 @@ def load(name: str) -> dict:
 
 def all_records() -> list[dict]:
     recs = [read_json(p, None) for p in sorted(agents_dir().glob("*.json"))]
-    return sorted(
-        (r for r in recs if isinstance(r, dict) and "name" in r), key=lambda r: r.get("created", "")
-    )
+    return sorted((r for r in recs if r is not None), key=lambda r: r.get("created", ""))
 
 
 def save(rec: dict) -> None:

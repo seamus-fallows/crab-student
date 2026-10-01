@@ -34,11 +34,6 @@ prompt is only:
 
 > Run `crab-student guide launch` and follow it for the task above.
 
-If forks are not available (the Agent tool refuses "fork"; they need Claude Code v2.1.232 or later),
-start a general-purpose background agent instead, with the task in the user's words and the context in
-the prompt (repo path, relevant files, data, secrets, the mode, model, price or hours they mentioned),
-followed by the same instruction.
-
 For several agents at once (a sweep, or several tasks), start ONE launcher with all of them: it writes a
 brief for each and launches them together, each on a machine of its own.
 

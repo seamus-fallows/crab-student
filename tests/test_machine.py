@@ -190,12 +190,12 @@ def test_remote_failures(answer, unreachable, said, monkeypatch):
 
 
 def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypatch):
-    lines = [b"step 1/5 environment", b"Cloning into 'proj'...", b"step 2/5 repository",
+    lines = [b"step 1/6 environment", b"Cloning into 'proj'...", b"step 2/6 repository",
              b'{"ok": false, "step": 2, "label": "repository", "error": "clone failed"}']  # fmt: skip
     proc, progress = Upload(lines, returncode=1), []
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: proc)
     e = fails(5, machine.upload_and_setup, "job1", b"BUNDLE", progress.append)
-    assert progress == ["step 1/5 environment", "step 2/5 repository"] and proc.stdin.getvalue() == b"BUNDLE"
+    assert progress == ["step 1/6 environment", "step 2/6 repository"] and proc.stdin.getvalue() == b"BUNDLE"
     assert "repository" in e.message and "clone failed" in e.message
 
 
@@ -203,13 +203,13 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
     "last,returncode,outcome",
     [
         (b'{"ok": true}', 0, "ok"),
-        (b"step 3/5 agent settings", 255, "unreachable"),  # (the connection dropped: the launch can go on)
+        (b"step 3/6 dependencies", 255, "unreachable"),  # (the connection dropped: the launch can go on)
         (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
     ],
 )
 def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/5 environment", last], returncode)
+        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode)
     )
     try:
         machine.upload_and_setup("job1", b"BUNDLE", lambda line: None)
@@ -340,16 +340,6 @@ def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vs
     assert vscode == {"code": [], "urls": []}
 
 
-def test_the_panel_says_when_the_dependencies_are_still_being_installed(machines, vscode):
-    machines.replies[("job1", "status")] = {
-        "frontend": "vscode",
-        "deps": {"state": "running", "command": "uv sync"},
-    }
-    machine.open_vscode(agent_record(brief="Train the model."))
-    prompt = panel_prompt(vscode["urls"][0])
-    assert prompt.startswith("Train the model.") and "uv sync" in prompt and "agent-status" in prompt
-
-
 def test_open_vscode_on_an_agent_whose_status_is_known_does_not_ask_the_machine_again(machines, vscode):
     machine.open_vscode(agent_record(brief="Train the model."), {"frontend": "vscode"})
     assert machines.calls == [] and vscode["urls"]
@@ -372,18 +362,30 @@ def test_without_a_usable_vs_code_the_machine_prepares_nothing_for_it(monkeypatc
     assert machine.local_vscode() is None
 
 
-def test_the_wait_for_a_hand_off_ends_when_the_agent_runs_in_tmux(monkeypatch, capsys):
-    answers = [{"frontend": "vscode"}, {"frontend": "tmux"}]
-    monkeypatch.setattr(machine, "remote", lambda name, args, **kw: answers.pop(0))
-    assert (
-        machine.wait_for_handoff("job1") is True and answers == [] and "/handoff" in capsys.readouterr().out
-    )
+def test_the_wait_for_a_hand_off_asks_the_machines_status_until_the_agent_runs_in_tmux(monkeypatch):
+    answers = [{"frontend": "vscode"}, {"frontend": "vscode"}, {"frontend": "tmux"}]
+    asked, slept = [], []
+
+    def remote(name, args, **kw):
+        asked.append((name, args))
+        return answers.pop(0)
+
+    monkeypatch.setattr(machine, "remote", remote)
+    monkeypatch.setattr(machine.time, "sleep", slept.append)
+    assert machine.wait_for_handoff("job1") is True
+    assert asked == [("job1", ["status"])] * 3 and slept == [machine.HANDOFF_POLL] * 2 and answers == []
 
 
 @pytest.mark.parametrize("answer", [machine.Unreachable("no answer"), KeyboardInterrupt()])
 def test_the_wait_for_a_hand_off_ends_when_the_machine_cannot_be_reached_or_on_ctrl_c(monkeypatch, answer):
+    answers = [{"frontend": "vscode"}, answer]
+
     def remote(name, args, **kw):
-        raise answer
+        reply = answers.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
 
     monkeypatch.setattr(machine, "remote", remote)
-    assert machine.wait_for_handoff("job1") is False
+    monkeypatch.setattr(machine.time, "sleep", lambda seconds: None)
+    assert machine.wait_for_handoff("job1") is False and answers == []

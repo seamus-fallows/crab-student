@@ -29,7 +29,7 @@ REMOTE_PLATFORM = "remote.SSH.remotePlatform"  # (VS Code: which hosts run Linux
 CLAUDE_URL = "vscode://anthropic.claude-code/open?prompt="  # (the Claude extension's panel, pre-filled)
 PROMPT_MAX = 5000
 VSCODE_URL_DELAY = 15.0  # (the new window must be connected, Claude running, when the panel is asked for)
-HANDOFF_WAIT = 600  # one ssh call waits this long on the machine for a hand-off, then the next one
+HANDOFF_POLL = 5.0  # seconds between asking an interactive agent's machine whether it was handed off
 
 
 class Unreachable(core.CrabError):
@@ -179,9 +179,9 @@ def bundle(extra: dict[str, tuple[bytes, int]], fake_claude: bool = False) -> by
 def upload_and_setup(
     name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600
 ) -> list[str]:
-    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come; setup's
-    warnings. Anything
-    but setup's own answer (a lost connection, a timeout) is Unreachable: the launch can continue."""
+    """One ssh call: unpack the bundle, run setup (which installs the project's dependencies too), pass its
+    "step i/N ..." lines on as they come; setup's warnings. Anything but setup's own answer (a lost connection,
+    a timeout) is Unreachable: the launch can continue."""
     cmd = [
         *ssh_cmd(name),
         "-o",
@@ -395,25 +395,21 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
         flush=True,
     )
     time.sleep(VSCODE_URL_DELAY)
-    prompt = _task_prompt(name, status.get("deps") or {})
     # (through the OS URL handler: on Windows `code` is a batch file, which mangles the % escapes)
-    webbrowser.open(CLAUDE_URL + urllib.parse.quote(prompt, safe=""))
+    webbrowser.open(CLAUDE_URL + urllib.parse.quote(_task_prompt(name), safe=""))
     return 0
 
 
 def wait_for_handoff(name: str) -> bool:
-    """Wait until the interactive agent is handed off to tmux, one long ssh call at a time: True then; False when
-    the machine cannot be reached (or cannot tell), or the user closes the wait with Ctrl+C."""
+    """Wait until the interactive agent is handed off to tmux, asking its machine every few seconds: True then;
+    False when the machine cannot be asked, or the user closes the wait with Ctrl+C."""
     print(
         f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close).",
         flush=True,
     )
     try:
-        frontend = "vscode"
-        while frontend != "tmux":
-            frontend = remote(name, ["wait-handoff", str(HANDOFF_WAIT)], timeout=HANDOFF_WAIT + 60).get(
-                "frontend"
-            )
+        while remote(name, ["status"], timeout=20).get("frontend") != "tmux":
+            time.sleep(HANDOFF_POLL)
     except core.CrabError as e:
         print(f"Stopped waiting: {e.message}")
         return False
@@ -455,18 +451,11 @@ def agent_status(rec: dict) -> dict:
     }
 
 
-def _task_prompt(name: str, deps: dict) -> str:
-    """The brief, as the user would type it to Claude, with a note while the dependency install is not done (the
-    extension takes up to PROMPT_MAX characters: a longer brief is pointed to instead)."""
+def _task_prompt(name: str) -> str:
+    """The brief, as the user would type it to Claude (the extension takes up to PROMPT_MAX characters: a longer
+    brief is pointed to instead)."""
     brief = core.agents_dir() / f"{name}.brief.md"
     text = brief.read_text(encoding="utf-8").strip() if brief.exists() else ""
-    note = ""
-    if deps.get("state") in ("running", "failed"):
-        how = "are being installed" if deps["state"] == "running" else "could not be installed"
-        note = (
-            f"\n\n(The repo's dependencies {how} in the background with `{deps.get('command')}`: "
-            "`agent-status` shows how far it got. Wait for it, or fix it, rather than starting another install.)"
-        )
-    if not text or len(text) + len(note) > PROMPT_MAX:
-        text = "The task is in /root/BRIEF.md: read it, then let's start."
-    return text + note
+    if not text or len(text) > PROMPT_MAX:
+        return "The task is in /root/BRIEF.md: read it, then let's start."
+    return text

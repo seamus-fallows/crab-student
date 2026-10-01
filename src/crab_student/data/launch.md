@@ -23,11 +23,11 @@ for looks unwise, do it anyway and say what worries you in your result.
 Read the code, README and configs the task involves. Find the data (where it comes from, its size),
 the dependencies, how success is measured, and anything the user already decided.
 
-The machine installs the repo's dependencies by itself, in the background, the first way that fits:
-`uv.lock` or `[tool.uv]` in `pyproject.toml` -> `uv sync`; `[project]` in `pyproject.toml` ->
-`pip install -e .`; `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`.
-Pass `--setup "COMMAND"` only when that would be wrong or something extra is needed; it replaces the
-detected install, so it must do the whole install (e.g.
+The machine installs the repo's dependencies by itself during setup, before the agent starts, the first
+way that fits: `uv.lock` or `[tool.uv]` in `pyproject.toml` -> `uv sync`; `[project]` in
+`pyproject.toml` -> `pip install -e .`; `requirements*.txt` -> `pip install -r` each; `setup.py` ->
+`pip install -e .`. Pass `--setup "COMMAND"` only when that would be wrong or something extra is
+needed; it replaces the detected install, so it must do the whole install (e.g.
 `--setup "pip install -r requirements-gpu.txt"`), or `--setup none` when nothing should be installed,
 and then say so in the brief (under Context; for interactive, in a short sentence after the task).
 

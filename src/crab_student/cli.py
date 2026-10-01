@@ -193,8 +193,8 @@ def _agent_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--setup",
         metavar="COMMAND",
-        help="how the machine installs the project's dependencies, in the background (default: uv sync, pip "
-        "install -e . or pip install -r requirements*.txt, as the repo says; none: no install)",
+        help="how the machine installs the project's dependencies during setup, before the agent starts (default: "
+        "uv sync, pip install -e . or pip install -r requirements*.txt, as the repo says; none: no install)",
     )
 
 
@@ -342,8 +342,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
     say(f"  repo      {v.repo}, branch {v.branch}{pushed}")
-    if deps := _deps_text(v.deps):
-        say(f"  deps      {deps}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
         say(
@@ -365,17 +363,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
         say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
     return 0
-
-
-def _deps_text(deps: dict | None) -> str:
-    """The machine's dependency install, as status shows it."""
-    state, command = (deps or {}).get("state"), (deps or {}).get("command")
-    return {
-        "running": f"installing in the background: {command}",
-        "done": f"installed: {command}",
-        "failed": f"the install failed (exit code {(deps or {}).get('exit_code')}): {command}",
-        "none": "none installed",
-    }.get(state or "", "")
 
 
 def cmd_open(args: argparse.Namespace) -> int:

@@ -15,8 +15,7 @@ watches with `crab-student open` (tmux attach over ssh) or `open --vscode`.
 
 - `README.md` is for users. `SPEC.md` is the protocol reference: records, machine files, the ssh
   commands, the modes and the hand-off, the onstart and dead-man contract, the stop rules and the safety
-  invariants. Update it when a protocol or an invariant changes. `docs/REQUIREMENTS.md` says what the
-  tool is for.
+  invariants. Update it when a protocol or an invariant changes.
 
 ## Layout
 

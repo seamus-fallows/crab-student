@@ -409,6 +409,7 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
     )
     time.sleep(VSCODE_URL_DELAY)
     prompt = _task_prompt(name, status.get("deps") or {})
+    # (through the OS URL handler: on Windows `code` is a batch file, which mangles the % escapes)
     webbrowser.open(CLAUDE_URL + urllib.parse.quote(prompt, safe=""))
     return 0
 

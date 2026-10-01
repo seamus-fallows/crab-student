@@ -1,8 +1,7 @@
 # crab-student: protocols and invariants
 
 The contracts between the parts: what is stored where, what crosses ssh, how machines start and stop,
-and the rules that must hold. It describes behaviour, not code. (`docs/REQUIREMENTS.md` is what the
-tool is for.)
+and the rules that must hold. It describes behaviour, not code.
 
 ## 1. Safety invariants
 

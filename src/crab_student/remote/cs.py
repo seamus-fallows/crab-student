@@ -83,7 +83,8 @@ TMUX_CONF = (
     'set -g status-left "[{name}] "\nset -g status-left-length 40\nset -g status-right "detach: Ctrl-b d "\n'
 )
 # Every Claude Code on the machine (in tmux, in VS Code, the setup check) skips permission prompts: the
-# machine is disposable, and the git hooks guard the repo.
+# machine is disposable, and the git hooks guard the repo. (As root, Claude Code refuses to skip them
+# unless IS_SANDBOX=1.)
 SETTINGS = {
     "env": {"DISABLE_AUTOUPDATER": "1", "IS_SANDBOX": "1"},
     "permissions": {

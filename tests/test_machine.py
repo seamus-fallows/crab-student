@@ -5,6 +5,7 @@ and failures, and opening terminals and VS Code."""
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import tarfile
 import threading
@@ -99,8 +100,52 @@ def test_the_ssh_config_has_a_host_for_each_agent_with_an_address():
     assert hosts == ["crab-student-job1"]
     for line in ("HostName 203.0.113.7", "Port 40122", "User root", "HostKeyAlias crab-student-job1"):
         assert f"  {line}\n" in text
-    key, known = (str(core.ssh_dir() / name).replace("\\", "/") for name in ("id_ed25519", "known_hosts"))
-    assert f'IdentityFile "{key}"' in text and f'UserKnownHostsFile "{known}"' in text and "\\" not in text
+    # (paths under the home folder as "~/...": Git's ssh, which VS Code may run, reads "C:/..." as relative)
+    assert "  IdentityFile ~/.crab-student/ssh/id_ed25519\n" in text
+    assert "  UserKnownHostsFile ~/.crab-student/ssh/known_hosts\n" in text and "\\" not in text
+
+
+def test_opening_in_vscode_marks_the_host_as_linux_and_forgets_agents_that_are_gone(isolated, monkeypatch):
+    path = core.vscode_settings_file()
+    path.parent.mkdir(parents=True)
+    old = {"crab-student-gone": "linux", "my-box": "linux"}
+    path.write_text(json.dumps({"editor.tabSize": 2, machine.REMOTE_PLATFORM: old}))
+    core.save({"name": "job1", "created": "1"})
+    machine.remember_linux_host("job1")
+    settings = json.loads(path.read_text())
+    assert settings[machine.REMOTE_PLATFORM] == {"my-box": "linux", "crab-student-job1": "linux"}
+    assert settings["editor.tabSize"] == 2
+
+
+def test_a_vscode_settings_file_with_comments_is_edited_line_by_line(isolated):
+    path = core.vscode_settings_file()
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{\n    // my comment\n    "remote.SSH.remotePlatform": {\n        "crab-student-gone": "linux",\n'
+        '        "my-box": "linux"\n    },\n}\n'
+    )
+    core.save({"name": "job1", "created": "1"})
+    machine.remember_linux_host("job1")
+    text = path.read_text()
+    assert "// my comment" in text and '"my-box": "linux"' in text and "crab-student-gone" not in text
+    assert '"crab-student-job1": "linux",' in text
+    machine.remember_linux_host("job1")
+    assert path.read_text() == text  # (once)
+    path.write_text('{\n    // only a comment\n    "editor.tabSize": 2\n}\n')
+    machine.remember_linux_host("job1")
+    assert '"remote.SSH.remotePlatform": {"crab-student-job1": "linux"},' in path.read_text()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_a_settings_file_with_comments_keeps_its_line_endings_and_last_line(isolated, newline):
+    path = core.vscode_settings_file()
+    path.parent.mkdir(parents=True)
+    lines = ["{", "    // c", '    "remote.SSH.remotePlatform": {', '        "box": "linux"', "    }", "}"]
+    path.write_bytes(newline.join(lines).encode())  # (no newline at the end)
+    core.save({"name": "job1", "created": "1"})
+    machine.remember_linux_host("job1")
+    want = [*lines[:3], '        "crab-student-job1": "linux",', *lines[3:]]
+    assert path.read_bytes() == newline.join(want).encode()
 
 
 def test_agents_coming_up_in_threads_all_end_up_in_the_ssh_config():

@@ -154,14 +154,19 @@ def _ssh_step() -> bool:
 
 def ensure_ssh_include() -> bool:
     """Make ~/.ssh/config include crab-student's host entries (first line: a later one could fall inside a
-    Host block). True if it was added."""
+    Host block). True if it was added. An Include of the same file spelled another way is replaced."""
     config = Path.home() / ".ssh" / "config"
-    line = f'Include "{str(core.ssh_dir() / "config").replace(chr(92), "/")}"'
+    target = core.ssh_dir() / "config"
+    line = f"Include {core.ssh_path(target)}"
     text = config.read_text(encoding="utf-8") if config.exists() else ""
-    if line in text:
+    if text.startswith(line + "\n"):
         return False
+    tail = "/".join(target.parts[-3:])  # (".crab-student/ssh/config", however the rest is spelled)
+    kept = [
+        s for s in text.splitlines() if not (s.startswith("Include") and s.strip().strip('"').endswith(tail))
+    ]
     config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text(f"{line}\n{text}", encoding="utf-8")
+    config.write_text("\n".join([line, *kept]) + "\n", encoding="utf-8")
     return True
 
 
@@ -253,25 +258,14 @@ def guess_country() -> str:
     return ""
 
 
-def vscode_settings_file() -> Path:
-    home = Path.home()
-    if sys.platform == "win32":
-        base = home / "AppData" / "Roaming"
-    elif sys.platform == "darwin":
-        base = home / "Library" / "Application Support"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
-    return base / "Code" / "User" / "settings.json"
-
-
 def _vscode_step() -> None:
     """Offer to have VS Code install the Claude extension on every machine it connects to (Remote - SSH)."""
-    path = vscode_settings_file()
+    path = core.vscode_settings_file()
     if not path.parent.exists():
         _say("VS Code", "not found (only needed for open --vscode, which uses its Remote - SSH extension)")
         return
     hint = f'add "{VSCODE_EXTENSIONS}": ["{CLAUDE_EXTENSION}"] to {path}'
-    settings = _read_vscode_settings(path)
+    settings = core.read_vscode_settings(path)
     current = settings.get(VSCODE_EXTENSIONS) if settings is not None else None
     if settings is None or (current is not None and not isinstance(current, list)):
         _say("VS Code", f"could not edit {path} safely. So the Claude extension installs on machines: {hint}")
@@ -287,17 +281,6 @@ def _vscode_step() -> None:
         _say("VS Code", f"ok - added {VSCODE_EXTENSIONS} to {path}")
     else:
         _say("VS Code", f"to have the Claude extension installed on machines by itself, {hint}")
-
-
-def _read_vscode_settings(path: Path) -> dict | None:
-    """The settings, or None when the file is not plain JSON (VS Code allows comments there)."""
-    if not path.exists():
-        return {}
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return None
-    return settings if isinstance(settings, dict) else None
 
 
 def _confirm(prompt: str) -> bool:

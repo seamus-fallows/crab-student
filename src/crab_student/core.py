@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -36,6 +37,15 @@ def home() -> Path:
     return Path.home() / ".crab-student"
 
 
+def ssh_path(path: Path) -> str:
+    """A path for an ssh config line that both Windows' OpenSSH and Git's ssh understand: "~/..." under the home
+    folder (Git's ssh reads "C:/..." as a relative path, and VS Code may run it), else quoted with "/"."""
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return '"' + str(path).replace("\\", "/") + '"'
+
+
 def agents_dir() -> Path:
     return home() / "agents"
 
@@ -61,6 +71,37 @@ def tool(name: str) -> str | None:
         if own.exists():
             return str(own)
     return shutil.which(name)
+
+
+# ---- VS Code's user settings ---------------------------------------------------------------------
+
+
+def vscode_settings_file() -> Path:
+    home = Path.home()
+    if sys.platform == "win32":
+        base = home / "AppData" / "Roaming"
+    elif sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return base / "Code" / "User" / "settings.json"
+
+
+def read_vscode_settings(path: Path) -> dict | None:
+    """The settings, or None when the file is not plain JSON (VS Code allows comments there)."""
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def write_vscode_settings(path: Path, settings: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(settings, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    replace(tmp, path)
 
 
 # ---- settings ------------------------------------------------------------------------------------

@@ -156,8 +156,16 @@ def test_the_ssh_include_goes_first_once(isolated):
     assert setup.ensure_ssh_include()
     assert not setup.ensure_ssh_include()
     first, *rest = config.read_text().splitlines()
-    assert first.startswith("Include ") and (core.ssh_dir() / "config").as_posix() in first
-    assert rest == ["Host box", "  User me"]
+    assert first == "Include ~/.crab-student/ssh/config" and rest == ["Host box", "  User me"]
+
+
+def test_an_include_of_the_same_file_spelled_another_way_is_replaced(isolated):
+    config = isolated / ".ssh" / "config"
+    config.parent.mkdir()
+    old = (core.ssh_dir() / "config").as_posix()
+    config.write_text(f'Include "{old}"\nInclude other.d/*\n')
+    assert setup.ensure_ssh_include()
+    assert config.read_text().splitlines() == ["Include ~/.crab-student/ssh/config", "Include other.d/*"]
 
 
 def prefixes(rules: list[str]) -> list[str]:
@@ -251,7 +259,7 @@ def test_an_older_claude_code_is_warned_about(monkeypatch, capsys):
 def vscode(isolated, monkeypatch, capsys):
     """VS Code's user settings in the temporary home; the test says what the user types (a list of answers)
     and whether it is a terminal. Returns (settings path, answers)."""
-    path = setup.vscode_settings_file()
+    path = core.vscode_settings_file()
     path.parent.mkdir(parents=True)
     answers: list[str] = []
 
@@ -313,5 +321,5 @@ def test_vscode_settings_are_left_alone_unless_the_edit_is_safe_and_agreed(how, 
 
 def test_without_vscode_nothing_is_created(isolated, capsys):
     setup._vscode_step()
-    assert not setup.vscode_settings_file().parent.exists()
+    assert not core.vscode_settings_file().parent.exists()
     assert capsys.readouterr().out.isascii()

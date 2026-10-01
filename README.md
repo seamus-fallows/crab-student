@@ -60,12 +60,8 @@ missing):
 - **Claude token.** You run `claude setup-token` in another terminal and paste the token; it is kept
   in your system keyring.
 - **Claude Code.** It installs a skill (so your Claude Code knows how to use crab-student) and
-  permission rules (below) into `~/.claude`, and checks that your Claude Code is new enough for the
-  background launcher (v2.1.232 or later, which can fork your session). Run `init` again after
-  upgrading crab-student to update them.
-- **VS Code.** If VS Code's `remote.SSH.defaultExtensions` setting does not list the Claude Code
-  extension, it offers to add `anthropic.claude-code`, so the extension installs itself on every
-  machine you open. (If it cannot edit your settings file safely, it prints what to add instead.)
+  permission rules (below) into `~/.claude`. Run `init` again after upgrading crab-student to update
+  them.
 
 ## Launching
 
@@ -83,23 +79,24 @@ ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - colleague - branc
 ```
 
 You don't have to wait for that line to see what is happening: as soon as the launch starts, a window
-opens (Windows Terminal on Windows, a tab per agent; Terminal on macOS) that shows its progress as it
-goes (the machines rented, the image download, the setup steps) and then becomes the agent's session:
-it attaches to the agent's Claude Code. For an interactive agent it opens VS Code instead and stays open,
-waiting: once you hand the agent over with `/handoff`, it becomes the agent's terminal. If the launch fails,
-the window says why and what to do. On other systems, or with `crab-student config open_window off`,
-run `crab-student open NAME` yourself: on an agent that is still launching it shows the same progress.
-(Every launch also keeps its progress, with times, in `~/.crab-student/agents/NAME.log`.)
+opens (on Windows a tab per agent in one Windows Terminal window named crab-student; on macOS a Terminal
+window) that shows its progress as it goes (the machines rented, the image download, the setup steps)
+and then becomes the agent's session: it attaches to the agent's Claude Code. For an interactive agent
+it opens VS Code instead and stays open, checking every few seconds: once you hand the agent over with
+`/handoff`, it becomes the agent's terminal. If the launch fails, the window says why and what to do.
+On other systems, or with `crab-student config open_window off`, run `crab-student open NAME`
+yourself: on an agent that is still launching it shows the same progress. (Every launch also keeps its
+progress, with times, in `~/.crab-student/agents/NAME.log`.)
 
 You never type a price. crab-student picks a reliable machine that fits, cheapest first (for GPU work,
 a faster GPU when it clearly pays for itself; among similar prices, the most reliable and fastest
 downloading). For an interactive agent, when you set `home` to your country code
 (`crab-student config home CA`), among similar prices it takes a host in your country first, then one
-on your continent, since you feel the lag when you type (`init` suggests the code from your computer's
-locale). It never picks a host in a country where Anthropic's API is unavailable (mainland China, Hong
-Kong, Russia, Iran and the others missing from https://www.anthropic.com/supported-countries), since
-Claude Code could not work there. If every machine that fits costs more than
-`approve_above_usd_per_hour` an hour, nothing is rented until you approve it (see Money and safety).
+on your continent, since you feel the lag when you type. It never picks a host in a country where
+Anthropic's API is unavailable (mainland China, Hong Kong, Russia, Iran and the others missing from
+https://www.anthropic.com/supported-countries), since Claude Code could not work there. If every
+machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing is rented until you
+approve it (see Money and safety).
 `crab-student offers --gpus 1 --gpu-ram 24` shows what would be picked (add `--mode interactive` to see
 an interactive agent's pick), without renting anything. There is no cost estimate and no time limit:
 you decide when a machine has done its job (see Money and safety).
@@ -140,9 +137,8 @@ warns about them. A task that has nothing to do with a repo (`--no-repo`) goes t
 
 **Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
 with CUDA, Python and pip in `/venv/main`). Setup adds what the machine needs to host an agent (tmux,
-Claude Code, the repo and its git hooks) and starts installing your project's dependencies in the
-background, so the agent does not spend its first minutes on it. It goes by the repo, the first that
-fits:
+Claude Code, the repo and its git hooks) and installs your project's dependencies before the agent
+starts, so it does not spend its first minutes on them. It goes by the repo, the first that fits:
 
 - `uv.lock`, or `[tool.uv]` in `pyproject.toml`: `uv sync` (installing uv first if needed), which makes
   the repo's own `.venv`;
@@ -150,20 +146,19 @@ fits:
 - `requirements*.txt`: `pip install -r` for each;
 - `setup.py`: `pip install -e .`.
 
-pip is the image's (`/venv/main/bin/python -m pip`). Nothing waits for the install: the agent is told it
-is running, and `agent-status` on the machine shows how far it got (`crab-student status NAME` shows it
-too). Shells on the machine, the agent's Claude Code and VS Code all use the repo's `.venv` once there is
-one, else `/venv/main`, and terminals start in the repo. When the repo needs something else, the launch
-takes `--setup "COMMAND"` (e.g. `--setup "pip install -r requirements-gpu.txt"`), or `--setup none` for
-no install; just say so when you ask. Anything special the agent should know about (a system library, a
-particular CUDA or PyTorch version, a private package index) goes into its brief.
+pip is the image's (`/venv/main/bin/python -m pip`). Setup waits for the install (up to 40 minutes),
+so a launch can take a while. If it fails, the machine is set up anyway: the launch prints a warning,
+and the agent is told, with the end of the install's output. Shells on the machine, the agent's Claude
+Code and VS Code all use the repo's `.venv` once there is one, else `/venv/main`, and terminals start
+in the repo. When the repo needs something else, the launch takes `--setup "COMMAND"` (e.g.
+`--setup "pip install -r requirements-gpu.txt"`), or `--setup none` for no install; just say so when
+you ask. Anything special the agent should know about (a system library, a particular CUDA or PyTorch
+version, a private package index) goes into its brief.
 
 **Several agents.** For a sweep, or several separate tasks, the launcher writes a brief for each and
-launches them together (`crab-student launch --batch`, which reads the agents from stdin, each
-starting with a line `=== NAME [flags]` followed by its brief). Each gets a machine of its own, they
-come up side by side, and you see one line per agent. Each agent races two machines of its own when
-there are enough offers (else it rents one at a time). Any that would cost over the approval price wait
-for your OK while the rest go ahead.
+runs one `crab-student launch` per agent, all at once. Each gets a machine (and a window tab) of its
+own, they come up side by side, and you see one line per agent. Any that would cost over the approval
+price wait for your OK while the rest go ahead.
 
 ## Watching and steering
 
@@ -181,8 +176,9 @@ or type to it like any Claude Code session. **Detach with Ctrl-b then d**: the a
 Closing the window, losing the connection or a sleeping laptop do not stop it either; `open` again to
 come back. In `open --all` on macOS/Linux the local layout uses Ctrl-a, so Ctrl-b still reaches the
 agent. Agents whose Claude runs in VS Code (interactive, not handed over) are left out of `open --all`,
-with a note. `open NAME` on one opens VS Code (as `--vscode` does), then waits: once you hand the agent
-over with `/handoff`, it attaches to it (Ctrl+C closes the wait).
+with a note. `open NAME` on one opens VS Code (as `--vscode` does), then waits, asking the machine
+every few seconds: once you hand the agent over with `/handoff`, it attaches to it (Ctrl+C closes the
+wait).
 
 `open NAME --vscode` opens the machine's repo folder in VS Code. For an agent whose Claude runs in
 tmux, VS Code's integrated terminal attaches to that session by itself, so you can watch and type to it
@@ -270,8 +266,8 @@ branch stays on GitHub.
   whose stop call Vast ignores is stopped by the next `list` or `status`.
 - **Approval, by price per hour.** A launch rents without asking when a machine that fits costs
   `approve_above_usd_per_hour` or less (see Settings for the default). If every machine that fits costs
-  more, it does not rent: it waits for `crab-student approve NAME [NAME ...]`, which your Claude Code
-  only runs with your OK (`crab-student decline NAME` drops it). Only a launch can ask for approval:
+  more, it does not rent: it waits for `crab-student approve NAME`, which your Claude Code only runs
+  with your OK (`crab-student decline NAME` drops it). Only a launch can ask for approval:
   there is no dollar budget and no cap on running machines, and starting a stopped agent needs no
   approval. The approval, the idle stop and the dead-man switch are what bound the bill.
 - **No leases about to end.** A host that plans to take its machine back within a day (or, when the
@@ -280,16 +276,17 @@ branch stays on GitHub.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
   a rent request whose outcome is unknown (so you never pay twice). Renting two machines for a launch is
   deliberate and bounded: at most two are in flight, both within the price you allow, and the one not
-  kept is destroyed before anything is uploaded to it. If Vast never confirms a rent and the other
-  machine wins, the launch goes ahead with a warning, and `list`, `status`, `start` and `delete` destroy
-  that machine if it shows up later.
+  kept is destroyed before anything is uploaded to it. If Vast never confirms a rent, the launch says
+  so (with a warning, or by failing when nothing else came up), and if that machine shows up later,
+  `crab-student list` points it out for you to destroy on Vast's website.
 - **Nothing is destroyed automatically** once an agent has run on it: crab-student destroys a machine
-  by itself only when it lost its launch's race, failed to start, or its first setup failed.
+  by itself only before anything was uploaded to it (it lost its launch's race, failed to start, or its
+  launch was cut off and is being started again) or when its setup failed.
 - **GitHub access** is a deploy key for the agent's one repo. GitHub emails you about every key
-  added, so agents started on the same repo within 24 hours share one (start 100 at once: one email),
-  and it is removed from GitHub when the last agent using it is deleted. A deploy key can technically
-  push to any branch of that repo, so git hooks on the machine keep the agent on `agent/<name>`; for
-  extra safety, protect your `main` branch on GitHub (deploy keys obey it).
+  added, so the agents on a repo share one, and it is removed from GitHub when the last agent using it
+  is deleted. A deploy key can technically push to any branch of that repo, so git hooks on the machine
+  keep the agent on `agent/<name>`; for extra safety, protect your `main` branch on GitHub (deploy keys
+  obey it).
 - **Permissions.** Agents run Claude Code without permission prompts, in every mode: the machine is
   disposable and the git hooks guard the repo.
 - **Secrets** for tasks (a Hugging Face or W&B token, say): `crab-student secret set HF_TOKEN` (in a
@@ -340,11 +337,10 @@ after the change. When a launch does not say, it asks for 8 cores, 16 GB of RAM 
 There is no background service: each `crab-student` command does its job and exits, keeping one small
 JSON record per agent in `~/.crab-student/`. It talks to Vast over its REST API, to GitHub through
 `gh` and `git`, and to machines through `ssh`. On each machine, one script sets things up (the repo,
-Claude Code and its settings, git hooks, the settings VS Code reads and, for an interactive agent, VS Code's
-server; in the background, your project's dependencies) and runs a watchdog that keeps the
-agent's Claude Code alive in tmux, measures activity, saves work, sends notifications and stops the
-machine. Vast's start command carries the dead-man switch, so it works before anything else is
-installed.
+Claude Code and its settings, git hooks, your project's dependencies, the settings VS Code reads and,
+for an interactive agent, VS Code's server) and runs a watchdog that keeps the agent's Claude Code
+alive in tmux, measures activity, saves work, sends notifications and stops the machine. Vast's start
+command carries the dead-man switch, so it works before anything else is installed.
 
 The agent itself is never told about crab-student: it is told that it works on a rented cloud machine
 that will be stopped when idle, and given plain commands (`agent-status` to say what state it is in,
@@ -353,11 +349,12 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
 ## Trouble
 
 - **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`, and its window says
-  it stopped): `crab-student start NAME` continues it (for a batch, once for each agent that is not yet
-  working). Closing the window that follows a launch does not stop the launch.
-- **`list` says `interrupted` and "the rent was not confirmed"**: Vast did not confirm a rent.
-  crab-student never rents again by itself; `crab-student start NAME` looks for the machine again, or
-  `delete` gives up.
+  it stopped): `crab-student start NAME` continues it. Cut off during setup, it carries on with the
+  same machine; earlier, it destroys the machines (they hold nothing) and starts over with fresh offers.
+  Closing the window that follows a launch does not stop the launch.
+- **"Vast did not confirm the rent"**: crab-student never sends a rent request twice. If the launch
+  failed for it, `crab-student start NAME` tries again with fresh offers. If `list` later warns about a
+  machine that belongs to no agent, destroy it at https://cloud.vast.ai/instances/.
 - **Setup failed**: the machine was destroyed (it held nothing) and the error says why; fix it and
   `crab-student start NAME` tries again. A refused Claude token: `crab-student init --claude-token`.
 - **Claude in VS Code asks you to log in**: the extension could not find the token. In the Claude panel,

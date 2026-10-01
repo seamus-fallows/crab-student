@@ -31,9 +31,6 @@ PROMPT_MAX = 5000
 VSCODE_URL_DELAY = 15.0  # (the new window must be connected, Claude running, when the panel is asked for)
 HANDOFF_WAIT = 600  # one ssh call waits this long on the machine for a hand-off, then the next one
 
-# The ssh config and known_hosts are shared by every agent, and a batch launch brings agents up in threads.
-_ssh_files = threading.Lock()
-
 
 class Unreachable(core.CrabError):
     """ssh could not reach the machine (or it did not answer in time)."""
@@ -76,13 +73,10 @@ def _ssh_config_text() -> str:
 
 def write_ssh_config() -> None:
     """Regenerate the host entries (one per agent with an address) that ~/.ssh/config includes."""
-    # (The records are read inside the lock too: a thread that read them earlier must not write last.)
-    with _ssh_files:
-        config_file().parent.mkdir(parents=True, exist_ok=True)
-        # (One temporary file per process and thread: several commands may rewrite the config at once.)
-        tmp = config_file().with_name(f"config.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(_ssh_config_text(), encoding="utf-8")
-        core.replace(tmp, config_file())
+    config_file().parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_file().with_name(f"config.{os.getpid()}.tmp")  # (several commands may rewrite it at once)
+    tmp.write_text(_ssh_config_text(), encoding="utf-8")
+    core.replace(tmp, config_file())
 
 
 def set_address(rec: dict, inst: dict) -> bool:
@@ -100,9 +94,8 @@ def set_address(rec: dict, inst: dict) -> bool:
 def forget_host_key(name: str) -> None:
     """A new machine for this name has a new host key."""
     hosts = core.ssh_dir() / "known_hosts"
-    with _ssh_files:
-        if hosts.exists() and (keygen := core.tool("ssh-keygen")):
-            core.run([keygen, "-R", alias(name), "-f", str(hosts)], check=False)
+    if hosts.exists() and (keygen := core.tool("ssh-keygen")):
+        core.run([keygen, "-R", alias(name), "-f", str(hosts)], check=False)
 
 
 def ssh_cmd(name: str, *, tty: bool = False) -> list[str]:
@@ -259,26 +252,20 @@ def open_one(name: str) -> int:
     raise core.CrabError(f'open needs a terminal: run "crab-student open {name}" in your terminal.', 2)
 
 
-def open_launch_windows(names: list[str]) -> bool:
-    """A window that follows the launches of `names` (`crab-student open NAME` in each), then shows the agents:
-    one Windows Terminal window with a tab per agent, or a Terminal window per agent on macOS. False when no
-    window could be opened (another system, or no terminal program)."""
-
-    def command(name: str) -> list[str]:
-        return [sys.executable, "-m", "crab_student", "open", name]
-
+def open_launch_window(name: str) -> bool:
+    """A window that follows the launch of NAME (`crab-student open NAME`), then shows the agent: a tab in the
+    Windows Terminal window named crab-student (made if missing, so launches side by side collect there), or a
+    Terminal window on macOS (its tabs cannot be scripted without extra permissions). False when no window could
+    be opened (another system, or no terminal program)."""
+    command = [sys.executable, "-m", "crab_student", "open", name]
     try:
         if os.name == "nt" and (wt := core.tool("wt")):
-            args = ["-w", "new"]
-            for i, name in enumerate(names):
-                args += [*([";"] if i else []), "new-tab", "--title", name, *command(name)]
-            subprocess.Popen([wt, *args])
+            subprocess.Popen([wt, "-w", "crab-student", "new-tab", "--title", name, *command])
             return True
         if sys.platform == "darwin" and (osascript := core.tool("osascript")):
-            for name in names:  # (Terminal's tabs cannot be scripted without extra permissions)
-                text = shlex.join(command(name)).replace("\\", "\\\\").replace('"', '\\"')
-                script = f'tell application "Terminal"\n  do script "{text}"\n  activate\nend tell'
-                subprocess.Popen([osascript, "-e", script])
+            text = shlex.join(command).replace("\\", "\\\\").replace('"', '\\"')
+            script = f'tell application "Terminal"\n  do script "{text}"\n  activate\nend tell'
+            subprocess.Popen([osascript, "-e", script])
             return True
     except OSError:
         return False

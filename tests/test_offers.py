@@ -200,16 +200,6 @@ def test_offers_up_to_the_cap_come_first_and_the_rest_only_over_the_cap(fake_vas
     assert (p.primary["id"], p.over_cap, p.top_price()) == (2, True, 0.43)
 
 
-def test_offers_already_taken_are_left_out(fake_vast):
-    fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.41)]
-    assert offers.plan(Req(hours=1), cfg(), taken={1}).offers() == [
-        offers.plan(Req(hours=1), cfg()).fallbacks[0]
-    ]
-    with pytest.raises(core.CrabError) as e:
-        offers.plan(Req(hours=1), cfg(), taken={1, 2})
-    assert e.value.code == 4
-
-
 @pytest.mark.parametrize("cap", [None, 100.0])
 def test_nothing_fitting_the_hardware_is_exit_4(fake_vast, cap):
     fake_vast.offers = [cpu_offer(1, cpu_ram=8000), offer(2, geolocation="California, US")]

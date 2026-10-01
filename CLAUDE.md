@@ -30,18 +30,20 @@ service: each command runs and exits.
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
 | `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`; an interactive agent prefers hosts near `home`), the plan under the approval price (`plan`), the host lease check, the countries where Claude is unavailable (`BLOCKED`) |
 | `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, files read from a branch (the report, the stop note), `pull` |
-| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (with the Claude panel pre-filled for an interactive agent), the window that follows a launch |
+| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (the Claude panel pre-filled for an interactive agent 15 s after VS Code opens; the wait for its hand-off), the window that follows a launch, the local VS Code's commit for the machine |
 | `launch.py` | `launch` and `launch_batch` (agents brought up side by side, each racing offers of its own), the approval rule, `bring_up` (the race of two machines, repo, upload, setup), the progress lines and the launch log, `approve` (several names), `decline`, `start` |
-| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off, destroying a race's late machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report`, `open`'s view of a launch at work |
+| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the dependency install, the mode sync after a hand-off, destroying a race's late machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report`, `open` (a launch at work; an interactive agent: VS Code, then its terminal after the hand-off) |
 | `setup.py` | `init` (including VS Code's `remote.SSH.defaultExtensions`), the skill and permission rules in `~/.claude`, the check of Claude Code's version (forks), `check_ready`, `guide` |
 | `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
-library, runs as root): `cs.py` (setup, the watchdog, Claude Code in tmux, the hand-off `agent-handoff`,
-and the commands the local side runs), `fake_claude.py` (a stand-in for `claude`, for `--fake-claude`),
+library, runs as root): `cs.py` (setup, including VS Code's server for an interactive agent, the background
+dependency install, the watchdog, Claude Code in tmux, the hand-off `agent-handoff`, and the commands the local side
+runs), `fake_claude.py` (a stand-in for `claude`, uploaded only for `--fake-claude`),
 `rules.md` with `rules-autonomous.md` and `rules-colleague.md` (the agent's rules and its mode's
 section, which become `~/.claude/CLAUDE.md`; an interactive agent has none) and `handoff.md` (the
-`/handoff` command an interactive agent gets).
+`/handoff` command an interactive agent gets; setup moves it into `~/.claude/commands/`, as it moves the
+brief to `/root/BRIEF.md`).
 
 ## Tests
 
@@ -58,8 +60,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
   `ready` (what `init` leaves). The autouse `windows` records the launch windows instead of opening
   them: tests never open real windows.
 - Test behaviour (records, calls on the fakes, files, exit codes, JSON), never wording or call order.
-- The machine side is tested by importing `cs.py` with `CS_ROOT` pointing at a temporary folder; parts
-  that need Linux (fcntl, tmux, pgrep) are skipped elsewhere.
+- The machine side is tested by importing `cs.py` with `CS_ROOT` (and `CS_VENV`, `CS_PROC`) pointing at
+  a temporary folder; parts that need Linux (fcntl, tmux, pgrep, bash) are skipped elsewhere. Tests never
+  start this computer's VS Code: conftest hides the `code` command.
 - First real run of a change that touches renting or the machine side: the cheapest offer,
   `--fake-claude`, a private test repo or `--no-repo`, and delete the agent afterwards. What VS Code and
   its Claude extension do on a machine (the token, the pre-filled prompt, the terminal attaching to
@@ -140,6 +143,10 @@ uv run ruff check src tests && uv run ruff format --check src tests
   Claude Code session's Remote Control, which runs crab-student commands (README).
 - `crab-student open` (without `--vscode`) is interactive: the user runs it in their own terminal, Claude
   never does (a launch opens a window running it by itself, unless `open_window` is off). `open --vscode`
-  only starts VS Code, so Claude may run it for an interactive agent.
+  only starts VS Code (for an interactive agent it waits a fixed 15 seconds before filling in the Claude
+  panel), so Claude may run it.
+- The dependency install is the only background job: it never fails or holds up setup. VS Code's server (an
+  interactive agent's, when VS Code is installed locally) is a setup job that setup waits for (up to 10
+  minutes) and whose failure is only a warning. The agent never sees `D`'s paths: `agent-status` shows the install's state and the end of its log.
 - `init` needs re-running after the skill or the permission rules change.
 - Changes to `remote/` reach only agents launched afterwards (the files are uploaded at launch).

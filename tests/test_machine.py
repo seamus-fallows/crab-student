@@ -243,9 +243,12 @@ def test_the_bundle_sets_modes_and_lf_endings_and_skips_dotfiles_and_folders(tmp
 def test_the_real_bundle_carries_the_machine_code_with_lf_endings():
     files = unpack(machine.bundle({}))
     modes = {name: mode for name, (_, mode) in files.items()}
-    assert modes == {"cs.py": 0o755, "fake_claude.py": 0o755, "rules.md": 0o644, "rules-autonomous.md": 0o644,
+    assert modes == {"cs.py": 0o755, "rules.md": 0o644, "rules-autonomous.md": 0o644,
                      "rules-colleague.md": 0o644, "handoff.md": 0o644}  # fmt: skip
     assert not any(b"\r\n" in data for data, _ in files.values()) and not any("/" in name for name in files)
+    assert (
+        unpack(machine.bundle({}, fake_claude=True))["fake_claude.py"][1] == 0o755
+    )  # (only when it is used)
 
 
 # ---- remote --------------------------------------------------------------------------------------
@@ -321,7 +324,7 @@ def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
 
 
 def test_open_without_a_terminal_asks_for_one(monkeypatch):
-    monkeypatch.setattr(machine, "_interactive", lambda: False)
+    monkeypatch.setattr(machine, "interactive", lambda: False)
     fails(2, machine.open_one, "job1")
 
 
@@ -438,3 +441,52 @@ def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vs
     monkeypatch.setattr(core, "tool", lambda name: None)
     assert "'code' command" in fails(1, machine.open_vscode, agent_record()).message
     assert vscode == {"code": [], "urls": []}
+
+
+def test_the_panel_says_when_the_dependencies_are_still_being_installed(machines, vscode):
+    machines.replies[("job1", "status")] = {
+        "frontend": "vscode",
+        "deps": {"state": "running", "command": "uv sync"},
+    }
+    machine.open_vscode(agent_record(brief="Train the model."))
+    prompt = panel_prompt(vscode["urls"][0])
+    assert prompt.startswith("Train the model.") and "uv sync" in prompt and "agent-status" in prompt
+
+
+def test_open_vscode_on_an_agent_whose_status_is_known_does_not_ask_the_machine_again(machines, vscode):
+    machine.open_vscode(agent_record(brief="Train the model."), {"frontend": "vscode"})
+    assert machines.calls == [] and vscode["urls"]
+
+
+def test_the_users_vs_code_commit_goes_to_the_machine(monkeypatch):
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    fake_run(monkeypatch, stdout=f"1.105.0\n{commit}\nx64\n")
+    assert machine.local_vscode() == commit
+
+
+@pytest.mark.parametrize("answer", ["", "1.105.0\nnot a commit\n", OSError("no such file")])
+def test_without_a_usable_vs_code_the_machine_prepares_nothing_for_it(monkeypatch, answer):
+    if isinstance(answer, Exception):
+        fake_run(monkeypatch, raises=answer)
+    else:
+        fake_run(monkeypatch, stdout=answer)
+    assert machine.local_vscode() is None
+    monkeypatch.setattr(core, "tool", lambda name: None)
+    assert machine.local_vscode() is None
+
+
+def test_the_wait_for_a_hand_off_ends_when_the_agent_runs_in_tmux(monkeypatch, capsys):
+    answers = [{"frontend": "vscode"}, {"frontend": "tmux"}]
+    monkeypatch.setattr(machine, "remote", lambda name, args, **kw: answers.pop(0))
+    assert (
+        machine.wait_for_handoff("job1") is True and answers == [] and "/handoff" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize("answer", [machine.Unreachable("no answer"), KeyboardInterrupt()])
+def test_the_wait_for_a_hand_off_ends_when_the_machine_cannot_be_reached_or_on_ctrl_c(monkeypatch, answer):
+    def remote(name, args, **kw):
+        raise answer
+
+    monkeypatch.setattr(machine, "remote", remote)
+    assert machine.wait_for_handoff("job1") is False

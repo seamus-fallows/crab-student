@@ -28,7 +28,8 @@ ALIAS_PREFIX = "crab-student-"  # (agents' ssh host names)
 REMOTE_PLATFORM = "remote.SSH.remotePlatform"  # (VS Code: which hosts run Linux)
 CLAUDE_URL = "vscode://anthropic.claude-code/open?prompt="  # (the Claude extension's panel, pre-filled)
 PROMPT_MAX = 5000
-VSCODE_URL_DELAY = 5.0  # (the new window must be open, and focused, when the panel is asked for)
+VSCODE_URL_DELAY = 15.0  # (the new window must be connected, Claude running, when the panel is asked for)
+HANDOFF_WAIT = 600  # one ssh call waits this long on the machine for a hand-off, then the next one
 
 # The ssh config and known_hosts are shared by every agent, and a batch launch brings agents up in threads.
 _ssh_files = threading.Lock()
@@ -162,12 +163,14 @@ def _tar_add(tar: tarfile.TarFile, name: str, data: bytes, mode: int) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
-def bundle(extra: dict[str, tuple[bytes, int]]) -> bytes:
-    """A tar.gz of the machine code plus generated files, each with its mode (secrets are 0600 from the
-    start)."""
+def bundle(extra: dict[str, tuple[bytes, int]], fake_claude: bool = False) -> bytes:
+    """A tar.gz of the machine code (the fake Claude only for a launch that uses it) plus generated files, each
+    with its mode (secrets are 0600 from the start)."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for path in sorted(REMOTE_SRC.iterdir()):
+            if path.name == "fake_claude.py" and not fake_claude:
+                continue
             if path.is_file() and not path.name.startswith(".") and path.suffix != ".pyc":
                 _tar_add(
                     tar,
@@ -180,8 +183,11 @@ def bundle(extra: dict[str, tuple[bytes, int]]) -> bytes:
     return buf.getvalue()
 
 
-def upload_and_setup(name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600) -> None:
-    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come. Anything
+def upload_and_setup(
+    name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600
+) -> list[str]:
+    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come; setup's
+    warnings. Anything
     but setup's own answer (a lost connection, a timeout) is Unreachable: the launch can continue."""
     cmd = [
         *ssh_cmd(name),
@@ -231,18 +237,19 @@ def upload_and_setup(name: str, data: bytes, on_line: Callable[[str], None], tim
         raise core.CrabError(
             f"setup failed at step {result.get('step')} ({result.get('label')}): {result.get('error')}", 5
         )
+    return result.get("warnings") or []
 
 
 # ---- terminals -----------------------------------------------------------------------------------
 
 
-def _interactive() -> bool:
+def interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def open_one(name: str) -> int:
     argv = [*ssh_cmd(name, tty=True), "agent-attach"]
-    if _interactive():
+    if interactive():
         print(f"Attaching to {name} (detach: Ctrl-b d - the agent keeps running).", flush=True)
         return subprocess.call(argv)
     if os.name == "nt" and (wt := core.tool("wt")):
@@ -336,7 +343,7 @@ def _tmux_all(names: list[str]) -> int:
             "open --all needs tmux on this computer (e.g. brew install tmux, or apt install tmux). "
             "Or open agents one at a time: crab-student open NAME"
         )
-    if not _interactive():
+    if not interactive():
         raise core.CrabError(
             'open --all needs a terminal: run "crab-student open --all" in your terminal.', 2
         )
@@ -362,9 +369,25 @@ def _tmux_all(names: list[str]) -> int:
     return subprocess.call([*base, "attach", "-t", "agents"], env=env)
 
 
-def open_vscode(rec: dict) -> int:
+def local_vscode() -> str | None:
+    """The commit of VS Code on this computer (the second line of `code --version`), for the machine to fetch the
+    matching server ahead of the first connect."""
+    code = core.tool("code")
+    if not code:
+        return None
+    try:
+        lines = subprocess.run(
+            [code, "--version"], capture_output=True, text=True, timeout=30
+        ).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    commit = lines[1].strip() if len(lines) > 1 else ""
+    return commit if re.fullmatch(r"[0-9a-f]{40}", commit) else None
+
+
+def open_vscode(rec: dict, status: dict | None = None) -> int:
     """The machine in VS Code (Remote-SSH, the repo folder). For an interactive agent not handed off yet, also
-    the Claude panel, with the task typed in but not sent."""
+    the Claude panel, with the task typed in but not sent, once VS Code is connected."""
     code = core.tool("code")
     if not code:
         raise core.CrabError(
@@ -374,17 +397,41 @@ def open_vscode(rec: dict) -> int:
     name, folder = rec["name"], rec["repo"]["dir"]
     remember_linux_host(name)
     subprocess.Popen([code, "--remote", f"ssh-remote+{alias(name)}", folder])
-    if _frontend(rec) != "vscode":
+    status = status or agent_status(rec)
+    if status.get("frontend") != "vscode":
         print(f"Opening {name} in VS Code ({folder}). Its terminal shows the agent (tmux).")
         return 0
     print(
-        f"Opening {name} in VS Code ({folder}), with the task typed into the Claude panel: check it and press "
-        "Enter. To leave the agent working on its own when you are done, type /handoff in the chat (or "
-        '"/handoff autonomous <what to do next>").'
+        f"Opening {name} in VS Code ({folder}). In a few seconds the task is typed into the Claude panel: check "
+        "it and press Enter. To leave the agent working on its own when you are done, type /handoff in the chat "
+        '(or "/handoff autonomous <what to do next>").',
+        flush=True,
     )
     time.sleep(VSCODE_URL_DELAY)
-    webbrowser.open(CLAUDE_URL + urllib.parse.quote(_task_prompt(name), safe=""))
+    prompt = _task_prompt(name, status.get("deps") or {})
+    webbrowser.open(CLAUDE_URL + urllib.parse.quote(prompt, safe=""))
     return 0
+
+
+def wait_for_handoff(name: str) -> bool:
+    """Wait until the interactive agent is handed off to tmux, one long ssh call at a time: True then; False when
+    the machine cannot be reached (or cannot tell), or the user closes the wait with Ctrl+C."""
+    print(
+        f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close).",
+        flush=True,
+    )
+    try:
+        frontend = "vscode"
+        while frontend != "tmux":
+            frontend = remote(name, ["wait-handoff", str(HANDOFF_WAIT)], timeout=HANDOFF_WAIT + 60).get(
+                "frontend"
+            )
+    except core.CrabError as e:
+        print(f"Stopped waiting: {e.message}")
+        return False
+    except KeyboardInterrupt:
+        return False
+    return True
 
 
 def remember_linux_host(name: str) -> None:
@@ -435,18 +482,31 @@ def _remember_linux_host_in_text(path: Path, host: str, live: set[str]) -> None:
         path.write_bytes((newline.join(kept) + (newline if end else "")).encode("utf-8"))
 
 
-def _frontend(rec: dict) -> str:
-    """Where the agent's Claude works now: the machine knows (a hand-off moves it to tmux), else the record."""
+def agent_status(rec: dict) -> dict:
+    """The machine's status; `frontend` (where the agent's Claude works now: a hand-off moves it to tmux) comes
+    from the record when the machine cannot be asked."""
     try:
-        return remote(rec["name"], ["status"], timeout=20).get("frontend") or "tmux"
+        st = remote(rec["name"], ["status"], timeout=20)
     except core.CrabError:
-        return "vscode" if rec.get("mode") == "interactive" else "tmux"
+        st = {}
+    return {
+        **st,
+        "frontend": st.get("frontend") or ("vscode" if rec.get("mode") == "interactive" else "tmux"),
+    }
 
 
-def _task_prompt(name: str) -> str:
-    """The brief, as the user would type it to Claude (the extension takes up to PROMPT_MAX characters)."""
+def _task_prompt(name: str, deps: dict) -> str:
+    """The brief, as the user would type it to Claude, with a note while the dependency install is not done (the
+    extension takes up to PROMPT_MAX characters: a longer brief is pointed to instead)."""
     brief = core.agents_dir() / f"{name}.brief.md"
     text = brief.read_text(encoding="utf-8").strip() if brief.exists() else ""
-    return (
-        text if 0 < len(text) <= PROMPT_MAX else "The task is in /root/BRIEF.md: read it, then let's start."
-    )
+    note = ""
+    if deps.get("state") in ("running", "failed"):
+        how = "are being installed" if deps["state"] == "running" else "could not be installed"
+        note = (
+            f"\n\n(The repo's dependencies {how} in the background with `{deps.get('command')}`: "
+            "`agent-status` shows how far it got. Wait for it, or fix it, rather than starting another install.)"
+        )
+    if not text or len(text) + len(note) > PROMPT_MAX:
+        text = "The task is in /root/BRIEF.md: read it, then let's start."
+    return text + note

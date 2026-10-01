@@ -41,6 +41,7 @@ class View:
     mode: str
     frontend: str | None  # where the agent's Claude runs: "tmux", or "vscode" (interactive, not handed off)
     settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
+    deps: dict | None  # the machine's install of the project's dependencies: state, command, exit_code
 
 
 def _status(rec: dict) -> dict | None:
@@ -210,6 +211,7 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         mode=rec.get("mode") or "",
         frontend=st.get("frontend") if st else last.get("frontend"),
         settings=rec.get("claude_settings") or {},
+        deps=st.get("deps") if st else None,
     )
 
 
@@ -442,11 +444,15 @@ def _vscode_hint(name: str) -> str:
 
 
 def open_one(name: str) -> int:
-    """Attach the terminal to a running agent, unless its Claude is not in tmux (an interactive agent in VS Code)."""
-    if (_status(core.load(name)) or {}).get("frontend") == "vscode":
-        raise core.CrabError(
-            f"{name} is an interactive agent with no terminal session. {_vscode_hint(name)}", 2
-        )
+    """Attach the terminal to a running agent. An interactive agent whose Claude works in VS Code is opened there,
+    and on a terminal this then waits for its hand-off and attaches to the agent in tmux."""
+    rec = core.load(name)
+    status = machine.agent_status(rec)
+    if status["frontend"] != "vscode":
+        return machine.open_one(name)
+    machine.open_vscode(rec, status)
+    if not machine.interactive() or not machine.wait_for_handoff(name):
+        return 0
     return machine.open_one(name)
 
 

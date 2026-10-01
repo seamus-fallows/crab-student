@@ -273,7 +273,7 @@ def vscode(isolated, monkeypatch, capsys):
 
 
 def extensions(path: Path) -> object:
-    return json.loads(path.read_text(encoding="utf-8")).get(setup.VSCODE_EXTENSIONS)
+    return json.loads(path.read_text(encoding="utf-8")).get(core.VSCODE_EXTENSIONS)
 
 
 def test_vscode_gets_the_claude_extension_on_machines_when_the_user_agrees(vscode):
@@ -281,24 +281,24 @@ def test_vscode_gets_the_claude_extension_on_machines_when_the_user_agrees(vscod
     path.write_text(json.dumps({"editor.fontSize": 14}))
     answers.append("")
     setup._vscode_step()
-    assert extensions(path) == [setup.CLAUDE_EXTENSION]
+    assert extensions(path) == [core.CLAUDE_EXTENSION]
     assert json.loads(path.read_text())["editor.fontSize"] == 14
     setup._vscode_step()  # (already there: nothing is asked)
 
 
 def test_vscode_extensions_the_user_already_lists_are_kept(vscode):
     path, answers = vscode
-    path.write_text(json.dumps({setup.VSCODE_EXTENSIONS: ["ms-python.python"]}))
+    path.write_text(json.dumps({core.VSCODE_EXTENSIONS: ["ms-python.python"]}))
     answers.append("y")
     setup._vscode_step()
-    assert extensions(path) == ["ms-python.python", setup.CLAUDE_EXTENSION]
+    assert extensions(path) == ["ms-python.python", core.CLAUDE_EXTENSION]
 
 
 def test_vscode_settings_are_created_when_there_are_none(vscode):
     path, answers = vscode
     answers.append("yes")
     setup._vscode_step()
-    assert extensions(path) == [setup.CLAUDE_EXTENSION]
+    assert extensions(path) == [core.CLAUDE_EXTENSION]
 
 
 @pytest.mark.parametrize("how", ["declined", "not a terminal", "with comments", "not a list"])
@@ -306,7 +306,7 @@ def test_vscode_settings_are_left_alone_unless_the_edit_is_safe_and_agreed(how, 
     path, answers = vscode
     texts = {
         "with comments": '{\n  // my settings\n  "editor.fontSize": 14,\n}\n',
-        "not a list": json.dumps({setup.VSCODE_EXTENSIONS: "anthropic.claude-code"}),
+        "not a list": json.dumps({core.VSCODE_EXTENSIONS: "anthropic.claude-code"}),
     }
     text = texts.get(how, "{}")
     path.write_text(text)
@@ -316,7 +316,7 @@ def test_vscode_settings_are_left_alone_unless_the_edit_is_safe_and_agreed(how, 
         monkeypatch.setattr(setup, "interactive", lambda: False)
     setup._vscode_step()
     assert path.read_text() == text
-    assert setup.CLAUDE_EXTENSION in capsys.readouterr().out  # (it says what to add instead)
+    assert core.CLAUDE_EXTENSION in capsys.readouterr().out  # (it says what to add instead)
 
 
 def test_without_vscode_nothing_is_created(isolated, capsys):

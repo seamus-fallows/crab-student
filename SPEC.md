@@ -89,7 +89,8 @@ Other fields: `req` (hours or null, gpus, gpu_ram_gb, gpu_models, cpus, ram_gb, 
 min_down_mbps), `mode` (`autonomous`, `colleague` or `interactive`; follows the machine's mode after a
 hand-off, 6.5), `claude_settings` (only the keys that are set: any of `model`, `effortLevel`,
 `modelSettings`, `fastMode`; 4.5), `max_dph` (the most per hour it may rent at without asking again: the setting, or
-the price approved), `fake_claude`, `secrets` (names), `session_id`, `repo` (slug, workspace, branch,
+the price approved), `fake_claude`, `setup` (`--setup`: the command that installs the project's dependencies, `none`,
+or null to detect it on the machine; 6.9), `secrets` (names), `session_id`, `repo` (slug, workspace, branch,
 start_sha, local_dir, carried, untracked, deploy_key `{id, file, created}` (4.3), branch_created, dir on
 the machine), `offers` (the pick and up to two fallbacks, in the order they are rented),
 `failed_offers`, `rents`, `strays` (unconfirmed rents the race left behind: `{label, offer_id, at}`),
@@ -207,7 +208,9 @@ NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 ```
 
 (`--json` gives `result_line`, `warnings`, `mode` and the rest.) An interactive agent's brief is the
-task as the user would type it to Claude Code.
+task as the user would type it to Claude Code. `--setup "COMMAND"` (also on a batch's `===` lines) replaces
+the machine's detection of how to install the project's dependencies, and `--setup none` skips the install
+(6.9); the plan shows which.
 
 ## 5. Agents once launched
 
@@ -220,8 +223,8 @@ task as the user would type it to Claude Code.
   "stopping"); needs you (colleague mode only); done (" (not all pushed)" when
   git is not clean); working (idle for 10+ minutes shows in the message); interactive (Claude is in
   VS Code and has no status of its own: the message says "in VS Code, active" or "in VS Code, idle
-  12m", from the conversation's activity). Views show the mode, the frontend (`tmux` or `vscode`) and
-  the record's `claude_settings`. When `status` reports a mode other than the record's (after a
+  12m", from the conversation's activity). Views show the mode, the frontend (`tmux` or `vscode`), the
+  record's `claude_settings` and (`status`) the dependency install (6.9). When `status` reports a mode other than the record's (after a
   hand-off), the record is updated. An agent whose status says it sent its stop call over 5 minutes ago
   while Vast still shows it running is stopped from here. For an agent not at work that has `strays`, a
   machine in Vast's list with one of those labels is destroyed and the label dropped.
@@ -244,41 +247,54 @@ task as the user would type it to Claude Code.
 - **5.4 open.** `open NAME` on an agent that is not ready follows its launch first: its log so far, then
   each new line (the status line rewritten in place on a terminal), until the launch ends (the phase is
   ready, failed or pending, or nobody holds the agent's lock for 3 looks in a row: cut off). Ready: it
-  goes on as below (VS Code, as with `--vscode`, for an interactive agent); otherwise it says what
-  happened and what to do (exit 1). On a ready agent: `agent-attach` over `ssh -t` (6.7); for an agent
-  whose frontend is `vscode` it refuses (exit 2) and says to use `--vscode`. `open --all`: the agents that are running, side by
-  side (Windows Terminal panes, else a local tmux session `agents` with prefix Ctrl-a); agents whose
-  frontend is `vscode` are skipped, with a note. `open NAME --vscode`: VS Code opens
-  `ssh-remote+crab-student-<name>` on the repo folder (needs the `code` command). When the machine's
-  `status` says the frontend is `vscode` (or, if it cannot be asked, the record's mode is interactive),
-  it then waits 5 s for the window and opens `vscode://anthropic.claude-code/open?prompt=<the brief,
-  URL-encoded>` through the OS URL handler, which fills the Claude panel without sending (a brief over
-  5,000 characters, the extension's limit, is replaced by a pointer to `/root/BRIEF.md`). The extension
-  is expected to be there already (`init` offers `anthropic.claude-code` in
-  `remote.SSH.defaultExtensions`).
+  goes on as below; otherwise it says what happened and what to do (exit 1). On a ready agent whose
+  frontend is `tmux`: `agent-attach` over `ssh -t` (6.7). When the frontend is `vscode` (the machine's
+  `status` says so, or, if it cannot be asked, the record's mode is interactive), it opens VS Code as
+  `--vscode` does; then, on a terminal, it says the agent works in VS Code and that the window becomes
+  the agent's terminal after `/handoff` (Ctrl+C closes it), and waits with one `cs.py wait-handoff 600`
+  call after another (it stops waiting, and says why, when the machine cannot be reached); once the
+  frontend is `tmux` it attaches as above. `open --all`: the agents that are running, side by side (Windows
+  Terminal panes, else a local tmux session `agents` with prefix Ctrl-a); agents whose frontend is
+  `vscode` are skipped, with a note. `open NAME --vscode`: VS Code opens
+  `ssh-remote+crab-student-<name>` on the repo folder (needs the `code` command). When the frontend is
+  `vscode` (an interactive agent), it waits a fixed 15 s for VS Code to connect, then opens
+  `vscode://anthropic.claude-code/open?prompt=<the brief, URL-encoded>` through the OS URL handler, which
+  fills the Claude panel without sending (a brief over 5,000 characters, the extension's limit, is
+  replaced by a pointer to `/root/BRIEF.md`). While the dependency install is running or failed (6.9;
+  its state comes from the same `cs.py status` call that told the frontend), a note saying so, and that
+  `agent-status` shows it, follows the brief. VS Code's server and the Claude extension are already on the
+  machine (6.9), so the connect is quick; nothing is printed for the user to paste.
 
 ## 6. The machine
 
 `D=/root/crab-student`; the repo at `/root/work/<repo>`; big outputs in `/root/outputs`; the brief
-copied to `/root/BRIEF.md`, where the agent reads it (the agent never needs `D`).
+moved to `/root/BRIEF.md`, where the agent reads it (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command: `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&
-<python> cs.py setup`, with a tar.gz on stdin: the machine code (`cs.py`, `fake_claude.py`, the agent's
-rules `rules.md` with `rules-autonomous.md` and `rules-colleague.md`, and `handoff.md`, the `/handoff`
-command), `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude,
-session_id, idle_minutes, notify_url, secret_names), `BRIEF.md`, `claude.env` and `secrets.env` (0600,
+<python> cs.py setup`, with a tar.gz on stdin: the machine code (`cs.py`; `fake_claude.py` only for `--fake-claude`; the
+agent's rules `rules.md` with `rules-autonomous.md` and `rules-colleague.md`; and `handoff.md`, the
+`/handoff` command), `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings,
+fake_claude, session_id, idle_minutes, notify_url, secret_names, setup (6.9), vscode_commit: the local
+VS Code's commit for an interactive agent when VS Code is installed here, else null (6.9)), `BRIEF.md`, `claude.env` and `secrets.env` (0600,
 `export K=<quoted>` lines), `deploy_key` (0600), `github_known_hosts`. Setup prints `step i/5 <label>`
-lines, then one JSON object `{"ok": true}` or `{"ok": false, "step", "label", "error"}`; on a machine
-where setup was done before, it only restarts the watchdog (`{"ok": true, "resumed": true}`). The
-steps: `environment` (the login profile `/etc/profile.d/agent.sh`, which sets PATH and sources
-`claude.env` and `secrets.env`; `agent-attach`, plus `agent-status` for autonomous and colleague or
-`agent-handoff` for interactive; git hooks; the git identity `<name> (Claude Code agent)
-<name@agent.invalid>`; Claude Code and tmux installed in the background), `repository` (clone the
-branch with the deploy key; `core.sshCommand`, `core.hooksPath`, a push refspec for the branch only),
-`agent settings` (`/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from `rules.md`
-with the mode's section; interactive: the `/handoff` command in `~/.claude/commands/`; all modes:
-`~/.claude/settings.json` and VS Code's machine-level settings (6.5), the onboarding and trust flags
-in `~/.claude.json`), `Claude Code` (wait for the installs; one tiny `claude -p` call checks the
+lines, then one JSON object `{"ok": true, "warnings": [...]}` or `{"ok": false, "step", "label", "error"}`;
+on a machine where setup was done before, it only restarts the watchdog (`{"ok": true, "resumed": true}`). The
+steps: `environment` (when `vscode_commit` is set, VS Code's server and the Claude extension installed by a
+job that setup waits for at its end (6.9); the login
+profile `/etc/profile.d/agent.sh`, which puts the repo's `.venv/bin`, `~/.local/bin` and
+`/venv/main/bin` first on PATH, sources `claude.env` and `secrets.env`, sets `VIRTUAL_ENV` to the repo's
+`.venv` when it exists, else `/venv/main`, and starts interactive shells that begin in the home folder
+in the repo; a line at the end of `~/.bashrc` runs it again, after any activation of the image's own;
+`agent-attach` and `agent-status`, plus `agent-handoff` for interactive; git hooks; the git identity
+`<name> (Claude Code agent) <name@agent.invalid>`; `.venv/`, `*.egg-info/` and `__pycache__/` added to
+git's global ignore file `~/.config/git/ignore`, so what the dependency install leaves in the repo is
+never committed; Claude Code and tmux installed by jobs that `Claude Code` waits for),
+`repository` (clone the branch with the deploy key; `core.sshCommand`, `core.hooksPath`, a push refspec
+for the branch only; the dependency install started in the background, 6.9), `agent settings`
+(`BRIEF.md` moved to `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from `rules.md`
+with the mode's section and the dependency install's state; interactive: `handoff.md` moved to
+`~/.claude/commands/` (other modes delete it); all modes: `~/.claude/settings.json` and VS Code's
+machine-level settings (6.5), the onboarding and trust flags in `~/.claude.json`), `Claude Code` (wait for the installs; one tiny `claude -p` call checks the
 token), `starting the agent` (refused without the container's Vast key; `setup-done`, the watchdog;
 autonomous and colleague: wait for the conversation file; interactive: nothing runs in tmux).
 
@@ -314,7 +330,7 @@ generic JSON POST carries `agent`, `event`, `message` and `text`).
 |---|---|---|---|
 | Claude runs | in tmux, from the start | in tmux, from the start | in VS Code's Claude panel, driven by the user |
 | rules (`~/.claude/CLAUDE.md`) | base + autonomous | base + colleague | none |
-| report template, `agent-status` | yes; `needs-you` is refused with a message to decide and record the decision in the report | yes | none |
+| report template, `agent-status` | yes; `needs-you` is refused with a message to decide and record the decision in the report | yes | no report; `agent-status` alone shows the machine (setting a state is refused) |
 | watchdog reminders | check-in | nudge, check-in | none |
 | `status` `frontend` | `tmux` | `tmux` | `vscode`, then `tmux` after hand-off |
 
@@ -330,7 +346,8 @@ mode come from the settings file, never from flags) with `--session-id <id> "<fi
 time and `--resume <id>` after (the first resume in a pane adds a restart note). A resume that fails at
 once starts a new session that reads the report. Environment: without `CLAUDECODE`, `CLAUDE_CODE_*`
 (a hand-off runs inside VS Code's Claude) and `CONTAINER_*`; with `IS_SANDBOX=1`,
-`DISABLE_AUTOUPDATER=1`, `AGENT_NAME`, `AGENT_BRANCH`, the token and task secrets. When Claude Code
+`DISABLE_AUTOUPDATER=1`, `AGENT_NAME`, `AGENT_BRANCH`, the token and task secrets, and the login
+profile's PATH and `VIRTUAL_ENV` (6.1). When Claude Code
 exits, the pane waits for Enter.
 
 `~/.claude/settings.json` (0600, every mode): `permissions.defaultMode: "bypassPermissions"` and deny
@@ -339,7 +356,9 @@ token and task secrets (so a Claude Code started by VS Code has them too); and `
 over them (only `model`, `effortLevel`, `modelSettings` and `fastMode` are taken). VS Code's
 machine-level settings (`~/.vscode-server/data/Machine/settings.json`, nothing in the user's repo):
 `claudeCode.initialPermissionMode: "bypassPermissions"`, `claudeCode.allowDangerouslySkipPermissions:
-true`, and a default terminal profile that runs `agent-attach`, so a new integrated terminal shows the
+true`, `python.defaultInterpreterPath` (the repo's `.venv/bin/python` when it exists, else
+`/venv/main/bin/python`, else `python3`; written again when the dependency install ends, and it
+overrides the user's own, a path on their computer), and a default terminal profile that runs `agent-attach`, so a new integrated terminal shows the
 tmux session `agent` once there is one. The login profile also exports the token for the VS Code
 server. Whether the extension picks these up is to be verified on a real machine.
 
@@ -349,7 +368,7 @@ Claude commit and push, then run `agent-handoff --session=${CLAUDE_SESSION_ID} <
 continue with>"` (default `colleague`), then end its turn. `agent-handoff` refuses once handed off. It
 takes the conversation's id from `--session=` (if that transcript exists), else `CLAUDE_CODE_SESSION_ID`
 (which Claude Code sets for its Bash commands), else the newest transcript. It writes that mode's rules
-to `~/.claude/CLAUDE.md`, installs `agent-status`, removes the `/handoff` command, picks a new session
+to `~/.claude/CLAUDE.md`, removes the `/handoff` command, picks a new session
 id (`D/session_id`), writes `handoff.json` `{mode, from, prompt, at}` (the machine's mode is now its
 mode), wakes the watchdog and waits up to 90 s for Claude in tmux. The watchdog starts `claude --resume
 <from> --fork-session --session-id <new id> "<hand-off prompt>"`, so the tmux agent has the whole
@@ -373,7 +392,9 @@ no note (and puts the note file back as it was).
 **6.7 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
 prints `{"error": ...}` and exits 1): `status` (name, mode, frontend, agent {state, message, at} (`{}`
 until the agent sets a status, so always for an interactive agent in VS Code), idle_seconds,
-used_hours, stopping, stop_reason, stop_sent_for, git {branch, head, dirty, unpushed}); `save --reason R
+used_hours, stopping, stop_reason, stop_sent_for, git {branch, head, dirty, unpushed}, deps {state,
+command, exit_code} (6.9)); `wait-handoff SECONDS` (waits until the frontend is `tmux` and the tmux session runs, or the
+time is up: {frontend}); `save --reason R
 [--final]` (committed, pushed, skipped, dirty, unpushed, error, note, note_committed); `check` (save's
 fields plus outputs {files, bytes, sample} and large_files); `send` (text on stdin, typed into the pane
 as one bracketed paste; refused while Claude is in VS Code). `open` runs `agent-attach` with `ssh -t`
@@ -381,9 +402,40 @@ as one bracketed paste; refused while Claude is in VS Code). `open` runs `agent-
 There is no command that changes how long a machine may run.
 
 **6.8 The agent's tools.** `agent-status working|needs-you|done|failed "<message>"` (autonomous and
-colleague) writes `agent.json`; `done` is refused until `agent-runs/<name>/REPORT.md` is committed,
+colleague) writes `agent.json`; `agent-status` alone (every mode) shows the status, the dependency install
+(6.9: running for how long, done, failed with the end of its log, cut off by a stop, or none) and the
+machine time; `done` is refused until `agent-runs/<name>/REPORT.md` is committed,
 nothing is uncommitted and nothing is unpushed, and `needs-you` is refused in autonomous mode.
 `agent-handoff` and `/handoff` (interactive) are 6.5. Hooks: `pre-commit` refuses staged lines
 containing a secret's value (8+ characters) and files over 50 MB; `pre-push` refuses any ref but
 `refs/heads/<branch>`, and deleting it. The agent's Claude Code settings deny the obvious ways around
 the hooks.
+
+**6.9 Dependency install and VS Code's server.** The dependency install is the one background job: started
+by setup and never waited for, so nothing in setup or the launch fails because of it, and setup running again
+leaves it alone when it is done or under way. VS Code's server is a setup job: waited for, and only ever a
+warning.
+
+- **The dependency install** (`cs.py deps`, started in the `repository` step; output in
+  `logs/deps.log`). The command is the config's `setup`, or, when it is null, the first that fits the
+  repo: `uv.lock`, or `[tool.uv...]` in `pyproject.toml` -> uv installed with its official installer if
+  missing, then `uv sync`; `[project]` in `pyproject.toml` -> `<python> -m pip install -e .`;
+  `requirements*.txt` -> `<python> -m pip install -r` each; `setup.py` -> `<python> -m pip install -e .`.
+  `<python>` is `/venv/main/bin/python` when it exists, else `python3`. `setup` `none`, or nothing that
+  fits: no install (`{"state": "none", "skipped"}`). It runs `bash -c` in the repo with the agent's
+  environment (6.5) without `VIRTUAL_ENV`, plus `PIP_ROOT_USER_ACTION=ignore`, `PIP_PROGRESS_BAR=off` and
+  `TERM=dumb`. `D/deps.json`: `{state: running|done|failed|none, command, started, finished,
+  exit_code}`; a `running` older than the container start was cut off by a stop and is not run again by
+  itself (`agent-status` says to run it). When it ends, VS Code's interpreter path is written again
+  (6.5).
+- **VS Code's server** (only for an interactive agent, when VS Code is installed on the user's computer: the
+  launch puts its commit, the second line of `code --version`, in the config as `vscode_commit`, else null;
+  output in `logs/vscode.log`). In the `environment` step a job, started next to the Claude Code install,
+  downloads `https://update.code.visualstudio.com/commit:<commit>/server-linux-<arch>/stable` (`<arch>` x64
+  or arm64) and unpacks it straight into `~/.vscode-server/cli/servers/Stable-<commit>/server`, where
+  Remote-SSH looks for it (skipped when `bin/code-server` is already there), then installs
+  `anthropic.claude-code` with the server's own CLI (`bin/code-server --install-extension ... --extensions-dir
+  ~/.vscode-server/extensions`). Setup waits for it, up to 10 minutes, at the very end, before it prints
+  its result. A failure (or the wait running out) does not fail setup: it is a warning in the result's
+  `warnings`, which the launch prints as a `Warning:` progress line and returns in its own `warnings`, and
+  VS Code then installs its server itself when first opened, as it always does.

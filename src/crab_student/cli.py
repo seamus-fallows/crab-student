@@ -175,7 +175,14 @@ def _launch_args(args: argparse.Namespace, name: str, brief: str) -> launch.Laun
         model=args.model,
         effort=args.effort,
         fast=args.fast,
+        setup=_setup(args.setup),
     )
+
+
+def _setup(text: str | None) -> str | None:
+    if text is not None and not text.strip():
+        raise core.CrabError('--setup needs a command (or "none" for no dependency install).', 2)
+    return text.strip() if text else None
 
 
 def _agent_args(p: argparse.ArgumentParser) -> None:
@@ -195,6 +202,12 @@ def _agent_args(p: argparse.ArgumentParser) -> None:
         "--fast",
         action=argparse.BooleanOptionalAction,
         help="fast mode on or off (default: the setting, else your own)",
+    )
+    p.add_argument(
+        "--setup",
+        metavar="COMMAND",
+        help="how the machine installs the project's dependencies, in the background (default: uv sync, pip "
+        "install -e . or pip install -r requirements*.txt, as the repo says; none: no install)",
     )
 
 
@@ -365,6 +378,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
     say(f"  repo      {v.repo}, branch {v.branch}{pushed}")
+    if deps := _deps_text(v.deps):
+        say(f"  deps      {deps}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
         say(
@@ -388,6 +403,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deps_text(deps: dict | None) -> str:
+    """The machine's dependency install, as status shows it."""
+    state, command = (deps or {}).get("state"), (deps or {}).get("command")
+    return {
+        "running": f"installing in the background: {command}",
+        "done": f"installed: {command}",
+        "failed": f"the install failed (exit code {(deps or {}).get('exit_code')}): {command}",
+        "none": "none installed",
+    }.get(state or "", "")
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     if args.all == bool(args.name):
         raise core.CrabError("give an agent's NAME, or --all.", 2)
@@ -407,7 +433,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError(f"{args.name} is not running. Start it first: crab-student start {args.name}")
     if not live:
         raise core.CrabError("no agent is running.")
-    if args.vscode or (followed and live[0]["mode"] == "interactive"):
+    if args.vscode:
         for r in live:
             machine.open_vscode(r)
         return 0
@@ -475,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
         "open",
         cmd_open,
         "attach to an agent's Claude Code in this terminal (detach: Ctrl-b d); while it is launching, follow the "
-        "launch first",
+        "launch first; an interactive agent opens in VS Code, and this terminal attaches after its /handoff",
     )
     c.add_argument("name", nargs="?")
     c.add_argument("--all", action="store_true", help="every running agent side by side")

@@ -8,6 +8,8 @@ from __future__ import annotations
 import glob
 import json
 import os
+import platform
+import re
 import shlex
 import shutil
 import stat
@@ -25,7 +27,14 @@ OUTPUTS = ROOT / "outputs"
 BIN = Path(os.environ.get("CS_BIN", "/usr/local/bin"))
 PROFILE_D = Path(os.environ.get("CS_PROFILE_D", "/etc/profile.d"))
 CLAUDE = ROOT / ".local" / "bin" / "claude"
-BRIEF = ROOT / "BRIEF.md"  # (a copy of D/BRIEF.md where the agent reads it, outside the tool's folder)
+BRIEF = ROOT / "BRIEF.md"  # (where the agent reads its brief, outside the tool's folder)
+VENV = Path(os.environ.get("CS_VENV", "/venv/main"))  # the image's Python environment, when it has one
+VSCODE_HOME = ROOT / ".vscode-server"  # (VS Code's server, its extensions and its machine settings)
+VSCODE_DOWNLOAD = "https://update.code.visualstudio.com/commit:%s/%s/stable"
+CLAUDE_EXTENSION = "anthropic.claude-code"
+# What installing the dependencies leaves in the repo, ignored machine-wide so that neither the autosave nor
+# the agent commits it (and agent-status done is not refused for it).
+INSTALL_LEFTOVERS = (".venv/", "*.egg-info/", "__pycache__/")
 TICK = float(os.environ.get("CS_TICK_SECONDS", "60"))
 PY = sys.executable or "python3"
 CPU_BUSY_CORES = 0.25
@@ -111,7 +120,7 @@ def cfg() -> dict:
 
 def write(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))  # (setup and a background job may race)
     tmp.write_text(text)
     os.chmod(str(tmp), mode)
     os.replace(str(tmp), str(path))
@@ -190,14 +199,37 @@ def inherited(key: str) -> bool:
 
 
 def agent_env(c: dict) -> dict:
-    """Claude Code's environment in tmux, with the token and the task's secrets."""
+    """Claude Code's environment in tmux, with the token, the task's secrets and the Python environment."""
     env = {k: v for k, v in os.environ.items() if not inherited(k)}
-    env["PATH"] = "%s/.local/bin:/venv/main/bin:%s" % (ROOT, env.get("PATH", "/usr/bin:/bin"))
+    env["PATH"] = "%s:%s" % (path_head(c), env.get("PATH", "/usr/bin:/bin"))
+    env.pop("VIRTUAL_ENV", None)
+    venv = active_venv(c)
+    if venv:
+        env["VIRTUAL_ENV"] = str(venv)
     env.update(IS_SANDBOX="1", DISABLE_AUTOUPDATER="1", AGENT_NAME=c["name"], AGENT_BRANCH=c["branch"])
     env.setdefault("TERM", "xterm-256color")
     env.update(read_env_file(D / "claude.env"))
     env.update(read_env_file(D / "secrets.env"))
     return env
+
+
+def path_head(c: dict) -> str:
+    """What goes before PATH: the repo's own .venv (once the install makes one; until then the shell skips
+    it), the tools installed for root (Claude Code, uv), the image's Python environment."""
+    return "%s/.venv/bin:%s/.local/bin:%s/bin" % (c["repo_dir"], ROOT, VENV)
+
+
+def active_venv(c: dict):
+    """The Python environment shells use: the repo's .venv once there is one, else the image's (or None)."""
+    for venv in (Path(c["repo_dir"]) / ".venv", VENV):
+        if (venv / "bin" / "python").exists():
+            return venv
+    return None
+
+
+def python() -> str:
+    """The Python that installs the repo's packages: the image's environment's, else the system's."""
+    return str(VENV / "bin" / "python") if (VENV / "bin" / "python").exists() else "python3"
 
 
 def report_path(c: dict) -> str:
@@ -243,7 +275,22 @@ def cmd_setup() -> int:
             with open(str(D / "logs" / "setup.log"), "a") as f:
                 f.write("step %d (%s) failed: %s\n" % (i, label, e))
             return out({"ok": False, "step": i, "label": label, "error": str(e)})
-    return out({"ok": True})
+    return out({"ok": True, "warnings": vscode_server_ready(jobs)})
+
+
+def vscode_server_ready(jobs: dict) -> list:
+    """Wait for VS Code's server to be in place: a warning when it is not (VS Code then installs it itself)."""
+    job = jobs.get("VS Code")
+    if job is None:
+        return []
+    try:
+        if job.wait(600) == 0:
+            return []
+    except subprocess.TimeoutExpired:
+        job.kill()
+    tail = last_line((D / "logs" / "vscode.log").read_text(errors="replace"))
+    return ["VS Code's server could not be put on the machine ahead of time (%s): VS Code installs it itself "
+            "when you first open the agent, which takes a minute." % tail]  # fmt: skip
 
 
 def _script(path: Path, command: str) -> None:
@@ -252,30 +299,68 @@ def _script(path: Path, command: str) -> None:
 
 def setup_environment(c: dict, jobs: dict) -> None:
     (D / "logs").mkdir(parents=True, exist_ok=True)
-    # (login shells, VS Code's terminals among them, get the tools, the token and the task's secrets; the
-    # secrets stay in their 0600 files)
-    profile = "export PATH=%s/.local/bin:/venv/main/bin:$PATH IS_SANDBOX=1 DISABLE_AUTOUPDATER=1\n" % ROOT
-    profile += 'for f in %s/claude.env %s/secrets.env; do [ -r "$f" ] && . "$f"; done\n' % (D, D)
-    write(PROFILE_D / "agent.sh", profile)
+    write_profile(c)
     write(ROOT / ".no_auto_tmux", "")
     write(ROOT / ".tmux.conf", TMUX_CONF.format(name=c["name"]))
     _script(BIN / "agent-attach", "%s/cs.py attach" % D)
+    _script(BIN / "agent-status", "%s/cs.py declare" % D)
     if machine_mode(c) == "interactive":
         _script(BIN / "agent-handoff", "%s/cs.py handoff" % D)
-    else:
-        _script(BIN / "agent-status", "%s/cs.py declare" % D)
     for hook in ("pre-commit", "pre-push"):
         _script(D / "hooks" / hook, "%s/cs.py hook %s" % (D, hook))
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     run(["git", "config", "--global", "user.name", "%s (Claude Code agent)" % c["name"]], check=True)
     run(["git", "config", "--global", "user.email", "%s@agent.invalid" % c["name"]], check=True)
+    ignore = ROOT / ".config" / "git" / "ignore"  # (git's own global ignore file)
+    kept = ignore.read_text().splitlines() if ignore.exists() else []
+    write(ignore, "\n".join(kept + [x for x in INSTALL_LEFTOVERS if x not in kept]) + "\n")
     logs = open(str(D / "logs" / "install.log"), "a")  # noqa: SIM115 - the install jobs write to it
     if not c["fake_claude"] and not CLAUDE.exists():
         cmd = "curl -fsSL https://claude.ai/install.sh | bash || (sleep 5; curl -fsSL https://claude.ai/install.sh | bash)"
         jobs["Claude Code"] = subprocess.Popen(["bash", "-c", cmd], stdout=logs, stderr=subprocess.STDOUT)
+    if c.get("vscode_commit"):  # (an interactive agent's VS Code finds its server in place on the first open)
+        with open(str(D / "logs" / "vscode.log"), "a") as vlog:
+            cmd = vscode_server_command(c["vscode_commit"])
+            jobs["VS Code"] = subprocess.Popen(["bash", "-c", cmd], stdout=vlog, stderr=subprocess.STDOUT)
     if not shutil.which("tmux"):
-        cmd = "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux"
+        cmd = "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=300 tmux"
         jobs["tmux"] = subprocess.Popen(["bash", "-c", cmd], stdout=logs, stderr=subprocess.STDOUT)
+
+
+def write_profile(c: dict) -> None:
+    """The login profile (VS Code's terminals and tmux's shells are login shells): the tools, the token and the
+    task's secrets (which stay in their 0600 files), the Python environment, and interactive shells starting in
+    the repo. ~/.bashrc runs it again last, since an image's own .bashrc may activate its environment."""
+    repo, head = shlex.quote(c["repo_dir"]), path_head(c)
+    lines = [
+        "export IS_SANDBOX=1 DISABLE_AUTOUPDATER=1",
+        'for f in %s/claude.env %s/secrets.env; do [ -r "$f" ] && . "$f"; done' % (D, D),
+        'case "$PATH" in "%s:"*) ;; *) export PATH="%s:$PATH" ;; esac' % (head, head),
+        "if [ -x %s/.venv/bin/python ]; then export VIRTUAL_ENV=%s/.venv" % (repo, repo),
+        "elif [ -x %s/bin/python ]; then export VIRTUAL_ENV=%s; fi" % (VENV, VENV),
+        'case $- in *i*) if [ "$PWD" = "$HOME" ] && [ -d %s ]; then cd %s; fi ;; esac' % (repo, repo),
+    ]
+    write(PROFILE_D / "agent.sh", "\n".join(lines) + "\n")
+    profile = PROFILE_D / "agent.sh"
+    bashrc, line = ROOT / ".bashrc", "[ -r %s ] && . %s" % (profile, profile)
+    text = bashrc.read_text() if bashrc.exists() else ""
+    if line not in text:
+        write(bashrc, text + ("\n" if text and not text.endswith("\n") else "") + line + "\n")
+
+
+def vscode_server_command(commit: str) -> str:
+    """Download the server of the user's VS Code (`commit`) into where Remote-SSH looks for it, and install the
+    Claude extension with the server's own CLI."""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return "echo 'not a VS Code commit'; exit 1"
+    arch = "arm64" if platform.machine() in ("aarch64", "arm64") else "x64"
+    server = shlex.quote(str(VSCODE_HOME / "cli" / "servers" / ("Stable-" + commit) / "server"))
+    return (
+        "set -o pipefail; mkdir -p %s && ([ -x %s/bin/code-server ] || curl -fsSL --retry 3 %s | tar -xz -C %s "
+        "--strip-components=1) && %s/bin/code-server --install-extension %s --extensions-dir %s"
+        % (server, server, VSCODE_DOWNLOAD % (commit, "server-linux-" + arch), server, server, CLAUDE_EXTENSION,
+           shlex.quote(str(VSCODE_HOME / "extensions")))
+    )  # fmt: skip
 
 
 def git_ssh() -> str:
@@ -298,26 +383,46 @@ def setup_repository(c: dict, jobs: dict) -> None:
     git("config", "core.sshCommand", git_ssh(), cwd=repo)
     git("config", "core.hooksPath", str(D / "hooks"), cwd=repo)
     git("config", "remote.origin.push", "refs/heads/%s:refs/heads/%s" % (c["branch"], c["branch"]), cwd=repo)
+    start_deps(c)
 
 
 def setup_settings(c: dict, jobs: dict) -> None:
     """The agent's rules (an interactive agent gets the /handoff command instead: the user drives it), Claude
     Code's and VS Code's settings for the machine, and Claude Code's onboarding and trust flags."""
-    write(BRIEF, (D / "BRIEF.md").read_text())
     mode = machine_mode(c)
+    move(D / "BRIEF.md", BRIEF)  # (moved, not copied: one brief on the machine)
     if mode == "interactive":
-        write(ROOT / ".claude" / "commands" / "handoff.md", (D / "handoff.md").read_text())
+        move(D / "handoff.md", ROOT / ".claude" / "commands" / "handoff.md")
     else:
+        (D / "handoff.md").unlink(missing_ok=True)
         write_rules(c, mode)
     write_claude_settings(c)
-    vscode = ROOT / ".vscode-server" / "data" / "Machine" / "settings.json"
-    write(vscode, json.dumps(dict(read_json(vscode, {}), **VSCODE_SETTINGS), indent=2))
+    write_vscode_settings(c)
     state = read_json(ROOT / ".claude.json", {})
     state.update(hasCompletedOnboarding=True, bypassPermissionsModeAccepted=True)
     state.setdefault("projects", {}).setdefault(c["repo_dir"], {}).update(
         hasTrustDialogAccepted=True, hasCompletedProjectOnboarding=True
     )
     write(ROOT / ".claude.json", json.dumps(state, indent=2), 0o600)
+
+
+def move(src: Path, dest: Path) -> None:
+    """An uploaded file to where it is used (a setup that runs again finds it there already)."""
+    if src.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(src), str(dest))
+
+
+def write_vscode_settings(c: dict) -> None:
+    """VS Code's settings for this machine, with the Python it should use: the repo's .venv once the install
+    made one, else the image's (the user's own interpreter path, from their computer, means nothing here)."""
+    path = VSCODE_HOME / "data" / "Machine" / "settings.json"
+    venv = active_venv(c)
+    settings = dict(read_json(path, {}), **VSCODE_SETTINGS)
+    settings["python.defaultInterpreterPath"] = (
+        str(venv / "bin" / "python") if venv else shutil.which("python3") or "python3"
+    )
+    write(path, json.dumps(settings, indent=2))
 
 
 def write_rules(c: dict, mode: str) -> None:
@@ -331,6 +436,7 @@ def write_rules(c: dict, mode: str) -> None:
         "report": report_path(c),
         "idle_minutes": str(c["idle_minutes"]),
         "secrets": ", ".join(c["secret_names"]) or "none",
+        "dependencies": deps_rule(),
     }
     rules = (D / "rules.md").read_text()
     for key, value in fill.items():
@@ -356,6 +462,8 @@ def write_claude_settings(c: dict) -> None:
 def setup_claude(c: dict, jobs: dict) -> None:
     deadline = time.time() + 180
     for name, job in jobs.items():
+        if name == "VS Code":  # (not needed by the agent: setup waits for it last, and never fails for it)
+            continue
         try:
             job.wait(max(1, deadline - time.time()))
         except subprocess.TimeoutExpired:
@@ -392,6 +500,136 @@ def setup_start(c: dict, jobs: dict) -> None:
         raise RuntimeError(
             "Claude Code did not start its conversation. Its screen shows:\n" + "\n".join(screen)
         )
+
+
+# ---- background jobs: the repo's dependencies, VS Code's server ----------------------------------
+
+
+def deps_command(c: dict) -> str:
+    """How the repo's dependencies are installed: the launch's --setup, else what the repo uses (the first that
+    fits: uv, a pyproject.toml project, requirements files, setup.py); "" for nothing."""
+    given = c.get("setup") or ""
+    if given:
+        return "" if given == "none" else given
+    repo, py = Path(c["repo_dir"]), shlex.quote(python())
+    try:
+        pyproject = (repo / "pyproject.toml").read_text()
+    except OSError:
+        pyproject = ""
+    if (repo / "uv.lock").exists() or re.search(r"(?m)^\[tool\.uv[\].]", pyproject):
+        return "(command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && uv sync"
+    if re.search(r"(?m)^\[project\]", pyproject):
+        return "%s -m pip install -e ." % py
+    reqs = sorted(p.name for p in repo.glob("requirements*.txt"))
+    if reqs:
+        return " && ".join("%s -m pip install -r %s" % (py, shlex.quote(r)) for r in reqs)
+    if (repo / "setup.py").exists():
+        return "%s -m pip install -e ." % py
+    return ""
+
+
+def read_deps() -> dict:
+    """The dependency install: state (running, done, failed, none), command, started, finished, exit_code."""
+    d = read_json(D / "deps.json", {})
+    return d if isinstance(d, dict) else {}
+
+
+def deps_cut_off(d: dict) -> bool:
+    """An install that was running when the machine stopped (it does not run again by itself)."""
+    return d.get("state") == "running" and d.get("started", 0) < booted_at()
+
+
+def start_deps(c: dict) -> None:
+    """Start installing the repo's dependencies in the background; nothing waits for it. A setup that runs again
+    leaves one that is done or under way alone."""
+    d = read_deps()
+    if d.get("state") == "done" or (d.get("state") == "running" and not deps_cut_off(d)):
+        return
+    command = deps_command(c)
+    if not command:
+        write(D / "deps.json", json.dumps({"state": "none", "skipped": c.get("setup") == "none"}))
+        return
+    write(D / "deps.json", json.dumps({"state": "running", "command": command, "started": time.time()}))
+    spawn("deps", "deps.log")
+
+
+def cmd_deps() -> int:
+    """The background install: run the command, record how it ended, point VS Code at the environment."""
+    c, d = cfg(), read_deps()
+    env = dict(agent_env(c), PIP_ROOT_USER_ACTION="ignore", PIP_PROGRESS_BAR="off", TERM="dumb")
+    env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"  # (pip with the system's python3, on an image without /venv/main)
+    env.pop("VIRTUAL_ENV", None)  # (uv sync would say it is not the project's environment)
+    log("installing the dependencies: " + d["command"])
+    rc = subprocess.call(["bash", "-c", d["command"]], cwd=c["repo_dir"], env=env, stdin=subprocess.DEVNULL)
+    d.update(state="failed" if rc else "done", exit_code=rc, finished=time.time())
+    write(D / "deps.json", json.dumps(d))
+    log("%s (exit code %d)" % (d["state"], rc))
+    write_vscode_settings(c)
+    return 0
+
+
+def deps_log_tail(n: int) -> list:
+    try:
+        lines = [x.rstrip() for x in (D / "logs" / "deps.log").read_text(errors="replace").splitlines()]
+    except OSError:
+        return []
+    return ["  " + x for x in lines if x.strip()][-n:]
+
+
+def deps_lines() -> list:
+    """What agent-status says about the install of the repo's dependencies."""
+    d = read_deps()
+    state, command = d.get("state"), d.get("command", "")
+    if state == "none":
+        why = "skipped at launch" if d.get("skipped") else "no install method recognised in the repo"
+        return ["dependencies: none were installed for you (%s)" % why]
+    if state == "done":
+        return ["dependencies: installed (%s)" % command]
+    if state == "failed":
+        head = "dependencies: the install failed with exit code %s (%s). The end of its log:"
+        return [head % (d.get("exit_code"), command), *deps_log_tail(12)]
+    if deps_cut_off(d):
+        return ["dependencies: the install (%s) was cut off when the machine stopped: run it again" % command]
+    if state == "running":
+        head = (
+            "dependencies: still being installed in the background, for %d min so far (%s). Wait for it rather "
+            "than starting a second install. The end of its log:"
+        )
+        return [head % ((time.time() - d.get("started", time.time())) / 60, command), *deps_log_tail(3)]
+    return []
+
+
+def deps_rule() -> str:
+    """The rules' line about the dependencies, as things stand when the rules are written."""
+    d = read_deps()
+    state, command = d.get("state"), d.get("command", "")
+    if state == "running":
+        return (
+            "The repo's dependencies are being installed in the background (`%s`). `agent-status` shows whether "
+            "that is still running, finished or failed, with the end of its log: wait for it (or fix it if it "
+            "failed) rather than starting a second install." % command
+        )
+    if state == "done":
+        return "The repo's dependencies were installed when the machine was set up (`%s`)." % command
+    if state == "failed":
+        return (
+            "Installing the repo's dependencies (`%s`) failed: `agent-status` shows the end of its log. Fix that "
+            "first." % command
+        )
+    return (
+        "Only Claude Code and tmux were installed for you. Set up what the task needs the way the repo does it "
+        "(`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README)."
+    )
+
+
+def cmd_wait_handoff(args: list) -> int:
+    """wait-handoff SECONDS: until the agent was handed off and runs in tmux, or the time is up."""
+    c, deadline = cfg(), time.time() + float(args[0] if args else 0)
+    while time.time() < deadline and not (
+        frontend(c) == "tmux" and tmux("has-session", "-t", SESSION).returncode == 0
+    ):
+        time.sleep(2)
+    return out({"frontend": frontend(c)})
 
 
 # ---- Claude Code in tmux -------------------------------------------------------------------------
@@ -625,11 +863,16 @@ def booted_at() -> float:
 
 def spawn_watchdog() -> None:
     """Start the watchdog unless it runs (setup does this; status does it too, so a dead watchdog comes back)."""
-    if not (D / "setup-done").exists() or not _lock_free(D / "watch.lock"):
-        return
-    with open(str(D / "logs" / "watch.log"), "a") as logs:
+    if (D / "setup-done").exists() and _lock_free(D / "watch.lock"):
+        spawn("watch", "watch.log")
+
+
+def spawn(command: str, logname: str) -> None:
+    """`cs.py <command>` in the background, in a session of its own (it outlives the ssh call that started it),
+    its output going to logs/<logname>."""
+    with open(str(D / "logs" / logname), "a") as logs:
         subprocess.Popen(
-            [PY, str(D / "cs.py"), "watch"],
+            [PY, str(D / "cs.py"), command],
             stdout=logs,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -993,6 +1236,7 @@ def cmd_status() -> int:
             "stop_reason": st["stop_reason"],
             "stop_sent_for": int(now - st["stop_sent_at"]) if st["stop_sent_at"] else None,
             "git": git_state(c),
+            "deps": {k: v for k, v in read_deps().items() if k in ("state", "command", "exit_code")},
         }
     )
 
@@ -1015,12 +1259,20 @@ def cmd_declare(args: list) -> int:
     c = cfg()
     if not args:
         a, st = read_agent(), load_state()
-        print("status: %s - %s" % (a.get("state", "not set"), a.get("message", "")))
+        if machine_mode(c) != "interactive":
+            print("status: %s - %s" % (a.get("state", "not set"), a.get("message", "")))
+        for line in deps_lines():
+            print(line)
         print(
             "the machine has run for %s since it was started; it stops after %d min without activity"
             % (fmt_hours(st["used_seconds"] / 3600), c["idle_minutes"])
         )
         return 0
+    if machine_mode(c) == "interactive":
+        print(
+            "This session is driven by the user, so it has no status to set (agent-status alone shows the machine)."
+        )
+        return 1
     state, message = args[0], " ".join(" ".join(args[1:]).split())[:120]
     if state not in ("working", "needs-you", "done", "failed"):
         print('usage: agent-status working|needs-you|done|failed "<one-line message>"', file=sys.stderr)
@@ -1062,7 +1314,6 @@ def cmd_handoff(args: list) -> int:
         print("No conversation to hand over was found in ~/.claude/projects.", file=sys.stderr)
         return 1
     write_rules(c, mode)
-    _script(BIN / "agent-status", "%s/cs.py declare" % D)
     (ROOT / ".claude" / "commands" / "handoff.md").unlink(missing_ok=True)
     write(D / "session_id", str(uuid.uuid4()), 0o600)
     save_handoff({"mode": mode, "from": sid, "prompt": prompt, "at": int(time.time())})
@@ -1165,6 +1416,8 @@ def main(argv: list) -> int:
         "declare": lambda: cmd_declare(args),
         "handoff": lambda: cmd_handoff(args),
         "hook": lambda: cmd_hook(args[0], args[1:]),
+        "deps": cmd_deps,
+        "wait-handoff": lambda: cmd_wait_handoff(args),
     }
     if cmd not in handlers:
         print("usage: cs.py " + "|".join(handlers), file=sys.stderr)

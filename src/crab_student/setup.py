@@ -15,8 +15,6 @@ from crab_student import core, github, vast
 DATA = Path(__file__).parent / "data"
 OLD_LAUNCHER_AGENT = "agents/crab-student-launcher.md"  # (in ~/.claude; init used to install it)
 FORK_VERSION = (2, 1, 232)  # (the first Claude Code whose forks the skill starts the launcher with)
-VSCODE_EXTENSIONS = "remote.SSH.defaultExtensions"
-CLAUDE_EXTENSION = "anthropic.claude-code"
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{60,}")
 
 # Allowed without asking: reading, and actions within the user's price rule (a launch that would need a
@@ -264,21 +262,21 @@ def _vscode_step() -> None:
     if not path.parent.exists():
         _say("VS Code", "not found (only needed for open --vscode, which uses its Remote - SSH extension)")
         return
-    hint = f'add "{VSCODE_EXTENSIONS}": ["{CLAUDE_EXTENSION}"] to {path}'
+    hint = f'add "{core.VSCODE_EXTENSIONS}": ["{core.CLAUDE_EXTENSION}"] to {path}'
     settings = core.read_vscode_settings(path)
-    current = settings.get(VSCODE_EXTENSIONS) if settings is not None else None
+    current = settings.get(core.VSCODE_EXTENSIONS) if settings is not None else None
     if settings is None or (current is not None and not isinstance(current, list)):
         _say("VS Code", f"could not edit {path} safely. So the Claude extension installs on machines: {hint}")
-    elif CLAUDE_EXTENSION in (current or []):
+    elif core.CLAUDE_EXTENSION in (current or []):
         _say("VS Code", "ok - the Claude extension installs on machines by itself")
     elif interactive() and _confirm(
-        f"  VS Code     Install the Claude extension on machines by itself ({VSCODE_EXTENSIONS})? [Y/n] "
+        f"  VS Code     Install the Claude extension on machines by itself ({core.VSCODE_EXTENSIONS})? [Y/n] "
     ):
-        settings[VSCODE_EXTENSIONS] = [*(current or []), CLAUDE_EXTENSION]
+        settings[core.VSCODE_EXTENSIONS] = [*(current or []), core.CLAUDE_EXTENSION]
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(settings, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
         core.replace(tmp, path)
-        _say("VS Code", f"ok - added {VSCODE_EXTENSIONS} to {path}")
+        _say("VS Code", f"ok - added {core.VSCODE_EXTENSIONS} to {path}")
     else:
         _say("VS Code", f"to have the Claude extension installed on machines by itself, {hint}")
 

@@ -57,14 +57,18 @@ they say no: `crab-student decline NAME`.
 
 ## Interactive agents
 
-When the machine is ready, the launch's window opens VS Code on it with the Claude panel filled in
-with the task (not yet sent). If it did not (no window, or they closed it), they run the command the
-result line ends with, `crab-student open NAME --vscode`, in their own terminal. They work with the
-agent there. When they are done and want it to keep going on its own, they
-type `/handoff` in that chat (optionally `autonomous` or `colleague`, and what to continue with), or
-ask for a hand-off in words. The agent commits, pushes and carries on in tmux with the whole
-conversation, after which they can close VS Code and use everything below. Before that, `send` and
-`open NAME` do not apply, and `status` shows the agent as `interactive`.
+When the machine is ready, the launch's window opens VS Code on it and, a few seconds later,
+fills in the Claude panel with the task (not yet sent). The window then stays open and becomes the agent's terminal after the
+hand-off. If no window opened (or they closed it), they run the command the result line ends with,
+`crab-student open NAME --vscode`, in their own terminal (it waits about 15 seconds, so if you run it
+yourself, a Bash timeout of 60000 ms is enough). They work with the agent there. When they are done and
+want it to keep going on its own, they type `/handoff` in that chat (optionally `autonomous` or
+`colleague`, and what to continue with), or ask for a hand-off in words. The agent commits, pushes and
+carries on in tmux with the whole conversation, after which they can close VS Code and use everything
+below. Before that, `send` does not apply, and `status` shows the agent as `interactive`.
+
+The machine installs the project's dependencies in the background while it is set up (`status` shows
+how far it got; the launch's `--setup` changes how).
 
 ## Managing agents
 

@@ -36,7 +36,7 @@ def view(name: str = "job1", **fields) -> agents.View:
             "settings": {"model": "opus", "effortLevel": "high"}, "error": None,
             "machine": "1x RTX 4090 24 GB, 16 cores, Quebec, CA", "branch": f"agent/{name}",
             "git": {"dirty": 0, "unpushed": 0}, "vast_status": "running", "pending": None, "stopped_h": None,
-            "disk_usd_day": None}  # fmt: skip
+            "disk_usd_day": None, "deps": None}  # fmt: skip
     return agents.View(**{**base, **fields})
 
 
@@ -271,12 +271,18 @@ def test_launch_passes_its_options_on(launched, tmp_path, capsys):
     assert a.secrets == ["HF_TOKEN", "WANDB_KEY"] and a.repo_path == tmp_path.resolve() and not a.no_repo
     assert (a.model, a.mode, a.effort, a.fast, a.dry_run, a.fake_claude) == (
         "sonnet", "autonomous", "xhigh", True, True, True)  # fmt: skip
+    assert (
+        cli.main(["launch", "job2", "--setup", "uv sync --extra gpu"]) == 0
+        and launched[1].setup == "uv sync --extra gpu"
+    )
+    assert cli.main(["launch", "job3", "--setup", " "]) == 2
 
 
 def test_launch_without_options_leaves_hours_and_the_agent_settings_open(launched, capsys):
     assert cli.main(["launch", "job1"]) == 0 and cli.main(["launch", "job2", "--no-fast"]) == 0
     a, b = launched
-    assert (a.req.hours, a.req.cpus, a.mode, a.model, a.effort, a.fast) == (None, 8, None, None, None, None)
+    assert (a.req.hours, a.req.cpus, a.mode, a.model, a.effort, a.fast, a.setup) == (None, 8, None, None, None, None,
+                                                                                    None)  # fmt: skip
     assert b.fast is False
 
 
@@ -394,7 +400,9 @@ def opened(fake_vast, machines, monkeypatch) -> list[tuple]:
     monkeypatch.setattr(machine, "open_one", lambda name: got.append(("terminal", name)) or 0)
     monkeypatch.setattr(machine, "open_all", lambda names: got.append(("terminals", names)) or 0)
     monkeypatch.setattr(
-        machine, "open_vscode", lambda rec: got.append(("vscode", rec["name"], rec["mode"])) or 0
+        machine,
+        "open_vscode",
+        lambda rec, status=None: got.append(("vscode", rec["name"], rec["mode"])) or 0,
     )
     for name, mode in (("job1", "colleague"), ("job2", "interactive")):
         core.save(record(name, mode=mode, instance_id=fake_vast.add_instance(1, name)))
@@ -410,11 +418,11 @@ def machine_status(mode: str, frontend: str) -> dict:
 
 
 def test_an_interactive_agent_in_vs_code_opens_there_and_open_all_leaves_it_out(opened, capsys):
-    assert run(capsys, "open", "job2")[0] == 2
+    assert run(capsys, "open", "job2")[0] == 0  # (without a terminal to wait in for its hand-off)
     assert run(capsys, "open", "job2", "--vscode")[0] == 0
     rc, out, _ = run(capsys, "open", "--all")
     assert rc == 0 and "job2" in out
-    assert opened == [("vscode", "job2", "interactive"), ("terminals", ["job1"])]
+    assert opened == [("vscode", "job2", "interactive")] * 2 + [("terminals", ["job1"])]
 
 
 def test_after_a_hand_off_an_interactive_agent_opens_in_a_terminal(opened, machines, capsys):
@@ -453,8 +461,11 @@ def test_open_follows_a_launch_then_attaches_to_the_agent(opened, fake_vast, mon
         assert shown in out
 
 
-def test_open_follows_an_interactive_agents_launch_into_vs_code(opened, fake_vast, monkeypatch, capsys):
+def test_open_follows_an_interactive_agents_launch_into_vs_code(
+    opened, fake_vast, machines, monkeypatch, capsys
+):
     launching(fake_vast, monkeypatch, mode="interactive")
+    machines.replies[("job3", "status")] = machine_status("interactive", "vscode")
     assert run(capsys, "open", "job3")[0] == 0 and opened == [("vscode", "job3", "interactive")]
 
 
@@ -490,3 +501,11 @@ def test_offers_for_an_interactive_agent_put_hosts_near_home_first(fake_vast, ca
     core.set_config("home", "CA")
     assert json.loads(run(capsys, "offers", "--json")[1])["pick"] == 1
     assert json.loads(run(capsys, "offers", "--mode", "interactive", "--json")[1])["pick"] == 2
+
+
+def test_status_shows_the_dependency_install(patched, monkeypatch, capsys):
+    deps = {"state": "failed", "command": "uv sync", "exit_code": 2}
+    monkeypatch.setattr(agents, "view", lambda name: view(deps=deps))
+    assert any(
+        "uv sync" in line and "2" in line for line in run(capsys, "status", "job1")[1].splitlines()[1:]
+    )

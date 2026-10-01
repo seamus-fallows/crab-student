@@ -79,6 +79,7 @@ class LaunchArgs:
     model: str | None = None  # model, effort, fast: None falls back to the settings, then to the user's own
     effort: str | None = None
     fast: bool | None = None
+    setup: str | None = None  # the command installing the project's dependencies (None: detected; "none")
 
 
 class Progress:
@@ -179,6 +180,7 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
         )
     out.line(f"  agent    {rec['mode']} - Claude Code: {settings_text(rec['claude_settings'])}")
     out.line(f"  repo     {repo_line}")
+    out.line(f"  setup    {setup_text(a.setup)}")
     for w in warnings:
         out.line(f"Warning: {w}")
     if a.dry_run:
@@ -303,6 +305,14 @@ def settings_text(s: dict) -> str:
     return ", ".join(parts) or "its defaults"
 
 
+def setup_text(setup: str | None) -> str:
+    if not setup:
+        return "the project's dependencies installed as the repo says (detected on the machine)"
+    return (
+        "no dependency install" if setup == "none" else f"the project's dependencies installed with: {setup}"
+    )
+
+
 def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: str | None) -> dict:
     return {
         "name": a.name,
@@ -314,6 +324,7 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "mode": a.mode or cfg["mode"],
         "claude_settings": claude_settings(a, cfg),
         "fake_claude": a.fake_claude,
+        "setup": a.setup,
         "secrets": a.secrets,
         "session_id": str(uuid.uuid4()),
         "repo": repo,
@@ -492,7 +503,7 @@ def _bring_up(rec: dict, out: Progress, warnings: list[str]) -> dict:
         resume_machine(rec, out)
     if rec["phase"] in ("booting", "setup"):
         prepare_repo(rec, out)
-        setup_machine(rec, out)
+        warnings += setup_machine(rec, out)
     sweep_strays(rec, out)  # (a rent Vast did not confirm may have shown up by now)
     machine.write_ssh_config()
     out.line(f"Ready after {out.elapsed()}.")
@@ -934,6 +945,9 @@ def machine_config(rec: dict) -> dict:
         "idle_minutes": rec["idle_minutes"],
         "notify_url": rec["notify_url"],
         "secret_names": rec["secrets"],
+        "setup": rec["setup"],
+        # (an interactive agent's machine gets the server of the VS Code here, so the first open is quick)
+        "vscode_commit": machine.local_vscode() if rec["mode"] == "interactive" else None,
     }
 
 
@@ -960,15 +974,17 @@ def generated_files(rec: dict) -> dict[str, tuple[bytes, int]]:
     }
 
 
-def setup_machine(rec: dict, out: Progress) -> None:
+def setup_machine(rec: dict, out: Progress) -> list[str]:
     """Upload and set up the machine. A setup that fails destroys the machine (the agent never ran, so it
     holds nothing); a lost connection leaves the launch for `start` to continue."""
     files = generated_files(rec)
     rec.update(phase="setup", uploaded=True)
     core.save(rec)  # (saved before the upload: a partial upload may already hold secrets and a checkout)
     try:
-        machine.upload_and_setup(
-            rec["name"], machine.bundle(files), lambda line: out.line(f"Setting up {line[5:]}")
+        warnings = machine.upload_and_setup(
+            rec["name"],
+            machine.bundle(files, fake_claude=rec["fake_claude"]),
+            lambda line: out.line(f"Setting up {line[5:]}"),
         )
     except machine.Unreachable as e:
         raise core.CrabError(
@@ -986,6 +1002,9 @@ def setup_machine(rec: dict, out: Progress) -> None:
         ) from None
     rec["phase"] = "ready"
     core.save(rec)
+    for w in warnings:
+        out.line(f"Warning: {w}")
+    return warnings
 
 
 # ---- approve, decline, start ---------------------------------------------------------------------

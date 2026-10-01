@@ -76,6 +76,10 @@ def tool(name: str) -> str | None:
 # ---- VS Code's user settings ---------------------------------------------------------------------
 
 
+VSCODE_EXTENSIONS = "remote.SSH.defaultExtensions"  # (the extensions Remote - SSH installs on every host)
+CLAUDE_EXTENSION = "anthropic.claude-code"
+
+
 def vscode_settings_file() -> Path:
     home = Path.home()
     if sys.platform == "win32":

@@ -35,9 +35,9 @@ machine, not from the user.
 
 ## Environment
 
-- Only Claude Code and tmux were installed for you. Start by setting up what the task needs, the way the
-  repo does it (`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README).
-- Python is `/venv/main/bin/python` (with pip) when the image has it, else `python3`; `apt-get` works,
+- {{dependencies}}
+- Python is the repo's own `.venv` once there is one (`uv sync` makes it), else `/venv/main/bin/python`
+  (with pip) when the image has it, else `python3`; your shell already uses that one. `apt-get` works,
   and you can install uv or conda if the repo uses them.
 - Secrets for this task are environment variables: {{secrets}}. Never print, log or commit their values.
 

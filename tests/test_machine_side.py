@@ -44,6 +44,7 @@ def cs(tmp_path, monkeypatch):
     monkeypatch.setenv("CS_BIN", str(tmp_path / "usr-local-bin"))
     monkeypatch.setenv("CS_PROFILE_D", str(tmp_path / "profile.d"))
     monkeypatch.setenv("CS_TICK_SECONDS", "60")
+    monkeypatch.setenv("CS_VENV", str(tmp_path / "venv-main"))  # (the image's environment: none until made)
     for var in ("CLAUDE_CODE_SESSION_ID", "TERM_PROGRAM"):  # (this test may itself run inside Claude Code)
         monkeypatch.delenv(var, raising=False)
     spec = importlib.util.spec_from_file_location("cs", CS_PY)
@@ -465,7 +466,7 @@ def test_status_reports_the_documented_fields(cs, repo, capsys):
     assert cs.cmd_status() == 0
     st = last_json(capsys)
     assert set(st) == {"name", "mode", "frontend", "agent", "idle_seconds", "used_hours", "stopping",
-                       "stop_reason", "stop_sent_for", "git"}  # fmt: skip
+                       "stop_reason", "stop_sent_for", "git", "deps"}  # fmt: skip
     assert st["git"] == {"branch": "agent/job1", "head": head(repo)[:7], "dirty": 1, "unpushed": 1}
     assert st["agent"]["message"] == "epoch 3/10" and st["stop_sent_for"] is None
     assert (st["mode"], st["frontend"]) == ("colleague", "tmux")
@@ -898,9 +899,7 @@ def test_handoff_switches_the_mode_writes_the_rules_and_wakes_the_watchdog(
     c = cs.cfg()
     assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux") and c["mode"] == "interactive"
     assert "## Work on your own" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
-    assert (cs.BIN / "agent-status").exists() and not (
-        cs.ROOT / ".claude" / "commands" / "handoff.md"
-    ).exists()
+    assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
     assert cs.session_id(c) not in (c["session_id"], interactive) and (cs.D / "wake").exists()
     assert cs.cmd_handoff(["colleague"]) == 1 and cs.read_handoff() == h  # (once only)
 
@@ -950,8 +949,10 @@ def test_setup_settings_fills_the_rules_and_merges_claude_json(cs, mode, section
         str(cs.BRIEF),
     ):
         assert value in rules
-    assert cs.BRIEF.read_text() == (cs.D / "BRIEF.md").read_text()
-    assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
+    assert "Train the model." in cs.BRIEF.read_text() and not (cs.D / "BRIEF.md").exists()  # (one brief)
+    assert (
+        not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists() and not (cs.D / "handoff.md").exists()
+    )
     state = json.loads((cs.ROOT / ".claude.json").read_text())
     assert state["theme"] == "dark" and state["projects"]["/other"] == {"x": 1}
     assert state["hasCompletedOnboarding"] and state["bypassPermissionsModeAccepted"]
@@ -1023,7 +1024,7 @@ def test_the_machine_is_set_up_from_the_config_the_local_side_writes(cs, mode):
 
 
 @pytest.mark.parametrize("mode, tools", [("colleague", {"agent-attach", "agent-status"}),
-                                         ("interactive", {"agent-attach", "agent-handoff"})])  # fmt: skip
+                                         ("interactive", {"agent-attach", "agent-status", "agent-handoff"})])  # fmt: skip
 def test_setup_environment_installs_the_tools_the_mode_uses(cs, monkeypatch, mode, tools):
     monkeypatch.setattr(
         cs.shutil, "which", lambda name: "/usr/bin/" + name
@@ -1160,3 +1161,226 @@ def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_star
     finally:
         first.kill()
         first.wait()
+
+
+# ---- the dependencies, the Python environment, VS Code's server -----------------------------------
+
+
+def make_python(venv: Path) -> Path:
+    """A Python environment's interpreter (an empty file: only its place matters)."""
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    (venv / "bin" / "python").write_text("")
+    return venv / "bin" / "python"
+
+
+@pytest.fixture
+def spawned(cs, monkeypatch) -> list:
+    """The background jobs cs.py would start (`cs.py deps`, `cs.py prepare-vscode`, ...), never started."""
+    jobs = []
+    monkeypatch.setattr(cs, "spawn", lambda command, logname: jobs.append(command))
+    return jobs
+
+
+@pytest.mark.parametrize("files, setup, installs", [
+    ({"uv.lock": "", "pyproject.toml": "[project]\nname = 'p'\n"}, None, ["uv sync"]),
+    ({"pyproject.toml": "[project]\nname = 'p'\n\n[tool.uv]\ndev-dependencies = []\n"}, None, ["uv sync"]),
+    ({"pyproject.toml": "[project]\nname = 'p'\n", "requirements.txt": "numpy\n"}, None, ["pip install -e ."]),
+    ({"requirements.txt": "numpy\n", "requirements-dev.txt": "pytest\n", "setup.py": ""}, None,
+     ["-r requirements-dev.txt", "-r requirements.txt"]),
+    ({"setup.py": ""}, None, ["pip install -e ."]),
+    ({"README.md": "# proj\n"}, None, []),
+    ({"requirements.txt": "numpy\n"}, "make deps", ["make deps"]),
+    ({"requirements.txt": "numpy\n"}, "none", []),
+])  # fmt: skip
+def test_the_dependency_install_is_the_first_the_repo_fits_or_what_the_launch_said(
+    cs, files, setup, installs
+):
+    c = set_config(cs, setup=setup)
+    repo = Path(c["repo_dir"])
+    repo.mkdir(parents=True)
+    for name, text in files.items():
+        (repo / name).write_text(text)
+    command = cs.deps_command(c)
+    assert all(part in command for part in installs) and bool(command) == bool(installs)
+    assert ("pip install" in command) <= (cs.python() in command)  # (pip runs as the environment's Python)
+
+
+def test_pip_installs_with_the_images_python_when_it_has_one(cs, tmp_path):
+    c = cs.cfg()
+    Path(c["repo_dir"]).mkdir(parents=True)
+    (Path(c["repo_dir"]) / "setup.py").write_text("")
+    assert cs.python() == "python3" and cs.deps_command(c).startswith("python3 ")
+    make_python(cs.VENV)
+    assert shlex.split(cs.deps_command(c))[0] == str(cs.VENV / "bin" / "python")
+
+
+def test_the_install_starts_in_the_background_once_and_again_only_after_a_restart_cut_it_off(cs, spawned):
+    c = set_config(cs, setup="make deps")
+    (cs.D / "logs").mkdir()
+    (cs.D / "booted").write_text(f"{time.time() - 100:.0f}\n")
+    cs.start_deps(c)
+    assert spawned == ["deps"] and cs.read_deps()["state"] == "running"
+    cs.start_deps(c)  # (setup running again on the same start: it is under way)
+    assert spawned == ["deps"]
+    (cs.D / "booted").write_text(f"{time.time() + 100:.0f}\n")  # (the machine was started again since)
+    cs.start_deps(c)
+    assert spawned == ["deps", "deps"]
+    (cs.D / "deps.json").write_text(json.dumps({"state": "done", "command": "make deps"}))
+    cs.start_deps(c)
+    assert spawned == ["deps", "deps"]
+
+
+def test_nothing_to_install_starts_nothing(cs, spawned):
+    Path(cs.cfg()["repo_dir"]).mkdir(parents=True)
+    for setup, skipped in ((None, False), ("none", True)):
+        cs.start_deps(set_config(cs, setup=setup))
+        assert spawned == [] and cs.read_deps() == {"state": "none", "skipped": skipped}
+
+
+def test_setup_repository_starts_the_install_and_never_waits_for_it(cs, bare, spawned):
+    cs.setup_repository(set_config(cs, setup="sleep 600"), {})
+    assert spawned == ["deps"] and cs.read_deps()["command"] == "sleep 600"
+
+
+@posix_only
+@pytest.mark.parametrize("command, state, code", [("mkdir -p .venv/bin && touch .venv/bin/python", "done", 0),
+                                                  ("echo broken; exit 3", "failed", 3)])  # fmt: skip
+def test_the_background_install_records_how_it_ended_and_points_vs_code_at_the_venv(cs, command, state, code):
+    c = cs.cfg()
+    Path(c["repo_dir"]).mkdir(parents=True)
+    (cs.D / "deps.json").write_text(
+        json.dumps({"state": "running", "command": command, "started": time.time()})
+    )
+    assert cs.cmd_deps() == 0
+    d = cs.read_deps()
+    assert (d["state"], d["exit_code"]) == (state, code) and d["finished"] >= d["started"]
+    settings = json.loads((cs.VSCODE_HOME / "data" / "Machine" / "settings.json").read_text())
+    venv_python = str(Path(c["repo_dir"]) / ".venv" / "bin" / "python")
+    assert (settings["python.defaultInterpreterPath"] == venv_python) == (state == "done")
+
+
+@pytest.mark.parametrize("deps, shown", [
+    ({"state": "running", "command": "uv sync", "started": T0}, ["still being installed", "uv sync", "Resolved"]),
+    ({"state": "failed", "command": "uv sync", "exit_code": 2}, ["failed", "exit code 2", "Resolved"]),
+    ({"state": "done", "command": "uv sync"}, ["installed", "uv sync"]),
+    ({"state": "none", "skipped": True}, ["skipped"]),
+])  # fmt: skip
+def test_agent_status_shows_the_dependency_install(cs, capsys, deps, shown):
+    (cs.D / "logs").mkdir()
+    (cs.D / "logs" / "deps.log").write_text("Resolved 42 packages\n")
+    (cs.D / "booted").write_text(f"{T0 - 10:.0f}\n")
+    (cs.D / "deps.json").write_text(json.dumps(deps))
+    assert cs.cmd_declare([]) == 0
+    out = capsys.readouterr().out
+    assert all(part in out for part in shown) and "crab" not in out
+
+
+def test_a_restart_that_cut_the_install_off_is_said(cs, capsys):
+    (cs.D / "deps.json").write_text(json.dumps({"state": "running", "command": "uv sync", "started": T0}))
+    (cs.D / "booted").write_text(f"{T0 + 10:.0f}\n")
+    cs.cmd_declare([])
+    assert "cut off" in capsys.readouterr().out
+
+
+def test_an_interactive_agent_has_agent_status_to_look_but_no_status_to_set(cs, capsys):
+    set_config(cs, mode="interactive")
+    (cs.D / "deps.json").write_text(json.dumps({"state": "done", "command": "uv sync"}))
+    assert cs.cmd_declare([]) == 0 and "uv sync" in capsys.readouterr().out
+    assert cs.cmd_declare(["working", "on it"]) == 1 and not (cs.D / "agent.json").exists()
+
+
+@pytest.mark.parametrize("deps, said", [({"state": "running", "command": "uv sync"}, "uv sync"),
+                                        ({"state": "none"}, "requirements.txt")])  # fmt: skip
+def test_the_rules_say_how_the_dependencies_get_installed(cs, deps, said):
+    machine_files(cs)
+    (cs.D / "deps.json").write_text(json.dumps(deps))
+    cs.setup_settings(cs.cfg(), {})
+    rules = (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
+    assert said in rules and "{{" not in rules
+
+
+def test_shells_claude_and_vs_code_use_the_repos_venv_once_there_is_one_else_the_images(cs, tmp_path):
+    machine_files(cs)
+    c = cs.cfg()
+    vscode = cs.VSCODE_HOME / "data" / "Machine" / "settings.json"
+    venv = Path(c["repo_dir"]) / ".venv"
+    env = cs.agent_env(c)
+    assert env["PATH"].startswith(c["repo_dir"] + "/.venv/bin:") and "VIRTUAL_ENV" not in env  # (none yet)
+    make_python(cs.VENV)
+    cs.setup_settings(c, {})
+    assert cs.agent_env(c)["VIRTUAL_ENV"] == str(cs.VENV)
+    assert json.loads(vscode.read_text())["python.defaultInterpreterPath"] == str(cs.VENV / "bin" / "python")
+    make_python(venv)
+    cs.write_vscode_settings(c)
+    assert cs.agent_env(c)["VIRTUAL_ENV"] == str(venv)
+    settings = json.loads(vscode.read_text())
+    assert settings["python.defaultInterpreterPath"] == str(venv / "bin" / "python")
+    assert settings["claudeCode.initialPermissionMode"] == "bypassPermissions"  # (the rest stays)
+
+
+def test_the_login_profile_activates_the_environment_and_starts_in_the_repo_and_bashrc_runs_it_once(
+    cs, monkeypatch, spawned
+):
+    monkeypatch.setattr(cs.shutil, "which", lambda name: "/usr/bin/" + name)
+    (cs.ROOT / ".bashrc").parent.mkdir(parents=True, exist_ok=True)
+    (cs.ROOT / ".bashrc").write_text("# the image's own\n. /venv/main/bin/activate")
+    (cs.ROOT / ".config" / "git").mkdir(parents=True)
+    (cs.ROOT / ".config" / "git" / "ignore").write_text("*.swp\n")
+    c = set_config(cs, fake_claude=True)
+    for _ in range(2):
+        cs.setup_environment(c, {})
+    profile = (cs.PROFILE_D / "agent.sh").read_text()
+    for part in (f"{c['repo_dir']}/.venv/bin", str(cs.VENV), "VIRTUAL_ENV", "cd ", "claude.env"):
+        assert part in profile, part
+    bashrc = (cs.ROOT / ".bashrc").read_text()
+    assert (
+        bashrc.startswith("# the image's own") and bashrc.count(str(cs.PROFILE_D / "agent.sh")) == 2
+    )  # (one line)
+    assert bashrc.splitlines()[-1].endswith(str(cs.PROFILE_D / "agent.sh"))  # (after the image's activation)
+    assert spawned == []  # (no VS Code here: nothing to prepare for it)
+    ignored = (
+        (cs.ROOT / ".config" / "git" / "ignore").read_text().splitlines()
+    )  # (what installs leave behind)
+    assert ignored[0] == "*.swp" and ignored.count(".venv/") == ignored.count("*.egg-info/") == 1
+
+
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_an_interactive_agents_setup_puts_vs_codes_server_where_remote_ssh_looks(cs, monkeypatch):
+    monkeypatch.setattr(cs.shutil, "which", lambda name: "/usr/bin/" + name)
+    started = []
+    real = subprocess.Popen  # (git still runs; the install jobs, started through bash, are only recorded)
+    monkeypatch.setattr(
+        cs.subprocess,
+        "Popen",
+        lambda argv, **kw: started.append(argv[-1]) if argv[0] == "bash" else real(argv, **kw),
+    )
+    jobs = {}
+    cs.setup_environment(set_config(cs, fake_claude=True, vscode_commit=COMMIT), jobs)
+    [command] = started
+    assert list(jobs) == ["VS Code"]
+    assert f"commit:{COMMIT}/server-linux-" in command
+    assert str(cs.VSCODE_HOME / "cli" / "servers" / f"Stable-{COMMIT}" / "server") in command
+    assert "--install-extension anthropic.claude-code" in command
+    started.clear()
+    cs.setup_environment(set_config(cs, vscode_commit=None), {})
+    assert started == []
+
+
+@pytest.mark.parametrize("code, warned", [(0, False), (1, True)])
+def test_setup_waits_for_vs_codes_server_and_only_warns_when_it_failed(cs, code, warned):
+    (cs.D / "logs").mkdir()
+    (cs.D / "logs" / "vscode.log").write_text("curl: (6) Could not resolve host\n")
+    job = subprocess.Popen([sys.executable, "-c", f"raise SystemExit({code})"])
+    warnings = cs.vscode_server_ready({"VS Code": job})
+    assert bool(warnings) == warned and all("Could not resolve host" in w for w in warnings)
+    assert cs.vscode_server_ready({}) == []
+
+
+def test_wait_handoff_says_when_the_agent_runs_in_tmux(cs, monkeypatch, capsys):
+    set_config(cs, mode="interactive")
+    monkeypatch.setattr(cs, "tmux", lambda *a: subprocess.CompletedProcess(a, 0, "", ""))
+    assert cs.cmd_wait_handoff(["0"]) == 0 and last_json(capsys) == {"frontend": "vscode"}
+    cs.save_handoff({"mode": "colleague", "from": "x", "prompt": "go on", "at": 0})
+    assert cs.cmd_wait_handoff(["5"]) == 0 and last_json(capsys) == {"frontend": "tmux"}

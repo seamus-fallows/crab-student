@@ -85,7 +85,8 @@ ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - colleague - branc
 You don't have to wait for that line to see what is happening: as soon as the launch starts, a window
 opens (Windows Terminal on Windows, a tab per agent; Terminal on macOS) that shows its progress as it
 goes (the machines rented, the image download, the setup steps) and then becomes the agent's session:
-it attaches to the agent's Claude Code, or opens VS Code for an interactive agent. If the launch fails,
+it attaches to the agent's Claude Code. For an interactive agent it opens VS Code instead and stays open,
+waiting: once you hand the agent over with `/handoff`, it becomes the agent's terminal. If the launch fails,
 the window says why and what to do. On other systems, or with `crab-student config open_window off`,
 run `crab-student open NAME` yourself: on an agent that is still launching it shows the same progress.
 (Every launch also keeps its progress, with times, in `~/.crab-student/agents/NAME.log`.)
@@ -138,16 +139,24 @@ warns about them. A task that has nothing to do with a repo (`--no-repo`) goes t
 `crab-student-work` repo on your GitHub.
 
 **Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
-with CUDA, Python and pip). Setup adds only what the machine needs to host an agent: tmux, Claude Code,
-the repo and its git hooks. The agent then installs your project's dependencies itself, as the first
-part of its task:
+with CUDA, Python and pip in `/venv/main`). Setup adds what the machine needs to host an agent (tmux,
+Claude Code, the repo and its git hooks) and starts installing your project's dependencies in the
+background, so the agent does not spend its first minutes on it. It goes by the repo, the first that
+fits:
 
-- It installs them the way your repo does, e.g. `requirements.txt`, `pyproject.toml`, `uv.lock` or
-  `environment.yml`, with `pip`, `uv` or `apt-get`.
-- It can install uv or conda itself if your repo needs them.
+- `uv.lock`, or `[tool.uv]` in `pyproject.toml`: `uv sync` (installing uv first if needed), which makes
+  the repo's own `.venv`;
+- `[project]` in `pyproject.toml`: `pip install -e .`;
+- `requirements*.txt`: `pip install -r` for each;
+- `setup.py`: `pip install -e .`.
 
-If setting up needs anything special, such as a system library, a particular CUDA or PyTorch
-version, or a private package index, say so when you ask. That goes into the agent's brief.
+pip is the image's (`/venv/main/bin/python -m pip`). Nothing waits for the install: the agent is told it
+is running, and `agent-status` on the machine shows how far it got (`crab-student status NAME` shows it
+too). Shells on the machine, the agent's Claude Code and VS Code all use the repo's `.venv` once there is
+one, else `/venv/main`, and terminals start in the repo. When the repo needs something else, the launch
+takes `--setup "COMMAND"` (e.g. `--setup "pip install -r requirements-gpu.txt"`), or `--setup none` for
+no install; just say so when you ask. Anything special the agent should know about (a system library, a
+particular CUDA or PyTorch version, a private package index) goes into its brief.
 
 **Several agents.** For a sweep, or several separate tasks, the launcher writes a brief for each and
 launches them together (`crab-student launch --batch`, which reads the agents from stdin, each
@@ -172,12 +181,17 @@ or type to it like any Claude Code session. **Detach with Ctrl-b then d**: the a
 Closing the window, losing the connection or a sleeping laptop do not stop it either; `open` again to
 come back. In `open --all` on macOS/Linux the local layout uses Ctrl-a, so Ctrl-b still reaches the
 agent. Agents whose Claude runs in VS Code (interactive, not handed over) are left out of `open --all`,
-with a note; `open NAME` on one says to use `--vscode`.
+with a note. `open NAME` on one opens VS Code (as `--vscode` does), then waits: once you hand the agent
+over with `/handoff`, it attaches to it (Ctrl+C closes the wait).
 
 `open NAME --vscode` opens the machine's repo folder in VS Code. For an agent whose Claude runs in
 tmux, VS Code's integrated terminal attaches to that session by itself, so you can watch and type to it
-from VS Code too. For an interactive agent that you have not handed over yet, it also opens the Claude
-panel with the task typed in but not sent: read it, change it, press Enter.
+from VS Code too. For an interactive agent that you have not handed over yet, it waits 15 seconds for
+VS Code to connect, then types the task into the Claude panel without sending it: read it, change it,
+press Enter. That first connect is quick because, for interactive agents only and when VS Code is installed
+on your computer, the machine downloads the matching VS Code server, with the Claude extension, while it
+is being set up (setup waits for it; if that fails, the launch prints a warning and VS Code installs its
+server itself, which takes a minute).
 
 When a colleague-mode agent asks (its state becomes `needs you`), answer in `open`, or with
 `crab-student send NAME "use the 2024 data"`, or through your Claude Code. If nobody answers for a
@@ -326,7 +340,8 @@ after the change. When a launch does not say, it asks for 8 cores, 16 GB of RAM 
 There is no background service: each `crab-student` command does its job and exits, keeping one small
 JSON record per agent in `~/.crab-student/`. It talks to Vast over its REST API, to GitHub through
 `gh` and `git`, and to machines through `ssh`. On each machine, one script sets things up (the repo,
-Claude Code and its settings, git hooks, the settings VS Code reads) and runs a watchdog that keeps the
+Claude Code and its settings, git hooks, the settings VS Code reads and, for an interactive agent, VS Code's
+server; in the background, your project's dependencies) and runs a watchdog that keeps the
 agent's Claude Code alive in tmux, measures activity, saves work, sends notifications and stops the
 machine. Vast's start command carries the dead-man switch, so it works before anything else is
 installed.

@@ -59,6 +59,8 @@ def isolated(tmp_path, monkeypatch) -> Path:
         raise AssertionError(f"a test ran gh without the fake_github fixture: {args}")
 
     monkeypatch.setattr(github, "gh", no_gh)
+    real_tool = core.tool  # (this computer's VS Code is never started, nor asked for its version)
+    monkeypatch.setattr(core, "tool", lambda name: None if name == "code" else real_tool(name))
     return home
 
 
@@ -128,6 +130,7 @@ class FakeMachines:
             on_line(f"step {i}/5 {label}")
         if self.setup_result:
             raise self.setup_result
+        return []
 
 
 @pytest.fixture

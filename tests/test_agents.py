@@ -526,10 +526,18 @@ def test_open_all_leaves_out_interactive_agents_in_vs_code(fake_vast, machines, 
     fails(1, agents.open_all, ["b"])
 
 
-def test_open_one_of_an_interactive_agent_points_to_vs_code(fake_vast, machines, opened):
+@pytest.mark.parametrize("terminal, handed_off, attached", [(False, True, False), (True, False, False),
+                                                          (True, True, True)])  # fmt: skip
+def test_open_one_of_an_interactive_agent_opens_vs_code_and_attaches_after_its_hand_off(
+    fake_vast, machines, opened, monkeypatch, terminal, handed_off, attached
+):
     agent(fake_vast, "a")
-    agent(fake_vast, "b")
+    agent(fake_vast, "b", mode="interactive")
     machines.replies[("a", "status")] = status("working", "x")
     machines.replies[("b", "status")] = status(frontend="vscode", mode="interactive")
-    assert "--vscode" in fails(2, agents.open_one, "b").message
-    assert agents.open_one("a") == 0 and opened == ["a"]
+    vscode = []
+    monkeypatch.setattr(machine, "open_vscode", lambda rec, status=None: vscode.append(rec["name"]) or 0)
+    monkeypatch.setattr(machine, "interactive", lambda: terminal)
+    monkeypatch.setattr(machine, "wait_for_handoff", lambda name: handed_off)
+    assert agents.open_one("b") == 0 and vscode == ["b"] and opened == (["b"] if attached else [])
+    assert agents.open_one("a") == 0 and vscode == ["b"] and opened[-1] == "a"

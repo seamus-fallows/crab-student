@@ -382,7 +382,7 @@ def test_one_failed_launch_in_a_batch_leaves_the_others_running(fake_vast, machi
     def setup_machine(rec, progress):
         if rec["name"] == "job2":
             raise core.CrabError("setup failed at step 4 (Claude Code): the token was refused", 5)
-        real(rec, progress)
+        return real(rec, progress)
 
     monkeypatch.setattr(launch, "setup_machine", setup_machine)
     res = launch.launch_batch([args("job1"), args("job2")], out())
@@ -737,3 +737,21 @@ def test_no_window_for_a_launch_that_waits_for_approval_or_a_dry_run(fake_vast, 
     core.set_config("approve_above_usd_per_hour", "5")
     launch.approve("job1", out())
     assert windows == [["job1"]]
+
+
+def test_the_dependency_setup_and_the_users_vs_code_reach_the_machine(machines, monkeypatch):
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setattr(launch.machine, "local_vscode", lambda: commit)
+    go(args(setup="pip install -r requirements-gpu.txt", mode="interactive"))
+    config = json.loads(machines.uploads["job1"]["config.json"][0])
+    assert core.load("job1")["setup"] == config["setup"] == "pip install -r requirements-gpu.txt"
+    assert config["vscode_commit"] == commit
+    go(args("job2"))  # (a colleague: VS Code installs its own server if it is ever opened)
+    config = json.loads(machines.uploads["job2"]["config.json"][0])
+    assert config["setup"] is None and config["vscode_commit"] is None  # (detected on the machine)
+
+
+def test_only_a_fake_claude_launch_uploads_the_fake_claude(machines):
+    go(args("job1"))
+    go(args("job2", fake_claude=True))
+    assert "fake_claude.py" not in machines.uploads["job1"] and "fake_claude.py" in machines.uploads["job2"]

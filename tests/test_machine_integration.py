@@ -175,7 +175,8 @@ def wait_for(condition, seconds: float, what: str, m) -> None:
 def setup_ok(m) -> None:
     """setup: five steps, then {"ok": true} (the fake Claude needs no install, and tmux is there)."""
     p = cs(m, "setup", timeout=240)
-    assert (p.returncode, last_json(p)) == (0, {"ok": True, "warnings": []}), p.stdout + p.stderr + diagnose(m)
+    result = (p.returncode, last_json(p))
+    assert result == (0, {"ok": True, "warnings": []}), p.stdout + p.stderr + diagnose(m)
     steps = [line.split()[1] for line in p.stdout.splitlines() if line.startswith("step ")]
     assert steps == ["1/5", "2/5", "3/5", "4/5", "5/5"], p.stdout
 

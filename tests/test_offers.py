@@ -1,4 +1,4 @@
-"""offers: the search query, the client-side recheck, the picking rule and the time limit."""
+"""offers: the search query, the client-side recheck, the host's lease and the picking rule."""
 
 import time
 
@@ -35,7 +35,7 @@ def test_every_requirement_is_checked_again_on_our_side(fake_vast):
     now = time.time()
     fake_vast.offers = [
         offer(1),
-        offer(2, end_date=now + 6 * 3600),
+        offer(2, end_date=now + 26 * 3600),
         offer(3, reliability2=None, reliability=0.99),
         offer(10, cpu_ram=15999),  # 16 GB is 16000 MB
         offer(11, verification="unverified", verified=False),
@@ -46,7 +46,7 @@ def test_every_requirement_is_checked_again_on_our_side(fake_vast):
         offer(16, num_gpus=2),
         offer(17, gpu_ram=23999),
         offer(18, cuda_max_good=12.4),  # older than the image's CUDA 12.8
-        offer(19, end_date=now + 4 * 3600),  # gone before 2 x 2 h (+ 1 h) are up
+        offer(19, end_date=now + 24 * 3600),  # gone before a day (+ 1 h) is up
         offer(20, direct_port_count=0),
         offer(21, inet_down=199),
         offer(22, disk_space=49),
@@ -70,6 +70,17 @@ def test_regions_allow_country_codes_and_continents(fake_vast):
     assert len(offers.search(Req(hours=1), cfg())) == 6  # (empty means anywhere)
 
 
+@pytest.mark.parametrize("regions", [[], ["asia", "europe", "CN", "HK", "RU"]])
+def test_hosts_where_claude_is_unavailable_never_fit(fake_vast, regions):
+    blocked = ["Guangdong, CN", "Hong Kong, HK", "Macau, MO", "Moscow, RU", "Minsk, BY", "Tehran, IR",
+               "Damascus, SY", "Havana, CU", "Caracas, VE", "Pyongyang, KP"]  # fmt: skip
+    allowed = ["Tokyo, JP", "Bavaria, DE", "Taipei, TW", "", None, "Somewhere"]
+    fake_vast.offers = [offer(i, geolocation=place) for i, place in enumerate(blocked + allowed, 1)]
+    found = offers.search(Req(hours=1), cfg(regions=regions))
+    assert {offers.country(o) for o in found} <= {"JP", "DE", "TW", None}
+    assert len(found) == (6 if not regions else 3)  # (unknown places stay allowed, as regions permits)
+
+
 def test_a_cpu_task_has_no_gpu_conditions(fake_vast):
     fake_vast.offers = [cpu_offer(1), offer(2, gpu_name="GTX 1080", gpu_ram=8192, cuda_max_good=11.0)]
     assert sorted(ids(offers.search(Req(hours=1), cfg()))) == [1, 2]
@@ -90,13 +101,54 @@ def test_a_gpu_task_pays_more_only_for_clearly_better_speed_per_dollar():
     assert offers.rank([cheap, clearly], gpu=False)[0] is cheap
 
 
-def test_among_similar_prices_the_fastest_download_wins():
+def test_among_similar_prices_reliability_and_download_speed_decide_together():
     found = [
-        cpu_offer(1, dph_total=0.40, inet_down=300),
-        cpu_offer(2, dph_total=0.43, inet_down=900),
-        cpu_offer(3, dph_total=0.45, inet_down=2000),  # over 10% dearer than the cheapest
+        cpu_offer(1, dph_total=0.40, inet_down=300, reliability2=0.99),
+        cpu_offer(2, dph_total=0.47, inet_down=900, reliability2=0.99),  # within 20%: the faster download
+        cpu_offer(3, dph_total=0.49, inet_down=5000, reliability2=0.999),  # over 20% dearer than the cheapest
     ]
     assert ids(offers.rank(found, gpu=False)) == [2, 1, 3]
+    # A point of reliability weighs as much as twice the download speed.
+    steady, fast = (
+        cpu_offer(1, inet_down=400, reliability2=0.995),
+        cpu_offer(2, inet_down=1000, reliability2=0.98),
+    )
+    assert ids(offers.rank([steady, fast], gpu=False)) == [1, 2]
+    fast["inet_down"] = 4000
+    assert ids(offers.rank([steady, fast], gpu=False)) == [2, 1]
+
+
+NEAR_AND_FAR = [
+    ("Bavaria, DE", 0.40, 0.999),  # the cheapest and most reliable
+    ("Texas, US", 0.42, 0.99),
+    ("California, US", 0.44, 0.995),
+    ("Ontario, CA", 0.46, 0.985),
+    ("", 0.41, 0.999),  # unknown place
+    ("Quebec, CA", 0.60, 0.999),  # over 20% dearer: not comparable
+]
+
+
+def near_and_far() -> list[dict]:
+    return [
+        cpu_offer(i, geolocation=g, dph_total=p, reliability2=r)
+        for i, (g, p, r) in enumerate(NEAR_AND_FAR, 1)
+    ]
+
+
+def test_an_interactive_agent_prefers_comparable_hosts_near_home(fake_vast):
+    fake_vast.offers = near_and_far()
+    # Home country first, then its continent (best standing first within each), then the rest.
+    interactive = offers.plan(Req(hours=1), cfg(home="ca"), mode="interactive")
+    assert ids(interactive.ranked) == [4, 3, 2, 1, 5, 6]
+    assert ids(offers.plan(Req(hours=1), cfg(home="MX"), mode="interactive").ranked) == [3, 2, 4, 1, 5, 6]
+    assert ids(offers.plan(Req(hours=1), cfg(home="JP"), mode="interactive").ranked)[:2] == [1, 5]
+
+
+@pytest.mark.parametrize("mode, home", [("autonomous", "CA"), ("colleague", "CA"), ("interactive", "")])
+def test_other_modes_and_no_home_rank_as_before(fake_vast, mode, home):
+    fake_vast.offers = near_and_far()
+    # By standing among the comparable offers, wherever they are.
+    assert ids(offers.plan(Req(hours=1), cfg(home=home), mode=mode).ranked) == [1, 5, 3, 2, 4, 6]
 
 
 def test_ties_are_broken_the_same_way_every_time():
@@ -104,7 +156,7 @@ def test_ties_are_broken_the_same_way_every_time():
     assert ids(offers.rank(same, gpu=True)) == ids(offers.rank(same[::-1], gpu=True)) == [3, 5, 9]
 
 
-def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_vast):
+def test_fallbacks_are_up_to_four_other_machines_up_to_the_approval_price(fake_vast):
     fake_vast.offers = [
         cpu_offer(1, machine_id=10, dph_total=0.40),
         cpu_offer(2, machine_id=10, dph_total=0.41),  # the pick's machine
@@ -112,15 +164,28 @@ def test_fallbacks_are_up_to_two_other_machines_at_most_a_quarter_dearer(fake_va
         cpu_offer(4, machine_id=20, dph_total=0.46),  # the first fallback's machine
         cpu_offer(5, machine_id=30, dph_total=0.49),
         cpu_offer(6, machine_id=40, dph_total=0.50),  # a third
+        cpu_offer(7, machine_id=50, dph_total=0.50),
+        cpu_offer(8, machine_id=60, dph_total=0.50),
+        cpu_offer(9, machine_id=70, dph_total=0.50),  # a fifth: one too many
     ]
     p = offers.plan(Req(hours=1), cfg())
-    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5], 6)
+    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5, 6, 7], 9)
     fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.51)]
-    assert offers.plan(Req(hours=1), cfg()).fallbacks == []  # over 1.25x
+    assert ids(offers.plan(Req(hours=1), cfg(), cap=5).fallbacks) == [
+        2
+    ]  # (any price up to the approval price)
+    assert offers.plan(Req(hours=1), cfg(), cap=0.45).fallbacks == []  # (never over it)
+    assert offers.plan(Req(hours=1), cfg(), cap=0.30).fallbacks == []  # (over it: at most 1.25x the pick)
 
 
-def test_the_time_limit_is_twice_the_estimate_and_at_least_2_hours():
-    assert (offers.time_limit(3), offers.time_limit(0.5)) == (6, 2)
+@pytest.mark.parametrize("hours, needed", [(None, 25), (3, 25), (20, 41)])
+def test_the_host_must_stay_twice_the_hours_and_at_least_a_day(hours, needed, fake_vast):
+    now = time.time()
+    fake_vast.offers = [
+        offer(1, end_date=now + (needed - 0.1) * 3600),
+        offer(2, end_date=now + (needed + 0.1) * 3600),
+    ]
+    assert ids(offers.search(Req(hours=hours), cfg())) == [2]
 
 
 def test_offers_up_to_the_cap_come_first_and_the_rest_only_over_the_cap(fake_vast):

@@ -1,18 +1,23 @@
-"""Workers once launched: the views (list, status), stop, delete, send and report."""
+"""Agents once launched: the views (list, status), stop, delete, send, report and open."""
 
 from __future__ import annotations
 
 import contextlib
 import json
+import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from crab_student import core, github, launch, machine, vast
 
-STOP_REASONS = {"user": "stopped by you", "idle": "idle stop", "time-limit": "time limit", "done": "finished"}
+STOP_REASONS = {"user": "stopped by you", "idle": "idle stop", "done": "finished"}
+IDLE_SHOWN = 600  # seconds without work or conversation before a running agent is shown as idle
 STOP_STUCK = 300  # a machine still running this long after asking Vast to stop it gets stopped from here
 NOTE_MARGIN = 300  # a stop note must be this much newer than the last start (the clocks may differ a little)
+FOLLOW_POLL = 1.0  # how often open looks at a launch it follows
+QUIET_ENDS = 3  # looks in a row without the launch at work (its lock free) before open says it stopped
 
 
 @dataclass
@@ -22,7 +27,6 @@ class View:
     message: str
     used_h: float | None
     spent: float | None
-    limit_h: float | None
     idle_min: float | None
     machine: str
     dph: float | None
@@ -34,6 +38,10 @@ class View:
     error: str | None
     stopped_h: float | None  # how long a stopped machine has been sitting (its disk is still billed)
     disk_usd_day: float | None
+    mode: str
+    frontend: str | None  # where the agent's Claude runs: "tmux", or "vscode" (interactive, not handed off)
+    settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
+    deps: dict | None  # the machine's install of the project's dependencies: state, command, exit_code
 
 
 def _status(rec: dict) -> dict | None:
@@ -44,10 +52,10 @@ def _status(rec: dict) -> dict | None:
 
 
 def views(names: list[str] | None = None) -> list[View]:
-    """Every worker (or those named) as it is now: one Vast call, and one ssh call per running machine."""
+    """Every agent (or those named) as it is now: one Vast call, and one ssh call per running machine."""
     recs = [r for r in core.all_records() if names is None or r["name"] in names]
     insts: dict | None = {}
-    if any(r.get("instance_id") for r in recs):
+    if any(r.get("instance_id") or r.get("strays") for r in recs):
         try:
             insts = {i["id"]: i for i in vast.instances()}
         except core.CrabError:
@@ -64,6 +72,8 @@ def views(names: list[str] | None = None) -> list[View]:
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
+        if not busy and rec.get("strays") and insts is not None:
+            _sweep(rec["name"], list(insts.values()))
         state, message = display_state(rec, inst, st, busy, insts is None)
         result.append(_view(rec, inst, st, state, message))
     if moved:
@@ -85,25 +95,34 @@ def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
                 fresh.update(last_start=time.time(), stop_note=None)
             fresh["stopped_since"] = None if up else fresh.get("stopped_since") or time.time()
         if st:
-            w = st.get("worker") or {}
+            a = st.get("agent") or {}
             fresh["last_seen"] = {
-                "state": w.get("state"),
-                "message": w.get("message"),
+                "state": a.get("state"),
+                "message": a.get("message"),
                 "used_hours": st.get("used_hours"),
                 "stop_reason": st.get("stop_reason"),
                 "git": st.get("git"),
+                "frontend": st.get("frontend"),
             }
+            if st.get("mode"):  # (a hand-off changes the machine's mode)
+                fresh["mode"] = rec["mode"] = st["mode"]
         core.save(fresh)
         rec.update(last_seen=fresh["last_seen"], ssh=fresh["ssh"], stopped_since=fresh.get("stopped_since"))
         return moved
     return False
 
 
+def _sweep(name: str, insts: list[dict]) -> None:
+    """Destroy the machines of the agent's unconfirmed rents that have shown up (another machine won its launch)."""
+    with contextlib.suppress(core.CrabError), core.locked(name):
+        launch.sweep_strays(core.load(name), insts=insts)
+
+
 def display_state(
     rec: dict, inst: dict | None, st: dict | None, busy: bool, vast_down: bool = False
 ) -> tuple[str, str]:
     """(STATE, MESSAGE) for list and status. The states: approval, starting, interrupted, working, needs you,
-    done, failed, stopped, unknown."""
+    interactive, done, failed, stopped, unknown."""
     name, phase, last = rec["name"], rec["phase"], rec.get("last_seen") or {}
     if phase == "pending":
         return "approval", f"waiting for your approval: {rec['pending']['reason']}"
@@ -112,7 +131,7 @@ def display_state(
             return "starting", {"renting": "renting a machine", "booting": "booting", "setup": "setting up"}[
                 phase
             ]
-        if phase == "renting" and rec.get("rent"):
+        if phase == "renting" and any(r["instance_id"] is None for r in rec.get("rents") or []):
             return (
                 "interrupted",
                 f"the rent was not confirmed: crab-student start {name} looks for the machine",
@@ -127,14 +146,20 @@ def display_state(
     if not vast.running(inst):
         if vast.wants_running(inst):
             return "starting", " ".join(str(inst.get("status_msg") or "").split()) or "starting"
-        why = STOP_REASONS.get(last.get("stop_reason") or "") or _stopped_itself(rec, last)
+        why = STOP_REASONS.get(last.get("stop_reason") or "") or _stopped_itself(last)
         return "stopped", " - ".join(x for x in (why, _stopped_for(rec), last.get("message")) if x)
     if st is None:
         return "unknown", last.get("message") or "no answer over ssh"
     if st.get("stopping"):
         return "stopped", "stopping: " + STOP_REASONS.get(st.get("stop_reason") or "", "")
-    w, git = st.get("worker") or {}, st.get("git") or {}
-    state, msg = w.get("state"), w.get("message") or ""
+    idle = st.get("idle_seconds") or 0
+    if st.get("frontend") == "vscode":
+        return (
+            "interactive",
+            f"in VS Code, idle {idle // 60:.0f}m" if idle >= IDLE_SHOWN else "in VS Code, active",
+        )
+    a, git = st.get("agent") or {}, st.get("git") or {}
+    state, msg = a.get("state"), a.get("message") or ""
     if state == "needs-you":
         return "needs you", msg
     if state == "done":
@@ -142,9 +167,8 @@ def display_state(
     if state == "failed":
         return "failed", msg
     if not state:
-        return "starting", "worker starting"
-    idle = st.get("idle_seconds") or 0
-    return "working", f"idle {idle // 60:.0f}m - {msg}" if idle >= 600 else msg
+        return "starting", "agent starting"
+    return "working", f"idle {idle // 60:.0f}m - {msg}" if idle >= IDLE_SHOWN else msg
 
 
 def _stopped_for(rec: dict) -> str:
@@ -155,13 +179,10 @@ def _stopped_for(rec: dict) -> str:
     return f"{core.fmt_hours((time.time() - since) / 3600)} ago{disk}"
 
 
-def _stopped_itself(rec: dict, last: dict) -> str:
-    """Why a machine the user did not stop stopped, as far as can be told from here (the watchdog's own
-    reason stays on the stopped machine): the time limit, else it stopped itself (idle or finished)."""
-    used = last.get("used_hours")
-    if used is None:
-        return ""
-    return "time limit" if used >= rec.get("limit_hours", 0) - 0.02 else "stopped itself"
+def _stopped_itself(last: dict) -> str:
+    """The machine stopped and the user did not do it: it stopped itself (idle or finished), as far as can be
+    told from here (the watchdog's own reason stays on the stopped machine)."""
+    return "" if last.get("used_hours") is None else "stopped itself"
 
 
 def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: str) -> View:
@@ -174,7 +195,6 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         message=core.ascii_text(" ".join(message.split())),
         used_h=used,
         spent=round(used * dph, 2) if used is not None and dph else None,
-        limit_h=rec.get("limit_hours"),
         idle_min=round(st["idle_seconds"] / 60) if st else None,
         machine=rec.get("machine") or "",
         dph=dph,
@@ -188,6 +208,10 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         if state == "stopped" and rec.get("stopped_since")
         else None,
         disk_usd_day=rec.get("disk_usd_day"),
+        mode=rec.get("mode") or "",
+        frontend=st.get("frontend") if st else last.get("frontend"),
+        settings=rec.get("claude_settings") or {},
+        deps=st.get("deps") if st else None,
     )
 
 
@@ -200,7 +224,7 @@ def view(name: str) -> View:
 
 
 def stop(name: str, out: launch.Progress) -> dict:
-    """Save what the worker has, then stop the machine (the disk is kept)."""
+    """Save what the agent has, then stop the machine (the disk is kept)."""
     with core.locked(name):
         rec = core.load(name)
         if rec["phase"] == "pending":
@@ -215,7 +239,7 @@ def stop(name: str, out: launch.Progress) -> dict:
         inst = vast.instance(rec["instance_id"])
         if inst is None:
             raise core.CrabError(
-                f"{name}'s machine no longer exists on Vast. Delete the worker: crab-student delete {name}"
+                f"{name}'s machine no longer exists on Vast. Delete the agent: crab-student delete {name}"
             )
         if not vast.wants_running(inst):
             return {"name": name, "result_line": f"{name} is already stopped."}
@@ -246,15 +270,6 @@ def stop(name: str, out: launch.Progress) -> dict:
     }
 
 
-def _find_instance(rec: dict) -> dict | None:
-    if rec.get("instance_id"):
-        return vast.instance(rec["instance_id"])
-    if rec["phase"] == "renting" and rec.get("rent"):
-        iid = launch.find_by_label(rec["rent"]["label"], 0)
-        return vast.instance(iid) if iid else None
-    return None
-
-
 def _size(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1000 or unit == "GB":
@@ -282,7 +297,7 @@ def _problems(res: dict) -> list[str]:
 
 
 def delete(name: str, force: bool, out: launch.Progress) -> dict:
-    """Destroy the machine and forget the worker; refuses (exit 3) when that would lose work, unless forced."""
+    """Destroy the machine and forget the agent; refuses (exit 3) when that would lose work, unless forced."""
     with core.locked(name):
         rec = core.load(name)
         if rec["phase"] == "pending":
@@ -291,7 +306,7 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                 "name": name,
                 "result_line": f"Deleted {name} (it was waiting for approval; nothing was rented).",
             }
-        inst = _find_instance(rec)
+        inst = vast.instance(rec["instance_id"]) if rec.get("instance_id") else None
         if inst and rec.get("uploaded") and not force:  # (a machine that received its files may hold work)
             running = vast.running(inst)
             if running:
@@ -328,10 +343,16 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     ),
                     3,
                 )
-        if inst:
-            vast.destroy(inst["id"])
-            out.line(f"Destroyed machine {inst['id']}.")
+        spare, missing = launch.spare_machines(rec)  # (rented for the launch, never uploaded to)
+        for iid in ([inst["id"]] if inst else []) + spare:
+            vast.destroy(iid)
+            out.line(f"Destroyed machine {iid}.")
         lines = [f"Deleted {name}.", *_cleanup(rec)]
+        lines += [
+            f"Warning: no machine labelled {label} was found (Vast never confirmed that rent). If one shows up at "
+            "https://cloud.vast.ai/instances/, destroy it there."
+            for label in missing
+        ]
     return {"name": name, "result_line": "\n".join(lines)}
 
 
@@ -360,7 +381,7 @@ def _stop_note(rec: dict) -> dict | None:
 
 
 def _cleanup(rec: dict) -> list[str]:
-    """Remove what the worker had on GitHub and locally: its deploy key unless another worker shares it, and
+    """Remove what the agent had on GitHub and locally: its deploy key unless another agent shares it, and
     its branch unless somebody worked on it."""
     repo, notes, key = rec["repo"], [], rec["repo"].get("deploy_key")
     try:
@@ -393,6 +414,10 @@ def send(name: str, text: str) -> dict:
         raise core.CrabError(
             f"{name} is not running, so it cannot get a message. Start it: crab-student start {name}"
         )
+    if (_status(rec) or {}).get("frontend") == "vscode":
+        raise core.CrabError(
+            f"{name} is an interactive agent in VS Code: type to it there. {_vscode_hint(name)}"
+        )
     machine.remote(name, ["send"], input=text.encode("utf-8"))
     return {"name": name, "result_line": f"Sent to {name}. It reads messages between its steps."}
 
@@ -402,7 +427,121 @@ def report(name: str) -> str:
     path = f"agent-runs/{name}/REPORT.md"
     text = github.read_file(rec["repo"]["slug"], rec["repo"]["branch"], path)
     if text is None:
-        raise core.CrabError(
-            f"there is no {path} on {rec['repo']['branch']} yet. The worker writes it as it goes."
+        why = (
+            "An interactive agent writes no report"
+            if rec.get("mode") == "interactive"
+            else "The agent writes it as it goes"
         )
+        raise core.CrabError(f"there is no {path} on {rec['repo']['branch']} yet. {why}.")
     return text
+
+
+# ---- terminals -----------------------------------------------------------------------------------
+
+
+def _vscode_hint(name: str) -> str:
+    return f"Open it in VS Code: crab-student open {name} --vscode"
+
+
+def open_one(name: str) -> int:
+    """Attach the terminal to a running agent. An interactive agent whose Claude works in VS Code is opened there,
+    and on a terminal this then waits for its hand-off and attaches to the agent in tmux."""
+    rec = core.load(name)
+    status = machine.agent_status(rec)
+    if status["frontend"] != "vscode":
+        return machine.open_one(name)
+    machine.open_vscode(rec, status)
+    if not machine.interactive() or not machine.wait_for_handoff(name):
+        return 0
+    return machine.open_one(name)
+
+
+def open_all(names: list[str]) -> int:
+    """Every running agent side by side, except interactive agents in VS Code (they have no terminal session)."""
+    shown = views(names)
+    skipped = [v.name for v in shown if v.frontend == "vscode"]
+    rest = [v.name for v in shown if v.frontend != "vscode"]
+    if skipped:
+        print(f"Skipped {', '.join(skipped)}: interactive, in VS Code (crab-student open NAME --vscode).")
+    if not rest:
+        raise core.CrabError(
+            "every running agent is interactive and in VS Code: crab-student open NAME --vscode"
+        )
+    return machine.open_all(rest)
+
+
+def follow_launch(name: str) -> bool:
+    """Show an agent's launch as it happens: its log so far, then each new line (on a terminal the status line is
+    rewritten in place), until it ends. True once the agent is ready; else False, after saying what happened
+    and what to do."""
+    tty = sys.stdout.isatty()
+    if tty and os.name == "nt":
+        os.system("")  # (turns on the escape codes that rewrite the status line)
+    print(
+        f"Launching {name}. Closing this window does not stop the launch (see it again: crab-student open {name})."
+    )
+    shown, quiet = _LogView(name, tty), 0
+    while True:
+        shown.update()
+        if not core.record_path(name).exists():
+            shown.end(f"{name} was deleted.")
+            return False
+        busy = core.is_locked(name)
+        quiet = 0 if busy else quiet + 1
+        rec = core.load(name)
+        if not busy and (rec["phase"] in ("ready", "failed", "pending") or quiet >= QUIET_ENDS):
+            shown.update()
+            shown.end(_launch_outcome(rec))
+            return rec["phase"] == "ready"
+        time.sleep(FOLLOW_POLL)
+
+
+def _launch_outcome(rec: dict) -> str:
+    name, phase = rec["name"], rec["phase"]
+    if phase == "ready":
+        return f"{name} is ready."
+    if phase == "failed":
+        return (
+            f"The launch of {name} failed: {rec.get('error') or 'see above'}. Try again: crab-student start {name} "
+            f"(or give up: crab-student delete {name})."
+        )
+    if phase == "pending":
+        return (
+            f"{name} is waiting for your approval: {rec['pending']['reason']}. Approve it: crab-student approve "
+            f"{name} (or: crab-student decline {name})."
+        )
+    return f"The launch of {name} stopped before it finished. Continue it: crab-student start {name}"
+
+
+class _LogView:
+    """The new lines of a launch log, printed as they come ("~" lines are the status line)."""
+
+    def __init__(self, name: str, tty: bool):
+        self.path, self.tty, self.pos, self.status = launch.log_file(name), tty, 0, False
+
+    def update(self) -> None:
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.pos)
+                data = f.read()
+        except OSError:
+            return
+        complete = data[: data.rfind(b"\n") + 1]  # (a line still being written waits for the next look)
+        self.pos += len(complete)
+        for line in complete.decode("utf-8", "replace").splitlines():
+            clock, _, text = line.partition(" ")
+            if text.startswith("~ ") and self.tty:
+                sys.stdout.write(f"\r\033[K{clock} {text[2:]}")
+                self.status = True
+            else:
+                self._print(f"{clock} {text[2:]}" if text.startswith("~ ") else line)
+        sys.stdout.flush()
+
+    def _print(self, text: str) -> None:
+        if self.status:
+            sys.stdout.write("\n")
+            self.status = False
+        print(core.ascii_text(text), flush=True)
+
+    def end(self, text: str) -> None:
+        self._print(text)

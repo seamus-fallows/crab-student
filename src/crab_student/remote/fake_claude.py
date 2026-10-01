@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""A stand-in for Claude Code (launch --fake-claude): it does a tiny task the way a worker would, so the
-whole pipeline can be tested without spending Claude usage."""
+"""A stand-in for Claude Code (launch --fake-claude): it does a tiny task the way an agent would, so the
+whole pipeline can be tested without spending Claude usage. It takes the command lines the machine gives
+Claude Code: a new conversation (--session-id ID PROMPT), a resumed one (--resume ID [NOTE]) and a fork
+(--resume ID --fork-session [--session-id NEW] PROMPT, which copies the conversation to a new id)."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
@@ -16,13 +20,19 @@ SLEEP = float(os.environ.get("FAKE_CLAUDE_SLEEP", "1"))
 
 
 def main(argv: list) -> int:
-    flag = "--resume" if "--resume" in argv else "--session-id"
-    sid = argv[argv.index(flag) + 1]
-    transcript = ROOT / ".claude" / "projects" / str(Path.cwd()).replace("/", "-") / (sid + ".jsonl")
-    if flag == "--resume" and not transcript.exists():
-        print("No conversation found with session ID: " + sid, file=sys.stderr)
+    folder = ROOT / ".claude" / "projects" / str(Path.cwd()).replace("/", "-")
+    resume = argv[argv.index("--resume") + 1] if "--resume" in argv else None
+    if resume and not (folder / (resume + ".jsonl")).exists():
+        print("No conversation found with session ID: " + resume, file=sys.stderr)
         return 1
-    transcript.parent.mkdir(parents=True, exist_ok=True)
+    fork = "--fork-session" in argv
+    sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else resume
+    if fork and "--session-id" not in argv:
+        sid = str(uuid.uuid4())
+    transcript = folder / (sid + ".jsonl")
+    folder.mkdir(parents=True, exist_ok=True)
+    if fork:
+        shutil.copy(str(folder / (resume + ".jsonl")), str(transcript))
 
     def note(kind: str, text: str) -> None:
         with open(str(transcript), "a") as f:
@@ -34,28 +44,29 @@ def main(argv: list) -> int:
         note("tool", "%s -> %d" % (" ".join(cmd), rc))
         return rc
 
-    if flag == "--resume":
+    if resume and not fork:
         note("resumed", " ".join(argv))
     else:
-        note("user", argv[-1])
-        name = os.environ.get("CRAB_STUDENT_NAME", "worker")
+        note("forked" if fork else "user", argv[-1])
+        name = os.environ.get("AGENT_NAME", "agent")
         runs = Path("agent-runs") / name
         runs.mkdir(parents=True, exist_ok=True)
-        step("crab-status", "working", "fake: starting")
+        step("agent-status", "working", "fake: starting")
         (runs / "result.txt").write_text("fake result\n")
         step("git", "add", "-A")
         step("git", "commit", "-q", "-m", "fake: result")
         step("git", "push", "-q")
         (ROOT / "outputs").mkdir(parents=True, exist_ok=True)
         (ROOT / "outputs" / "fake-output.bin").write_bytes(b"0" * 1024)
-        note("early-done", str(step("crab-status", "done", "too early")))  # (refused: no report yet)
+        if not (runs / "REPORT.md").exists():
+            note("early-done", str(step("agent-status", "done", "too early")))  # (refused: no report yet)
         (runs / "REPORT.md").write_text(
-            "# %s: fake run\n\nStatus: done\n\n## Summary\nA fake worker ran.\n" % name
+            "# %s: fake run\n\nStatus: done\n\n## Summary\nA fake agent ran.\n" % name
         )
         step("git", "add", "-A")
         step("git", "commit", "-q", "-m", "fake: report")
         step("git", "push", "-q")
-        step("crab-status", "done", "fake run finished")
+        step("agent-status", "done", "fake run finished")
     print("fake-claude: ready", flush=True)
     for line in sys.stdin:
         note("user", line.rstrip("\n"))

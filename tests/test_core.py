@@ -30,11 +30,20 @@ def test_a_value_is_parsed_by_the_type_of_its_default():
     assert core.parse_value("regions", "CA, europe") == ["CA", "europe"]
     assert core.parse_value("regions", "") == []
     assert core.parse_value("image", " me/image:1 ") == "me/image:1" and core.parse_value("model", "") == ""
+    assert (
+        core.parse_value("mode", "autonomous") == "autonomous"
+        and core.parse_value("effort", "xhigh") == "xhigh"
+    )
+    assert core.parse_value("fast_mode", "off") == "off" and core.parse_value("effort", "") == ""
 
 
 @pytest.mark.parametrize(
     ("key", "text"),
     [
+        ("mode", "solo"),
+        ("mode", ""),
+        ("effort", "max"),
+        ("fast_mode", "yes"),
         ("idle_minutes", "2.5"),
         ("approve_above_usd_per_hour", "lots"),
         ("approve_above_usd_per_hour", "nan"),
@@ -43,6 +52,7 @@ def test_a_value_is_parsed_by_the_type_of_its_default():
         ("image", "  "),
         ("regions", "CA, mars"),
         ("regions", "USA"),
+        ("home", "CAN"),
         ("workspace_repo", "my repo"),
         ("notify_url", "ftp://example.com"),
         ("colour", "blue"),
@@ -74,6 +84,22 @@ def test_load_config_ignores_unknown_keys_and_hands_out_copies():
     assert core.load_config()["regions"] == []
 
 
+def test_agents_copy_only_the_sensible_keys_of_the_users_own_claude_settings():
+    assert core.own_claude_settings() == {}  # (no file)
+    settings = Path.home() / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"model": "opus", "effortLevel": "high", "fastMode": false, "theme": "dark"}')
+    assert core.own_claude_settings() == {"model": "opus", "effortLevel": "high", "fastMode": False}
+    settings.write_text('{"model": " ", "effortLevel": "max", "fastMode": "on", "modelSettings": {"x": 1}}')
+    assert core.own_claude_settings() == {}
+    per_model = {"claude-opus-5-5": {"effortLevel": "high", "maxEffortLevel": "xhigh"}, "claude-haiku": {}}
+    settings.write_text(json.dumps({"modelSettings": per_model}))  # (where /effort keeps the user's choice)
+    assert core.own_claude_settings() == {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}}
+    for broken in ('{"model": "opus",', '["model"]'):
+        settings.write_text(broken)
+        assert core.own_claude_settings() == {}
+
+
 def test_the_vast_key_is_where_the_vastai_cli_keeps_it(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     assert core.vast_key_file() == tmp_path / "xdg" / "vastai" / "vast_api_key"
@@ -92,13 +118,13 @@ def test_records_are_listed_by_creation_and_removed_with_their_files():
     assert core.all_records() == []
     core.save({"name": "late", "created": "2026-09-30T12:00:00Z"})
     core.save({"name": "early", "created": "2026-09-30T08:00:00Z", "phase": "ready"})
-    (core.workers_dir() / "junk.json").write_text("{half a record")
+    (core.agents_dir() / "junk.json").write_text("{half a record")
     assert core.load("early")["phase"] == "ready"
     assert [r["name"] for r in core.all_records()] == ["early", "late"]
     for suffix in (".brief.md", ".lock"):
-        (core.workers_dir() / f"late{suffix}").write_text("x")
+        (core.agents_dir() / f"late{suffix}").write_text("x")
     core.remove("late")
-    assert sorted(p.name for p in core.workers_dir().iterdir()) == ["early.json", "junk.json"]
+    assert sorted(p.name for p in core.agents_dir().iterdir()) == ["early.json", "junk.json"]
     assert error_code(core.load, "late") == 1
 
 
@@ -200,8 +226,6 @@ def test_run_explains_a_missing_program_and_a_timeout_and_passes_bytes_through()
 
 
 def test_money_and_hours():
-    assert core.ceil_cents(2.521) == 2.53
-    assert core.ceil_cents(0.07) == 0.07 and core.ceil_cents(1.1 * 3) == 3.3  # (float noise costs no cent)
     assert core.usd(1.5) == "$1.50" and core.usd(None) == "-"
     assert core.fmt_hours(1.2) == "1h12m" and core.fmt_hours(0.9999) == "1h00m"
     assert core.fmt_hours(-0.1) == "0h00m" and core.fmt_hours(None) == "-"

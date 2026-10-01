@@ -1,36 +1,44 @@
-"""Requirements, the offer search, the picking rule and the time limit."""
+"""Requirements, the offer search and the picking rule."""
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import asdict, dataclass, field
 
 from crab_student import core, vast
 
-# A worker's time limit: twice its estimated hours, and at least 2 hours.
-LIMIT_FACTOR, MIN_LIMIT_HOURS = 2.0, 2.0
+# A host's lease must outlast twice the expected hours, and at least a day (plus an hour of margin).
+LEASE_FACTOR, MIN_LEASE_HOURS = 2.0, 24.0
+SIMILAR_PRICE = 1.20  # offers up to this factor over the cheapest count as the same price
+# Backups after the pick: two race at a time, so four leave room for two more rounds after the first pair.
+MAX_BACKUPS = 4
 REGIONS = {  # continent -> ISO country codes; `regions` entries are these names or 2-letter codes
     "north-america": {"US", "CA", "MX"},
     "south-america": {"AR", "BR", "CL", "CO", "PE", "UY"},
     "europe": set(
         "AT BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LT LU LV MT NL NO PL PT RO RS SE SI SK UA".split()
     ),
-    "asia": set("AE HK ID IL IN JP KR MY PH SG TH TR TW VN".split()),
+    "asia": set("AE ID IL IN JP KR MY PH SG TH TR TW VN".split()),
     "oceania": {"AU", "NZ"},
     "africa": {"EG", "KE", "MA", "NG", "ZA"},
 }
+# Countries where Anthropic's API is unavailable, so Claude Code on a host there cannot work: those Vast
+# could list that are missing from https://www.anthropic.com/supported-countries (checked October 2026).
+BLOCKED = {"AF", "BY", "CN", "CU", "HK", "IR", "KP", "MM", "MO", "RU", "SY", "VE", "YE"}
 
 
 @dataclass
 class Req:
-    """What a task needs. gpus 0 is a CPU task (cheap GPU hosts may still be picked for it)."""
+    """What a task needs. gpus 0 is a CPU task (cheap GPU hosts may still be picked for it). hours, when
+    known, only sets how long the host must stay available."""
 
-    hours: float
+    hours: float | None = None
     gpus: int = 0
     gpu_ram_gb: float = 0
     gpu_models: list[str] = field(default_factory=list)
-    cpus: int = 4
+    cpus: int = 8
     ram_gb: float = 16
     disk_gb: float = 50
     min_down_mbps: float = 200
@@ -67,8 +75,9 @@ class Plan:
         return max(o["dph_total"] for o in self.offers())
 
 
-def time_limit(hours: float) -> float:
-    return max(LIMIT_FACTOR * hours, MIN_LIMIT_HOURS)
+def lease_hours(hours: float | None) -> float:
+    """How long a host must still be available for a task of `hours` (None: not known)."""
+    return max(LEASE_FACTOR * (hours or 0), MIN_LEASE_HOURS) + 1
 
 
 def image_cuda(image: str) -> float | None:
@@ -114,6 +123,10 @@ def country(o: dict) -> str | None:
     return code if re.fullmatch(r"[A-Z]{2}", code) else None
 
 
+def continent(code: str | None) -> str | None:
+    return next((name for name, codes in REGIONS.items() if code in codes), None)
+
+
 def allowed_countries(regions: list[str]) -> set[str]:
     codes: set[str] = set()
     for r in regions:
@@ -121,10 +134,14 @@ def allowed_countries(regions: list[str]) -> set[str]:
     return codes
 
 
+def reliability(o: dict) -> float | None:
+    rel = _num(o, "reliability2")
+    return _num(o, "reliability") if rel is None else rel
+
+
 def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
     """The client-side recheck of every requirement (Vast's filter is not always exact)."""
-    price, rel = _num(o, "dph_total"), _num(o, "reliability2")
-    rel = _num(o, "reliability") if rel is None else rel
+    price, rel = _num(o, "dph_total"), reliability(o)
     ok = (
         o.get("rentable") is not False
         and o.get("rented") is not True
@@ -148,17 +165,35 @@ def fits(o: dict, req: Req, cfg: dict, now: float) -> bool:
             and (cuda is None or (_num(o, "cuda_max_good") or 0) >= cuda)
             and (not req.gpu_models or any(m.lower() in name for m in req.gpu_models))
         )
+    if ok and country(o) in BLOCKED:  # (an unknown country stays allowed)
+        ok = False
     end = _num(o, "end_date")
-    if ok and end and end < now + 3600 * (time_limit(req.hours) + 1):
+    if ok and end and end < now + 3600 * lease_hours(req.hours):
         ok = False
     if ok and cfg["regions"]:
         ok = country(o) in allowed_countries(cfg["regions"])
     return ok
 
 
-def rank(offers: list[dict], gpu: bool) -> list[dict]:
+def standing(o: dict) -> float:
+    """Reliability and download speed together: a point of reliability (in percent) counts as much as twice
+    the download speed."""
+    return 100 * (reliability(o) or 0) + math.log2(max(_num(o, "inet_down") or 0, 1))
+
+
+def distance(o: dict, home: str) -> int:
+    """0 in the `home` country, 1 on its continent, 2 farther or unknown."""
+    where = country(o)
+    if where == home:
+        return 0
+    near = continent(where) if where else None
+    return 1 if near and near == continent(home) else 2
+
+
+def rank(offers: list[dict], gpu: bool, home: str = "") -> list[dict]:
     """The deterministic order: for GPU work, drop offers clearly worse in speed per dollar; among offers
-    within 10% of the lowest price left, the fastest download first; then by price and id."""
+    within 20% of the lowest price left, the nearest to `home` first (when given), then the best standing
+    (reliability and download speed); then by price and id."""
 
     def value(o: dict) -> float:
         return (_num(o, "dlperf") or 0) / o["dph_total"]
@@ -172,8 +207,8 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
             pool = [o for o in band if value(o) >= best / 1.2]
     floor = min(o["dph_total"] for o in pool)
     similar = sorted(
-        (o for o in pool if o["dph_total"] <= 1.10 * floor),
-        key=lambda o: (-(_num(o, "inet_down") or 0), o["dph_total"], o["id"]),
+        (o for o in pool if o["dph_total"] <= SIMILAR_PRICE * floor),
+        key=lambda o: (distance(o, home) if home else 0, -standing(o), o["dph_total"], o["id"]),
     )
     rest = sorted(
         (o for o in offers if o not in similar),
@@ -182,14 +217,18 @@ def rank(offers: list[dict], gpu: bool) -> list[dict]:
     return similar + rest
 
 
-def fallbacks(ranked: list[dict]) -> list[dict]:
-    """Up to 2 backups after the pick: other machines (a boot failure is often the host's fault) at most
-    1.25x its price."""
+def fallbacks(ranked: list[dict], over_cap: bool = False) -> list[dict]:
+    """Up to MAX_BACKUPS backups after the pick, on other machines (a boot failure is often the host's fault). Any
+    price up to the approval price will do; over it (the user approves the prices shown), at most 1.25x the pick."""
     primary, picked = ranked[0], []
     seen = {primary.get("machine_id") or primary["id"]}
     for o in ranked[1:]:
         machine = o.get("machine_id") or o["id"]
-        if len(picked) < 2 and machine not in seen and o["dph_total"] <= 1.25 * primary["dph_total"]:
+        if (
+            len(picked) < MAX_BACKUPS
+            and machine not in seen
+            and (not over_cap or o["dph_total"] <= 1.25 * primary["dph_total"])
+        ):
             picked.append(o)
             seen.add(machine)
     return picked
@@ -206,15 +245,17 @@ def plan(
     cap: float | None = None,
     taken: set | frozenset = frozenset(),
     found: list[dict] | None = None,
+    mode: str = "",
 ) -> Plan:
     """The machine to rent and its backups, from the offers up to `cap` $/hr (over_cap, and all offers, when
-    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given):
+    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given), near
+    the `home` setting for an interactive agent (latency matters only when the user types into it):
     CrabError(4) when nothing fits the hardware."""
     fit = search(req, cfg) if found is None else found
     found = [o for o in fit if o["id"] not in taken]
     if fit and not found:
         raise core.CrabError(
-            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the workers that "
+            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the agents that "
             "need one. Launch fewer at once, or loosen the requirements.",
             4,
         )
@@ -227,8 +268,9 @@ def plan(
             4,
         )
     within = [o for o in found if cap is None or o["dph_total"] <= cap]
-    ranked = rank(within or found, req.gpu)
-    return Plan(req, ranked[0], fallbacks(ranked), ranked, over_cap=not within)
+    home = cfg["home"].upper() if mode == "interactive" else ""
+    ranked = rank(within or found, req.gpu, home)
+    return Plan(req, ranked[0], fallbacks(ranked, over_cap=not within), ranked, over_cap=not within)
 
 
 def summary(o: dict) -> str:
@@ -256,7 +298,7 @@ def short(o: dict) -> str:
 
 
 def kept(o: dict) -> dict:
-    """The fields of an offer a worker record keeps."""
+    """The fields of an offer an agent record keeps."""
     return {
         "id": o["id"],
         "machine_id": o.get("machine_id"),

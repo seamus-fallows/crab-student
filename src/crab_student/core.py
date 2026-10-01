@@ -1,4 +1,4 @@
-"""Errors, paths, settings, worker records and their locks, secrets, subprocesses, formatting."""
+"""Errors, paths, settings, agent records and their locks, secrets, subprocesses, formatting."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -36,8 +37,17 @@ def home() -> Path:
     return Path.home() / ".crab-student"
 
 
-def workers_dir() -> Path:
-    return home() / "workers"
+def ssh_path(path: Path) -> str:
+    """A path for an ssh config line that both Windows' OpenSSH and Git's ssh understand: "~/..." under the home
+    folder (Git's ssh reads "C:/..." as a relative path, and VS Code may run it), else quoted with "/"."""
+    try:
+        return "~/" + path.relative_to(Path.home()).as_posix()
+    except ValueError:
+        return '"' + str(path).replace("\\", "/") + '"'
+
+
+def agents_dir() -> Path:
+    return home() / "agents"
 
 
 def ssh_dir() -> Path:
@@ -63,6 +73,41 @@ def tool(name: str) -> str | None:
     return shutil.which(name)
 
 
+# ---- VS Code's user settings ---------------------------------------------------------------------
+
+
+VSCODE_EXTENSIONS = "remote.SSH.defaultExtensions"  # (the extensions Remote - SSH installs on every host)
+CLAUDE_EXTENSION = "anthropic.claude-code"
+
+
+def vscode_settings_file() -> Path:
+    home = Path.home()
+    if sys.platform == "win32":
+        base = home / "AppData" / "Roaming"
+    elif sys.platform == "darwin":
+        base = home / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return base / "Code" / "User" / "settings.json"
+
+
+def read_vscode_settings(path: Path) -> dict | None:
+    """The settings, or None when the file is not plain JSON (VS Code allows comments there)."""
+    if not path.exists():
+        return {}
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return settings if isinstance(settings, dict) else None
+
+
+def write_vscode_settings(path: Path, settings: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(settings, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+    replace(tmp, path)
+
+
 # ---- settings ------------------------------------------------------------------------------------
 
 DEFAULTS: dict[str, object] = {
@@ -73,10 +118,17 @@ DEFAULTS: dict[str, object] = {
     "min_reliability": 0.98,
     "min_download_mbps": 200.0,
     "regions": [],
+    "home": "",
+    "mode": "colleague",
     "model": "",
+    "effort": "",
+    "fast_mode": "",
     "workspace_repo": "crab-student-work",
     "notify_url": "",
+    "open_window": "on",
 }
+MODES = ("autonomous", "colleague", "interactive")
+EFFORTS = ("low", "medium", "high", "xhigh")
 
 
 def _regions_ok(value: list) -> bool:
@@ -97,9 +149,17 @@ RULES = {
         "country codes (US, CA, DE, ...) or continents (north-america, south-america, "
         "europe, asia, oceania, africa), comma-separated; empty means anywhere",
     ),
-    "model": (lambda v: True, "a Claude model such as opus or sonnet; empty uses Claude Code's default"),
+    "home": (
+        lambda v: v == "" or bool(re.fullmatch(r"[A-Za-z]{2}", v)),
+        "your country code (CA, US, DE, ...), for interactive agents near you; empty: no preference",
+    ),
+    "mode": (lambda v: v in MODES, "autonomous, colleague or interactive"),
+    "model": (lambda v: True, "a Claude model such as opus or sonnet (empty: as your own Claude Code)"),
+    "effort": (lambda v: v in ("", *EFFORTS), "low, medium, high or xhigh (empty: as your own Claude Code)"),
+    "fast_mode": (lambda v: v in ("", "on", "off"), "on or off (empty: as your own Claude Code)"),
     "workspace_repo": (lambda v: bool(re.fullmatch(r"[A-Za-z0-9._-]+", v)), "a GitHub repo name"),
     "notify_url": (lambda v: v == "" or v.startswith(("http://", "https://")), "an http(s) URL, or empty"),
+    "open_window": (lambda v: v in ("on", "off"), "on or off"),
 }
 
 
@@ -140,7 +200,31 @@ def set_config(key: str, text: str | None) -> object:
     return value
 
 
-# ---- worker records ------------------------------------------------------------------------------
+def own_claude_settings() -> dict:
+    """What agents copy from the user's own Claude Code settings when nothing else says: `model`,
+    `effortLevel`, `fastMode`, and the effort levels in `modelSettings` (where Claude Code keeps the effort
+    chosen for each model), those set with a sensible type (a missing or invalid file gives none)."""
+    data = read_json(Path.home() / ".claude" / "settings.json", {})
+    if not isinstance(data, dict):
+        return {}
+    kept: dict = {}
+    if isinstance(data.get("model"), str) and data["model"].strip():
+        kept["model"] = data["model"].strip()
+    if data.get("effortLevel") in EFFORTS:
+        kept["effortLevel"] = data["effortLevel"]
+    if isinstance(data.get("fastMode"), bool):
+        kept["fastMode"] = data["fastMode"]
+    per_model = data.get("modelSettings") if isinstance(data.get("modelSettings"), dict) else {}
+    if efforts := {
+        m: {"effortLevel": s["effortLevel"]}
+        for m, s in per_model.items()
+        if isinstance(s, dict) and s.get("effortLevel") in EFFORTS
+    }:
+        kept["modelSettings"] = efforts
+    return kept
+
+
+# ---- agent records -------------------------------------------------------------------------------
 
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,38}[a-z0-9]")
 
@@ -154,18 +238,18 @@ def check_name(name: str) -> None:
 
 
 def record_path(name: str) -> Path:
-    return workers_dir() / f"{name}.json"
+    return agents_dir() / f"{name}.json"
 
 
 def load(name: str) -> dict:
     rec = read_json(record_path(name), None)
     if rec is None:
-        raise CrabError(f"there is no worker named {name} (see crab-student list).")
+        raise CrabError(f"there is no agent named {name} (see crab-student list).")
     return rec
 
 
 def all_records() -> list[dict]:
-    recs = [read_json(p, None) for p in sorted(workers_dir().glob("*.json"))]
+    recs = [read_json(p, None) for p in sorted(agents_dir().glob("*.json"))]
     return sorted(
         (r for r in recs if isinstance(r, dict) and "name" in r), key=lambda r: r.get("created", "")
     )
@@ -176,17 +260,17 @@ def save(rec: dict) -> None:
 
 
 def remove(name: str) -> None:
-    """Forget a worker: its record and brief (its lock file may still be held)."""
-    for suffix in (".json", ".brief.md", ".lock"):
+    """Forget an agent: its record, brief and launch log (its lock file may still be held)."""
+    for suffix in (".json", ".brief.md", ".log", ".lock"):
         with contextlib.suppress(OSError):
-            (workers_dir() / f"{name}{suffix}").unlink(missing_ok=True)
+            (agents_dir() / f"{name}{suffix}").unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
 def locked(name: str, wait: float = 0) -> Iterator[None]:
-    """Hold the worker's OS lock (it dies with the process, so a lock that cannot be taken means another
-    crab-student command is working on the worker right now)."""
-    path = workers_dir() / f"{name}.lock"
+    """Hold the agent's OS lock (it dies with the process, so a lock that cannot be taken means another
+    crab-student command is working on the agent right now)."""
+    path = agents_dir() / f"{name}.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+") as f:
         deadline = time.monotonic() + wait
@@ -278,7 +362,7 @@ def write_private(path: Path, text: str) -> None:
 # ---- secrets -------------------------------------------------------------------------------------
 
 SERVICE = "crab-student"
-TOKEN = "claude-oauth-token"  # the Claude token for workers
+TOKEN = "claude-oauth-token"  # the Claude token for agents
 SECRET_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
@@ -381,10 +465,6 @@ def last_line(text: str) -> str:
 
 def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def ceil_cents(x: float) -> float:
-    return math.ceil(round(x * 100, 6)) / 100
 
 
 def usd(x: float | None) -> str:

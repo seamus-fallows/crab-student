@@ -29,7 +29,7 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
             "rents": [],
             "instance_id": None, "dph": 0.40, "disk_usd_day": None, "mode": "colleague", "claude_settings": {},
             "machine": "1x RTX 4090",
-            "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None, "stop_note": None,
+            "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None,
             "repo": repo, "uploaded": phase == "ready", **fields}  # fmt: skip
 
 

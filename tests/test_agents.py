@@ -241,6 +241,11 @@ def test_stop_still_stops_when_the_save_fails(error, fake_vast, machines):
     assert fake_vast.instances[iid]["intended_status"] == "stopped"
 
 
+def test_a_launch_whose_setup_failed_has_nothing_to_stop(fake_vast):
+    core.save(record(phase="failed", uploaded=True, instance_id=None))  # (its machine was destroyed)
+    fails(1, agents.stop, "job1", out())
+
+
 def test_stopping_a_stopped_agent_changes_nothing(fake_vast, machines):
     agent(fake_vast, status="exited")
     agents.stop("job1", out())
@@ -322,9 +327,10 @@ def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_
     other = fake_vast.add_instance(1, "cs:job1:00000000", status="loading")  # (not this launch's label)
     rents = [rent("cs:job1:aaaa1111", racing), rent("cs:job1:abcd1234"), rent("cs:job1:ffff0000")]
     core.save(record(phase="renting", uploaded=False, rents=rents))
-    agents.delete("job1", False, out())
+    res = agents.delete("job1", False, out())
     assert list(fake_vast.instances) == [other] and racing not in fake_vast.instances
     assert unconfirmed not in fake_vast.instances and not core.record_path("job1").exists()
+    assert "cs:job1:ffff0000" in res["result_line"]  # (the rent whose machine was not found is named)
 
 
 def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):

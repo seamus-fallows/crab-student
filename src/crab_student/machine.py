@@ -30,6 +30,7 @@ CLAUDE_URL = "vscode://anthropic.claude-code/open?prompt="  # (the Claude extens
 PROMPT_MAX = 5000
 VSCODE_URL_DELAY = 15.0  # (the new window must be connected, Claude running, when the panel is asked for)
 HANDOFF_POLL = 5.0  # seconds between asking an interactive agent's machine whether it was handed off
+HANDOFF_MISSES = 12  # failed asks in a row (a minute) before the wait gives up
 
 
 class Unreachable(core.CrabError):
@@ -71,12 +72,20 @@ def _ssh_config_text() -> str:
     return "\n".join(lines)
 
 
+def _ssh_files():
+    """The lock on the ssh config and known_hosts, which every agent shares (parallel launches write them)."""
+    return core.locked("_ssh-files", wait=60)
+
+
 def write_ssh_config() -> None:
     """Regenerate the host entries (one per agent with an address) that ~/.ssh/config includes."""
-    config_file().parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_file().with_name(f"config.{os.getpid()}.tmp")  # (several commands may rewrite it at once)
-    tmp.write_text(_ssh_config_text(), encoding="utf-8")
-    core.replace(tmp, config_file())
+    with (
+        _ssh_files()
+    ):  # (the records are read inside it: a process that read them earlier must not write last)
+        config_file().parent.mkdir(parents=True, exist_ok=True)
+        tmp = config_file().with_name(f"config.{os.getpid()}.tmp")
+        tmp.write_text(_ssh_config_text(), encoding="utf-8")
+        core.replace(tmp, config_file())
 
 
 def set_address(rec: dict, inst: dict) -> bool:
@@ -94,8 +103,9 @@ def set_address(rec: dict, inst: dict) -> bool:
 def forget_host_key(name: str) -> None:
     """A new machine for this name has a new host key."""
     hosts = core.ssh_dir() / "known_hosts"
-    if hosts.exists() and (keygen := core.tool("ssh-keygen")):
-        core.run([keygen, "-R", alias(name), "-f", str(hosts)], check=False)
+    with _ssh_files():
+        if hosts.exists() and (keygen := core.tool("ssh-keygen")):
+            core.run([keygen, "-R", alias(name), "-f", str(hosts)], check=False)
 
 
 def ssh_cmd(name: str, *, tty: bool = False) -> list[str]:
@@ -402,20 +412,26 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
 
 def wait_for_handoff(name: str) -> bool:
     """Wait until the interactive agent is handed off to tmux, asking its machine every few seconds: True then;
-    False when the machine cannot be asked, or the user closes the wait with Ctrl+C."""
+    False when the machine cannot be asked for a minute, or the user closes the wait with Ctrl+C."""
     print(
         f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close).",
         flush=True,
     )
+    misses = 0
     try:
-        while remote(name, ["status"], timeout=20).get("frontend") != "tmux":
+        while True:
+            try:
+                if remote(name, ["status"], timeout=20).get("frontend") == "tmux":
+                    return True
+                misses = 0
+            except core.CrabError as e:
+                misses += 1
+                if misses >= HANDOFF_MISSES:
+                    print(f"Stopped waiting: {e.message}")
+                    return False
             time.sleep(HANDOFF_POLL)
-    except core.CrabError as e:
-        print(f"Stopped waiting: {e.message}")
-        return False
     except KeyboardInterrupt:
         return False
-    return True
 
 
 def remember_linux_host(name: str) -> None:

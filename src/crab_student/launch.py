@@ -484,8 +484,8 @@ class Race:
             time.sleep(POLL)
 
     def stuck(self) -> bool:
-        """Only unconfirmed rents are in flight (fill found nothing more to rent), and none of their machines has
-        shown up for LABEL_WAIT."""
+        """Only unconfirmed rents are in flight (they hold every racing slot, or no offer is left), and none of
+        their machines has shown up for LABEL_WAIT."""
         rents, now = self.rec["rents"], time.monotonic()
         return bool(rents) and all(
             r["instance_id"] is None and now - self.looking[r["label"]] >= LABEL_WAIT for r in rents

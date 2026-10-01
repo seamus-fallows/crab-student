@@ -55,8 +55,7 @@ def views(names: list[str] | None = None) -> list[View]:
 def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
     """Every agent (or those named) as it is now, and the machines that belong to no agent (see orphans): one
     Vast call, and one ssh call per running machine."""
-    every = core.all_records()
-    recs = [r for r in every if names is None or r["name"] in names]
+    recs = [r for r in core.all_records() if names is None or r["name"] in names]
     insts: dict | None = {}
     if core.vast_key_file().exists() or any(r.get("instance_id") for r in recs):
         try:
@@ -79,7 +78,8 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
         result.append(_view(rec, inst, st, state, message))
     if moved:
         machine.write_ssh_config()
-    return result, orphans(list((insts or {}).values()), every)
+    # (records read again: a launch running alongside may have saved a rent since the first read)
+    return result, orphans(list((insts or {}).values()), core.all_records())
 
 
 def orphans(insts: list[dict], recs: list[dict]) -> list[dict]:
@@ -140,7 +140,7 @@ def display_state(
             return "starting", {"renting": "renting a machine", "booting": "booting", "setup": "setting up"}[
                 phase
             ]
-        return "interrupted", f"launch interrupted: crab-student start {name} continues it"
+        return "interrupted", f"launch interrupted: crab-student start {name} tries again"
     if phase == "failed":
         return "failed", rec.get("error") or ""
     if vast_down:
@@ -235,7 +235,7 @@ def stop(name: str, out: launch.Progress) -> dict:
             raise core.CrabError(
                 f"{name} is waiting for approval and has no machine yet. To drop it: crab-student decline {name}"
             )
-        if not rec.get("uploaded"):
+        if not (rec.get("uploaded") and rec.get("instance_id")):
             raise core.CrabError(
                 f"{name} has not finished launching, so there is nothing to stop. To give up on it: "
                 f"crab-student delete {name}"
@@ -317,8 +317,8 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                         3,
                     ) from None
             elif (note := _stop_note(rec)) is not None:
-                res = {"unpushed": note.get("unpushed", 0), "dirty": note.get("not_committed_count", 0),
-                       "outputs": note.get("outputs"), "large_files": note.get("large_files")}  # fmt: skip
+                res = {"dirty": note.get("not_committed_count", 0), "outputs": note.get("outputs"),
+                       "large_files": note.get("large_files")}  # fmt: skip
             else:
                 raise core.CrabError(
                     f"{name} is stopped, and crab-student does not know what it left on the machine. Start it "
@@ -341,14 +341,16 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     ),
                     3,
                 )
-        ids = [inst["id"]] if inst else []
+        ids, lost = [inst["id"]] if inst else [], []
         for r in rec["rents"]:  # (a race cut off: its machines never received anything)
             if iid := r["instance_id"] or launch.find_by_label(r["label"]):
                 ids.append(iid)
+            else:
+                lost.append(f"Warning: {launch.unconfirmed(r)}")
         for iid in ids:
             vast.destroy(iid)
             out.line(f"Destroyed machine {iid}.")
-        lines = [f"Deleted {name}.", *_cleanup(rec)]
+        lines = [f"Deleted {name}.", *_cleanup(rec), *lost]
     return {"name": name, "result_line": "\n".join(lines)}
 
 
@@ -495,7 +497,7 @@ def _launch_outcome(rec: dict) -> str:
             f"{name} is waiting for your approval: {rec['pending']['reason']}. Approve it: crab-student approve "
             f"{name} (or: crab-student decline {name})."
         )
-    return f"The launch of {name} stopped before it finished. Continue it: crab-student start {name}"
+    return f"The launch of {name} stopped before it finished. Try again: crab-student start {name}"
 
 
 class _LogView:

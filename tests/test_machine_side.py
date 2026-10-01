@@ -1030,6 +1030,7 @@ def test_setup_repository_clones_the_branch_once_and_configures_it(cs, bare):
     assert (repo / "work.txt").exists()
 
 
+@posix_only
 def test_setup_where_it_was_done_before_only_restarts_the_watchdog(cs, monkeypatch, capsys):
     (cs.D / "setup-done").write_text("")
     ran = []
@@ -1253,6 +1254,7 @@ def test_setup_installs_the_dependencies_before_the_agent_starts_and_a_failure_i
 ):
     result, steps, rules = setup_installing_only(cs, monkeypatch, capsys, setup=command)
     assert result["ok"] and steps == [f"{i}/6" for i in range(1, 7)]
+    assert (cs.D / "heartbeat").exists()  # (setup keeps the dead-man switch from stopping a long install)
     assert cs.read_deps() == {"command": command, "exit_code": code}
     vscode = json.loads((cs.VSCODE_HOME / "data" / "Machine" / "settings.json").read_text())
     if code == 0:

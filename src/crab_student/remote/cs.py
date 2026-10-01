@@ -43,7 +43,7 @@ QUIET_MINUTES = 20  # a "working" agent silent this long gets a check-in (longer
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
 STEPS = ("environment", "repository", "dependencies", "agent settings", "Claude Code", "starting the agent")
-DEPS_TIMEOUT = 2400  # (40 minutes: room for a big install, CUDA wheels say, on a slow host)
+DEPS_TIMEOUT = 1800  # (30 minutes, room for CUDA wheels on a slow host, within the dead-man switch's 45)
 SESSION = "agent"  # the tmux session Claude Code runs in
 # What the config's claude_settings may set (modelSettings: the effort Claude Code keeps for each model).
 CLAUDE_KEYS = ("model", "effortLevel", "modelSettings", "fastMode")
@@ -196,9 +196,9 @@ def read_env_file(path: Path) -> dict:
 
 
 def inherited(key: str) -> bool:
-    """A variable Claude Code in tmux must not get: the machine's own Vast key, or a parent Claude Code's (a
-    hand-off runs from the one in VS Code)."""
-    return key.startswith(("CONTAINER_", "CLAUDE_CODE_")) or key == "CLAUDECODE"
+    """A variable Claude Code in tmux must not get: the machine's own Vast key, or a parent Claude Code's or VS
+    Code's (a hand-off runs from the Claude Code in VS Code, and starts the tmux server)."""
+    return key.startswith(("CONTAINER_", "CLAUDE_CODE_", "VSCODE_")) or key == "CLAUDECODE"
 
 
 def agent_env(c: dict) -> dict:
@@ -263,6 +263,9 @@ def frontend(c: dict) -> str:
 
 
 def cmd_setup() -> int:
+    _held = _lock(
+        D / "setup.lock", wait=True
+    )  # (a setup run again after a lost connection waits for the first)
     c, jobs = cfg(), {}
     if (D / "setup-done").exists():  # (a launch that was cut off after setup: the agent may be at work)
         spawn_watchdog()
@@ -278,6 +281,9 @@ def cmd_setup() -> int:
     for i, step in enumerate(steps, 1):
         label = STEPS[i - 1]
         print("step %d/%d %s" % (i, len(steps), label), flush=True)
+        write(
+            D / "heartbeat", str(int(time.time())), 0o600
+        )  # (each step is bounded: the dead-man switch waits)
         try:
             step(c, jobs)
         except Exception as e:  # reported to the local side, which destroys the machine
@@ -288,7 +294,7 @@ def cmd_setup() -> int:
 
 
 def vscode_server_ready(jobs: dict) -> list:
-    """Wait for VS Code's server to be in place: a warning when it is not (VS Code then installs it itself)."""
+    """Wait for VS Code's server and the Claude extension to be in place: a warning when they are not."""
     job = jobs.get("VS Code")
     if job is None:
         return []
@@ -298,8 +304,9 @@ def vscode_server_ready(jobs: dict) -> list:
     except subprocess.TimeoutExpired:
         job.kill()
     tail = last_line((D / "logs" / "vscode.log").read_text(errors="replace"))
-    return ["VS Code's server could not be put on the machine ahead of time (%s): VS Code installs it itself "
-            "when you first open the agent, which takes a minute." % tail]  # fmt: skip
+    return ["VS Code's server and its Claude extension could not be put on the machine ahead of time (%s): VS "
+            "Code installs its server when you first open the agent, and the extension only if your "
+            "remote.SSH.defaultExtensions lists %s." % (tail, CLAUDE_EXTENSION)]  # fmt: skip
 
 
 def _script(path: Path, command: str) -> None:
@@ -838,12 +845,12 @@ def spawn(command: str, logname: str) -> None:
         )
 
 
-def _lock(path: Path):
+def _lock(path: Path, wait: bool = False):
     import fcntl
 
     f = open(str(path), "a")  # noqa: SIM115 - held open: the lock lives as long as the file
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         return f
     except OSError:
         f.close()

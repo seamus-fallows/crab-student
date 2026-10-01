@@ -195,7 +195,8 @@ fake_claude, session_id, idle_minutes, notify_url, secret_names, setup, vscode_c
 `claude.env` and `secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600),
 `github_known_hosts`. Setup prints `step i/6 <label>` lines, then `{"ok": true, "warnings": [...]}` or
 `{"ok": false, "step", "label", "error"}`; once `setup-done` exists it only restarts the watchdog
-(`{"ok": true, "resumed": true}`). The steps:
+(`{"ok": true, "resumed": true}`). A setup run again (after a lost connection) waits on `setup.lock` for
+the first; each step touches `heartbeat`, so the dead-man switch waits for a long step. The steps:
 
 1. `environment`: the login profile `/etc/profile.d/agent.sh`, also run from `~/.bashrc` (PATH with the
    repo's `.venv`, `~/.local/bin`, `/venv/main`; the token and secrets; shells start in the repo); the
@@ -205,7 +206,7 @@ fake_claude, session_id, idle_minutes, notify_url, secret_names, setup, vscode_c
 2. `repository`: clone the branch with the deploy key; a push refspec for the branch only.
 3. `dependencies`: `setup`, or the first that fits the repo: `uv.lock` or `[tool.uv]` -> `uv sync`
    (installing uv if missing); `[project]` in `pyproject.toml` -> `pip install -e .`;
-   `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`. Waited for (40
+   `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`. Waited for (30
    minutes at most); `deps.json` keeps `{command, exit_code}`; a failure is a warning in setup's result,
    never a failed setup.
 4. `agent settings`: the brief to `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from

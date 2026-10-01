@@ -146,7 +146,7 @@ starts, so it does not spend its first minutes on them. It goes by the repo, the
 - `requirements*.txt`: `pip install -r` for each;
 - `setup.py`: `pip install -e .`.
 
-pip is the image's (`/venv/main/bin/python -m pip`). Setup waits for the install (up to 40 minutes),
+pip is the image's (`/venv/main/bin/python -m pip`). Setup waits for the install (up to 30 minutes),
 so a launch can take a while. If it fails, the machine is set up anyway: the launch prints a warning,
 and the agent is told, with the end of the install's output. Shells on the machine, the agent's Claude
 Code and VS Code all use the repo's `.venv` once there is one, else `/venv/main`, and terminals start

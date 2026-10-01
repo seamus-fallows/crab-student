@@ -48,7 +48,7 @@ are for. When it finishes, show the user the brief(s) it gave, then the result l
 If a result says a launch needs approval, tell the user the price per hour and why, and ask. Only after
 an explicit yes in this conversation, run `crab-student approve NAME --json`, one
 Bash call per agent with `run_in_background: true` (several can run at once). If one is cut off, run
-`crab-student start NAME --json`, which continues it. If they say no: `crab-student decline NAME`.
+`crab-student start NAME --json`, which tries again. If they say no: `crab-student decline NAME`.
 
 ## Interactive agents
 

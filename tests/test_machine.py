@@ -376,9 +376,8 @@ def test_the_wait_for_a_hand_off_asks_the_machines_status_until_the_agent_runs_i
     assert asked == [("job1", ["status"])] * 3 and slept == [machine.HANDOFF_POLL] * 2 and answers == []
 
 
-@pytest.mark.parametrize("answer", [machine.Unreachable("no answer"), KeyboardInterrupt()])
-def test_the_wait_for_a_hand_off_ends_when_the_machine_cannot_be_reached_or_on_ctrl_c(monkeypatch, answer):
-    answers = [{"frontend": "vscode"}, answer]
+def fake_status(monkeypatch, answers: list) -> None:
+    """machine.remote answering from `answers` (an exception is raised); no sleeping."""
 
     def remote(name, args, **kw):
         reply = answers.pop(0)
@@ -388,4 +387,19 @@ def test_the_wait_for_a_hand_off_ends_when_the_machine_cannot_be_reached_or_on_c
 
     monkeypatch.setattr(machine, "remote", remote)
     monkeypatch.setattr(machine.time, "sleep", lambda seconds: None)
+
+
+def test_the_wait_for_a_hand_off_rides_out_a_short_loss_of_the_machine(monkeypatch):
+    lost = [machine.Unreachable("no answer")] * (machine.HANDOFF_MISSES - 1)
+    answers = [{"frontend": "vscode"}, *lost, {"frontend": "vscode"}, *lost, {"frontend": "tmux"}]
+    fake_status(monkeypatch, answers)
+    assert machine.wait_for_handoff("job1") is True and answers == []
+
+
+def test_the_wait_for_a_hand_off_ends_when_the_machine_is_lost_for_a_minute_or_on_ctrl_c(monkeypatch):
+    answers = [{"frontend": "vscode"}, *[machine.Unreachable("no answer")] * machine.HANDOFF_MISSES]
+    fake_status(monkeypatch, answers)
+    assert machine.wait_for_handoff("job1") is False and answers == []
+    answers = [{"frontend": "vscode"}, KeyboardInterrupt()]
+    fake_status(monkeypatch, answers)
     assert machine.wait_for_handoff("job1") is False and answers == []

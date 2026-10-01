@@ -126,7 +126,7 @@ uv run ruff check src tests && uv run ruff format --check src tests
   (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`, including
   the per-model efforts Claude Code keeps (`modelSettings.<model>.effortLevel`) unless an effort is
   chosen.
-- Setup installs the repo's dependencies (step 3 of 6) and waits for it, up to 40 minutes; a failed
+- Setup installs the repo's dependencies (step 3 of 6) and waits for it, up to 30 minutes; a failed
   install is a warning in the launch's result and a line in the agent's rules, never a failed setup. So
   the launcher runs `launch`, `start` and `approve` as background Bash calls (a Bash call stops at 10
   minutes). VS Code's server (interactive agents) is a setup job whose failure is only a warning.

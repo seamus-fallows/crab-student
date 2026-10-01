@@ -25,15 +25,20 @@ NO_ROOM = "Error: the host's GPUs are in use by another client; waiting for them
 def offer(id: int, **fields) -> dict:
     """A realistic offer (trimmed to the fields crab-student reads)."""
     base = {"id": id, "machine_id": id * 10, "gpu_name": "RTX 4090", "num_gpus": 1, "gpu_ram": 24564,
-            "dph_total": 0.40, "dlperf": 80.0, "reliability2": 0.995, "inet_down": 800.0, "cuda_max_good": 12.9,
-            "geolocation": "Quebec, CA", "disk_space": 200.0, "cpu_cores_effective": 16.0, "cpu_ram": 64000,
-            "verification": "verified", "verified": True, "rentable": True, "rented": False, "external": False,
-            "direct_port_count": 10}  # fmt: skip
+            "compute_cap": 890, "gpu_mem_bw": 1008.0, "dph_total": 0.40, "reliability2": 0.995, "inet_down": 800.0,
+            "inet_up": 600.0, "cuda_max_good": 12.9, "geolocation": "Quebec, CA", "disk_space": 200.0,
+            "cpu_cores_effective": 16.0, "cpu_cores": 64, "cpu_name": "AMD EPYC 7B13 64-Core Processor",
+            "cpu_ram": 64000, "verification": "verified", "verified": True, "rentable": True, "rented": False,
+            "external": False, "direct_port_count": 10}  # fmt: skip
     return {**base, **fields}
 
 
 def cpu_offer(id: int, **fields) -> dict:
-    return offer(id, gpu_name="", num_gpus=0, gpu_ram=0, dlperf=0.0, cuda_max_good=0, **fields)
+    """A machine with plenty of CPU (Vast has no machine without a GPU: this one's is a cheap one)."""
+    base = {"gpu_name": "RTX 3060", "gpu_ram": 12288, "compute_cap": 860, "dph_total": 0.20,
+            "cpu_cores_effective": 32.0, "cpu_cores": 32, "cpu_name": "AMD Ryzen 9 7950X 16-Core Processor",
+            "cpu_ram": 128000}  # fmt: skip
+    return offer(id, **{**base, **fields})
 
 
 class FakeVast:
@@ -110,8 +115,8 @@ class FakeVast:
     def _search(self, q: dict) -> list[dict]:
         rows = []
         for o in self.offers:
-            if "ask_contract_id" in q:
-                if o["id"] == q["ask_contract_id"].get("eq"):
+            if "ask_contract_id" in q:  # (offers by id: Vast applies no other filter)
+                if all(OPS[op](o["id"], v) for op, v in q["ask_contract_id"].items()):
                     rows.append(o)
                 continue
             if self.ignore_filters or all(

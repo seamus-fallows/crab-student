@@ -1,4 +1,5 @@
-"""offers: the search query, the client-side recheck, the host's lease and the picking rule."""
+"""offers: the search query, the fixed rules, the browsing filters, the host's lease and the offers a launch
+names."""
 
 import time
 
@@ -6,31 +7,37 @@ import pytest
 from fake_vast import cpu_offer, offer
 
 from crab_student import core, offers
-from crab_student.offers import Req
+from crab_student.offers import Filters
 
 
 def cfg(**changes) -> dict:
     return {**core.load_config(), **changes}
 
 
-def ids(found: list[dict]) -> list[int]:
-    return [o["id"] for o in found]
+def ids(found) -> list[int]:
+    return sorted(o["id"] for o in (found.values() if isinstance(found, dict) else found))
 
 
 def test_the_query_counts_a_gb_as_1000_mb_and_asks_for_gpus_only_for_gpu_tasks():
-    req = Req(hours=1, cpus=8, ram_gb=16, disk_gb=60, min_down_mbps=300)
-    q = offers.query(req, cfg(min_reliability=0.99))
-    assert q["cpu_cores_effective"] == {"gte": 8} and q["cpu_ram"] == {"gte": 16000}
+    q = offers.query(Filters(cpus=32, ram_gb=100, disk_gb=60, min_down_mbps=300), cfg(min_reliability=0.99))
+    assert q["cpu_cores_effective"] == {"gte": 32} and q["cpu_ram"] == {"gte": 100000}
     assert q["disk_space"] == {"gte": 60} and q["allocated_storage"] == 60  # (so prices include the disk)
     assert q["inet_down"] == {"gte": 300} and q["reliability2"] == {"gte": 0.99}
-    assert q["direct_port_count"] == {"gte": 1}
-    assert not {"num_gpus", "gpu_ram", "cuda_max_good"} & q.keys()
-    q = offers.query(Req(hours=1, gpus=2, gpu_ram_gb=24), cfg())
-    assert (q["num_gpus"], q["gpu_ram"], q["cuda_max_good"]) == ({"eq": 2}, {"gte": 24000}, {"gte": 12.8})
-    assert "cuda_max_good" not in offers.query(Req(hours=1, gpus=1), cfg(image="ubuntu:24.04"))
+    assert q["direct_port_count"] == {"gte": 1} and q["cuda_max_good"] == {"gte": 12.8}
+    assert not {"num_gpus", "gpu_ram", "inet_up"} & q.keys()
+    q = offers.query(Filters(gpus=(2, 4), gpu_ram_gb=24, min_up_mbps=200), cfg())
+    assert (q["num_gpus"], q["gpu_ram"], q["inet_up"]) == ({"gte": 2, "lte": 4}, {"gte": 24000}, {"gte": 200})
+    assert "cuda_max_good" not in offers.query(Filters(), cfg(image="ubuntu:24.04"))
 
 
-def test_every_requirement_is_checked_again_on_our_side(fake_vast):
+def test_a_task_that_uses_no_gpu_gets_at_least_the_cpu_task_minimum():
+    q = offers.query(Filters(cpus=8, ram_gb=16), cfg())
+    assert q["cpu_cores_effective"] == {"gte": 24} and q["cpu_ram"] == {"gte": 64000}
+    q = offers.query(Filters(gpus=(1, 1), cpus=8, ram_gb=16), cfg())  # (a GPU task asks for what it needs)
+    assert q["cpu_cores_effective"] == {"gte": 8} and q["cpu_ram"] == {"gte": 16000}
+
+
+def test_the_fixed_rules_and_the_filters_are_checked_again_on_our_side(fake_vast):
     fake_vast.ignore_filters = True  # (Vast's own filter is not always exact)
     now = time.time()
     fake_vast.offers = [
@@ -48,26 +55,63 @@ def test_every_requirement_is_checked_again_on_our_side(fake_vast):
         offer(18, cuda_max_good=12.4),  # older than the image's CUDA 12.8
         offer(19, end_date=now + 24 * 3600),  # gone before a day (+ 1 h) is up
         offer(20, direct_port_count=0),
-        offer(21, inet_down=199),
+        offer(21, inet_down=199),  # (the min_download_mbps setting)
         offer(22, disk_space=49),
         offer(23, cpu_cores_effective=7),
         offer(24, dph_total=0),
+        offer(25, gpu_name="CMP 170HX"),  # a mining card
     ]
-    req = Req(hours=2, gpus=1, gpu_ram_gb=24, cpus=8, ram_gb=16, disk_gb=50, min_down_mbps=200)
-    assert sorted(ids(offers.search(req, cfg()))) == [1, 2, 3]
+    f = Filters(gpus=(1, 1), gpu_ram_gb=24, cpus=8, ram_gb=16, disk_gb=50)
+    assert ids(offers.search(f, cfg())) == [1, 2, 3]
 
 
-def test_gpu_models_match_any_of_them_by_substring(fake_vast):
-    names = ["RTX 4090", "A100 SXM4", "RTX 3090", "H100 NVL"]
-    fake_vast.offers = [offer(i, gpu_name=name) for i, name in enumerate(names, 1)]
-    assert sorted(ids(offers.search(Req(hours=1, gpus=1, gpu_models=["4090", "a100"]), cfg()))) == [1, 2]
+def test_gpu_counts_models_and_generations(fake_vast):
+    fake_vast.offers = [
+        offer(1, gpu_name="RTX 4090"),
+        offer(2, gpu_name="A100 SXM4", compute_cap=800, num_gpus=2),
+        offer(3, gpu_name="RTX 3090", compute_cap=860, num_gpus=4),
+        offer(4, gpu_name="RTX 5090", compute_cap=1200),
+        offer(5, gpu_name="Tesla V100", compute_cap=700),
+    ]
+    assert ids(offers.search(Filters(gpus=(1, 8)), cfg())) == [1, 2, 3, 4, 5]
+    assert ids(offers.search(Filters(gpus=(2, 4)), cfg())) == [2, 3]
+    assert ids(offers.search(Filters(gpus=(1, 8), gpu_models=["4090", "a100"]), cfg())) == [1, 2]
+    assert ids(offers.search(Filters(gpus=(1, 8), min_compute_cap=8.0, max_compute_cap=9.0), cfg())) == [
+        1,
+        2,
+        3,
+    ]
 
 
-def test_regions_allow_country_codes_and_continents(fake_vast):
+def test_a_task_that_uses_no_gpu_runs_on_any_machine_with_enough_cpu(fake_vast):
+    fake_vast.offers = [
+        cpu_offer(1),
+        cpu_offer(2, num_gpus=4),
+        offer(3),
+        cpu_offer(4, cpu_cores_effective=23),
+    ]
+    assert ids(offers.search(Filters(), cfg())) == [1, 2]  # (offer 3: 16 vCPUs)
+
+
+def test_price_network_and_regions(fake_vast):
+    fake_vast.offers = [
+        offer(1, dph_total=0.30, geolocation="Quebec, CA"),
+        offer(2, dph_total=0.90, geolocation="Bavaria, DE", inet_up=100),
+        offer(3, dph_total=0.50, geolocation="", inet_down=2000),
+    ]
+    g = (1, 1)
+    assert ids(offers.search(Filters(gpus=g, max_price=0.6), cfg())) == [1, 3]
+    assert ids(offers.search(Filters(gpus=g, min_up_mbps=200), cfg())) == [1, 3]
+    assert ids(offers.search(Filters(gpus=g, min_down_mbps=1000), cfg())) == [3]
+    assert ids(offers.search(Filters(gpus=g, regions=["europe"]), cfg())) == [2]
+    assert [o["id"] for o in offers.search(Filters(gpus=g), cfg())] == [1, 3, 2]  # (cheapest first)
+
+
+def test_the_regions_setting_allows_country_codes_and_continents(fake_vast):
     places = ["Quebec, CA", "Bavaria, DE", "California, US", "", None, "Somewhere"]
     fake_vast.offers = [offer(i, geolocation=place) for i, place in enumerate(places, 1)]
-    assert sorted(ids(offers.search(Req(hours=1), cfg(regions=["ca", "Europe"])))) == [1, 2]
-    assert len(offers.search(Req(hours=1), cfg())) == 6  # (empty means anywhere)
+    assert ids(offers.search(Filters(gpus=(1, 1)), cfg(regions=["ca", "Europe"]))) == [1, 2]
+    assert len(offers.search(Filters(gpus=(1, 1)), cfg())) == 6  # (empty means anywhere)
 
 
 @pytest.mark.parametrize("regions", [[], ["asia", "europe", "CN", "HK", "RU"]])
@@ -76,106 +120,11 @@ def test_hosts_where_claude_is_unavailable_never_fit(fake_vast, regions):
                "Damascus, SY", "Havana, CU", "Caracas, VE", "Pyongyang, KP"]  # fmt: skip
     allowed = ["Tokyo, JP", "Bavaria, DE", "Taipei, TW", "", None, "Somewhere"]
     fake_vast.offers = [offer(i, geolocation=place) for i, place in enumerate(blocked + allowed, 1)]
-    found = offers.search(Req(hours=1), cfg(regions=regions))
+    found = offers.search(Filters(gpus=(1, 1)), cfg(regions=regions))
     assert {offers.country(o) for o in found} <= {"JP", "DE", "TW", None}
     assert len(found) == (6 if not regions else 3)  # (unknown places stay allowed, as regions permits)
-
-
-def test_a_cpu_task_has_no_gpu_conditions(fake_vast):
-    fake_vast.offers = [cpu_offer(1), offer(2, gpu_name="GTX 1080", gpu_ram=8192, cuda_max_good=11.0)]
-    assert sorted(ids(offers.search(Req(hours=1), cfg()))) == [1, 2]
-
-
-def test_a_cpu_task_takes_the_cheapest():
-    found = [cpu_offer(1, dph_total=0.30), cpu_offer(2, dph_total=0.10), cpu_offer(3, dph_total=0.20)]
-    assert ids(offers.rank(found, gpu=False)) == [2, 3, 1]
-
-
-def test_a_gpu_task_pays_more_only_for_clearly_better_speed_per_dollar():
-    cheap = offer(1, dph_total=0.40, dlperf=40)  # 100 per $
-    clearly = offer(2, dph_total=0.55, dlperf=100)  # 182 per $, within 1.5x the price
-    marginal = offer(3, dph_total=0.50, dlperf=55)  # 110 per $
-    dear = offer(4, dph_total=0.70, dlperf=300)  # 429 per $, but over 1.5x the price
-    assert offers.rank([cheap, clearly, dear], gpu=True)[0] is clearly
-    assert offers.rank([cheap, marginal, dear], gpu=True)[0] is cheap
-    assert offers.rank([cheap, clearly], gpu=False)[0] is cheap
-
-
-def test_among_similar_prices_reliability_and_download_speed_decide_together():
-    found = [
-        cpu_offer(1, dph_total=0.40, inet_down=300, reliability2=0.99),
-        cpu_offer(2, dph_total=0.47, inet_down=900, reliability2=0.99),  # within 20%: the faster download
-        cpu_offer(3, dph_total=0.49, inet_down=5000, reliability2=0.999),  # over 20% dearer than the cheapest
-    ]
-    assert ids(offers.rank(found, gpu=False)) == [2, 1, 3]
-    # A point of reliability weighs as much as twice the download speed.
-    steady, fast = (
-        cpu_offer(1, inet_down=400, reliability2=0.995),
-        cpu_offer(2, inet_down=1000, reliability2=0.98),
-    )
-    assert ids(offers.rank([steady, fast], gpu=False)) == [1, 2]
-    fast["inet_down"] = 4000
-    assert ids(offers.rank([steady, fast], gpu=False)) == [2, 1]
-
-
-NEAR_AND_FAR = [
-    ("Bavaria, DE", 0.40, 0.999),  # the cheapest and most reliable
-    ("Texas, US", 0.42, 0.99),
-    ("California, US", 0.44, 0.995),
-    ("Ontario, CA", 0.46, 0.985),
-    ("", 0.41, 0.999),  # unknown place
-    ("Quebec, CA", 0.60, 0.999),  # over 20% dearer: not comparable
-]
-
-
-def near_and_far() -> list[dict]:
-    return [
-        cpu_offer(i, geolocation=g, dph_total=p, reliability2=r)
-        for i, (g, p, r) in enumerate(NEAR_AND_FAR, 1)
-    ]
-
-
-def test_an_interactive_agent_prefers_comparable_hosts_near_home(fake_vast):
-    fake_vast.offers = near_and_far()
-    # Home country first, then its continent (best standing first within each), then the rest.
-    interactive = offers.plan(Req(hours=1), cfg(home="ca"), mode="interactive")
-    assert ids(interactive.ranked) == [4, 3, 2, 1, 5, 6]
-    assert ids(offers.plan(Req(hours=1), cfg(home="MX"), mode="interactive").ranked) == [3, 2, 4, 1, 5, 6]
-    assert ids(offers.plan(Req(hours=1), cfg(home="JP"), mode="interactive").ranked)[:2] == [1, 5]
-
-
-@pytest.mark.parametrize("mode, home", [("autonomous", "CA"), ("colleague", "CA"), ("interactive", "")])
-def test_other_modes_and_no_home_rank_as_before(fake_vast, mode, home):
-    fake_vast.offers = near_and_far()
-    # By standing among the comparable offers, wherever they are.
-    assert ids(offers.plan(Req(hours=1), cfg(home=home), mode=mode).ranked) == [1, 5, 3, 2, 4, 6]
-
-
-def test_ties_are_broken_the_same_way_every_time():
-    same = [offer(i, dph_total=0.40) for i in (5, 3, 9)]
-    assert ids(offers.rank(same, gpu=True)) == ids(offers.rank(same[::-1], gpu=True)) == [3, 5, 9]
-
-
-def test_fallbacks_are_up_to_four_other_machines_up_to_the_approval_price(fake_vast):
-    fake_vast.offers = [
-        cpu_offer(1, machine_id=10, dph_total=0.40),
-        cpu_offer(2, machine_id=10, dph_total=0.41),  # the pick's machine
-        cpu_offer(3, machine_id=20, dph_total=0.45),
-        cpu_offer(4, machine_id=20, dph_total=0.46),  # the first fallback's machine
-        cpu_offer(5, machine_id=30, dph_total=0.49),
-        cpu_offer(6, machine_id=40, dph_total=0.50),  # a third
-        cpu_offer(7, machine_id=50, dph_total=0.50),
-        cpu_offer(8, machine_id=60, dph_total=0.50),
-        cpu_offer(9, machine_id=70, dph_total=0.50),  # a fifth: one too many
-    ]
-    p = offers.plan(Req(hours=1), cfg())
-    assert (p.primary["id"], ids(p.fallbacks), len(p.ranked)) == (1, [3, 5, 6, 7], 9)
-    fake_vast.offers = [cpu_offer(1, dph_total=0.40), cpu_offer(2, dph_total=0.51)]
-    assert ids(offers.plan(Req(hours=1), cfg(), cap=5).fallbacks) == [
-        2
-    ]  # (any price up to the approval price)
-    assert offers.plan(Req(hours=1), cfg(), cap=0.45).fallbacks == []  # (never over it)
-    assert offers.plan(Req(hours=1), cfg(), cap=0.30).fallbacks == []  # (over it: at most 1.25x the pick)
+    named = offers.named([o["id"] for o in fake_vast.offers], 64, cfg(regions=regions))
+    assert len(named) == len(found)  # (a launch's own offers pass the same rules)
 
 
 @pytest.mark.parametrize("hours, needed", [(None, 25), (3, 25), (20, 41)])
@@ -185,33 +134,26 @@ def test_the_host_must_stay_twice_the_hours_and_at_least_a_day(hours, needed, fa
         offer(1, end_date=now + (needed - 0.1) * 3600),
         offer(2, end_date=now + (needed + 0.1) * 3600),
     ]
-    assert ids(offers.search(Req(hours=hours), cfg())) == [2]
+    assert ids(offers.search(Filters(gpus=(1, 1), hours=hours), cfg())) == [2]
 
 
-def test_offers_up_to_the_cap_come_first_and_the_rest_only_over_the_cap(fake_vast):
-    fake_vast.offers = [
-        cpu_offer(1, dph_total=0.40, inet_down=300),
-        cpu_offer(2, dph_total=0.43, inet_down=900),
-    ]
-    assert offers.plan(Req(hours=5), cfg()).primary["id"] == 2  # the faster download, without a cap
-    p = offers.plan(Req(hours=5), cfg(), cap=0.41)
-    assert (p.primary["id"], p.fallbacks, p.over_cap) == (1, [], False)  # (offer 2 is no backup: over it)
-    p = offers.plan(Req(hours=5), cfg(), cap=0.30)
-    assert (p.primary["id"], p.over_cap, p.top_price()) == (2, True, 0.43)
+def test_a_launch_names_offers_by_id_and_gets_those_still_to_be_had(fake_vast):
+    fake_vast.offers = [offer(1), offer(2, rentable=False), offer(3, cuda_max_good=11.0), offer(4), offer(5)]
+    found = offers.named([4, 1, 2, 3, 9], 80, cfg())
+    assert ids(found) == [1, 4]  # (2 is taken, 3 fails the fixed rules, 9 is gone)
+    (method, _, body), *_ = fake_vast.calls("POST", "/api/v0/bundles/")
+    assert body["ask_contract_id"] == {"in": [4, 1, 2, 3, 9]} and body["allocated_storage"] == 80
+    fake_vast.offers = [offer(1, disk_space=50)]
+    assert offers.named([1], 80, cfg()) == {}  # (no room for the disk)
 
 
-@pytest.mark.parametrize("cap", [None, 100.0])
-def test_nothing_fitting_the_hardware_is_exit_4(fake_vast, cap):
-    fake_vast.offers = [cpu_offer(1, cpu_ram=8000), offer(2, geolocation="California, US")]
-    with pytest.raises(core.CrabError) as e:
-        offers.plan(Req(hours=1, ram_gb=16), cfg(regions=["CA"]), cap)
-    assert e.value.code == 4
-
-
-def test_what_a_record_keeps_of_an_offer_is_short_and_ascii():
-    gpu = offers.kept(offer(1, geolocation="Zürich, CH"))
-    assert (gpu["id"], gpu["machine_id"], gpu["dph_total"], gpu["gpu_host"]) == (1, 10, 0.40, True)
-    assert all(part in gpu["summary"] for part in ("1x RTX 4090", "24 GB", "16 cores", "64 GB RAM"))
-    assert "RTX 4090" in gpu["short"] and gpu["summary"].isascii() and gpu["short"].isascii()
-    cpu = offers.kept(cpu_offer(2))
-    assert cpu["gpu_host"] is False and "0x" not in cpu["summary"] and "Quebec, CA" in cpu["short"]
+def test_what_offers_shows_and_a_record_keeps_is_ascii():
+    now = time.time()
+    v = offers.shown(offer(1, geolocation="Zürich, CH", end_date=now + 3 * 86400, gpu_name="RTX 4090™"), now)
+    assert (v["id"], v["machine"], v["gpus"], v["gpu_ram_gb"], v["compute_cap"]) == (1, 10, 1, 24.0, 8.9)
+    assert (v["vcpus"], v["host_vcpus"], v["ram_gb"], v["lease_days"]) == (16, 64, 64, 3.0)
+    assert all(isinstance(x, str) and x.isascii() for x in (v["gpu"], v["cpu"], v["location"]))
+    kept = offers.kept(offer(1, geolocation="Zürich, CH"))
+    assert (kept["id"], kept["machine_id"], kept["dph_total"]) == (1, 10, 0.40)
+    assert all(part in kept["summary"] for part in ("1x RTX 4090", "24 GB", "16 cores", "64 GB RAM"))
+    assert "RTX 4090" in kept["short"] and kept["summary"].isascii() and kept["short"].isascii()

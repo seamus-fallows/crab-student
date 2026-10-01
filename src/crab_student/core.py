@@ -110,7 +110,7 @@ DEFAULTS: dict[str, object] = {
     "approve_above_usd_per_hour": 5.0,
     "idle_minutes": 60,
     "image": "vastai/base-image:cuda-12.8.1-auto",
-    "disk_gb": 50,
+    "disk_gb": 64,
     "min_reliability": 0.98,
     "min_download_mbps": 200.0,
     "regions": [],
@@ -147,7 +147,8 @@ RULES = {
     ),
     "home": (
         lambda v: v == "" or bool(re.fullmatch(r"[A-Za-z]{2}", v)),
-        "your country code (CA, US, DE, ...), for interactive agents near you; empty: no preference",
+        "your country code (CA, US, DE, ...), so that the launcher weighs how far a host is from you; empty: "
+        "not set",
     ),
     "mode": (lambda v: v in MODES, "autonomous, colleague or interactive"),
     "model": (lambda v: True, "a Claude model such as opus or sonnet (empty: as your own Claude Code)"),

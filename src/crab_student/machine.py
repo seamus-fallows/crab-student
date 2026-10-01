@@ -437,12 +437,16 @@ def wait_for_handoff(name: str) -> bool:
 def remember_linux_host(name: str) -> None:
     """Tell VS Code the agent's host runs Linux (remote.SSH.remotePlatform), so Remote - SSH does not ask, and
     drop the entries of agents that are gone. A file that is not plain JSON (VS Code allows comments) is left
-    alone: VS Code asks once."""
+    alone, and the user is told why VS Code asks."""
     path = core.vscode_settings_file()
     if not path.parent.exists():
         return
     settings = core.read_vscode_settings(path)
     if settings is None:
+        print(
+            f"VS Code will ask which platform {name}'s machine runs: pick Linux. ({path} has comments, so "
+            "crab-student does not edit it; without them, it records each agent's platform.)"
+        )
         return
     platforms = settings.get(REMOTE_PLATFORM, {})
     if not isinstance(platforms, dict):

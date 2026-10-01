@@ -29,8 +29,9 @@ the code does it is in the modules named here.
    brief, records or git. They reach the machine only inside the upload stream, as 0600 files (and in
    its 0600 `~/.claude/settings.json`).
 7. **The launcher** cannot ask the user anything, and a command outside `setup.ALLOW` would raise a
-   permission prompt in the user's session. Whatever approves a pricier machine, destroys, discards or
-   changes settings is in `setup.ASK`; editing `~/.crab-student` is denied (`setup.DENY`).
+   permission prompt in the user's session. Whatever approves a pricier machine, forces a delete or
+   changes settings or secrets is in `setup.ASK` (a plain `delete` is allowed: it refuses to lose work);
+   editing `~/.crab-student` is denied (`setup.DENY`).
 8. **The remote agent never hears "crab-student".** Its rules, prompts, the watchdog's messages, hook
    and command output describe the situation plainly; its commands are `agent-status`, `agent-attach`
    and `agent-handoff`.

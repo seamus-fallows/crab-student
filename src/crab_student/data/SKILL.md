@@ -98,15 +98,17 @@ running. On Windows, running it yourself opens a new Windows Terminal window.
 
 ## Deleting
 
-Always ask the user first, and suggest `pull` and reading the report before. `delete` refuses (exit 3)
-when work would be lost and lists it: show that list and let the user decide about `--force`. Never add
+Delete when the user asks for it (suggest `pull` and reading the report first if they have not). `delete`
+refuses (exit 3) when work would be lost and lists it: show that list and let the user decide about
+`--force`. Never add
 `--force` on your own. A stopped agent's disk is still billed (`list` shows its disk cost per day and how
 long it has sat), and it can usually be deleted without starting it again.
 
 ## Rules
 
-- Never run these without the user's explicit OK in this conversation: `approve`, `decline`, `delete`,
-  `config KEY VALUE`, `init`. The permission prompts enforce this too.
+- Run `delete` and `decline` only when the user asks. Never run these without the user's explicit OK in
+  this conversation: `approve`, `delete --force`, `config KEY VALUE`, `init`. The permission prompts
+  enforce this too.
 - The user stores secrets themselves in a terminal (`crab-student secret set NAME`); you never see or
   handle secret values.
 - Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no

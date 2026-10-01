@@ -298,10 +298,10 @@ branch stays on GitHub.
 ### What your Claude Code may do without asking
 
 `init` adds these rules to `~/.claude/settings.json`. Allowed: `guide`, `offers`, `launch`, `list`,
-`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `secret list` (a `launch` over the price
-limit waits for `approve` by itself; restarting a stopped agent with `start` only gives an agent you
-already have more machine time). Always asked first: `approve`, `decline`, `delete`, `config`, `init`,
-`secret set`, `secret delete`.
+`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `delete`, `decline`, `secret list` (a
+`launch` over the price limit waits for `approve` by itself; restarting a stopped agent with `start`
+only gives an agent you already have more machine time; `delete` refuses to destroy unsaved work unless
+forced). Always asked first: `approve`, `delete --force`, `config`, `init`, `secret set`, `secret delete`.
 
 The launcher runs in the background and cannot ask you anything, so it can use only the allowed
 commands; a command outside that list would interrupt you with a permission prompt in your main

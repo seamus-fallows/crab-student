@@ -67,7 +67,8 @@ missing):
 
 Ask your Claude Code in plain words: "run the ablation on a GPU with crab-student", "give me a machine
 with Claude on it to work on this", "process the dataset on a remote machine". It starts a background
-*launcher* (a fork of your session, so it has seen what you said) and your conversation carries on. The
+*launcher* (a fork of your session, so it has seen what you said; where forks are unavailable, a
+background agent given your words) and your conversation carries on. The
 launcher reads the relevant code, estimates what the task needs (GPUs and GPU memory, cores, RAM,
 disk), writes a brief for the agent, and runs `crab-student launch`. Anything you state yourself (the
 GPU, the disk, the hours, the region, the name, the mode, the model) is used as you said it; only the

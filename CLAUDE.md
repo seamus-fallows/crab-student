@@ -1,7 +1,8 @@
 # crab-student - notes for Claude Code
 
 crab-student rents Vast.ai machines and puts Claude Code agents on them. The user's Claude Code starts
-a background launcher (a fork of the session that follows `crab-student guide launch`), which estimates
+a background launcher (a fork of the session, or a general-purpose background agent where forks are
+unavailable, that follows `crab-student guide launch`), which estimates
 the task and runs `crab-student launch NAME` in a background Bash call (one per agent, in parallel):
 the CLI rents two machines at once and keeps the first that starts, puts the agent's branch on GitHub,
 then uploads the machine's files and sets it up (dependencies included) in one ssh call. Modes:

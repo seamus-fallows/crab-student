@@ -209,10 +209,11 @@ the first; each step touches `heartbeat`, so the dead-man switch waits for a lon
    `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`. Waited for (30
    minutes at most); `deps.json` keeps `{command, exit_code}`; a failure is a warning in setup's result,
    never a failed setup.
-4. `agent settings`: the brief to `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from
-   `rules.md`, the mode's section and how the install went; interactive: `handoff.md` to
-   `~/.claude/commands/`; every mode: Claude Code's and VS Code's settings (6.5).
-5. `Claude Code`: wait for the install jobs; one tiny `claude -p` checks the token.
+4. `Claude Code`: wait for the install jobs; one tiny `claude -p` checks the token.
+5. `agent settings` (after the install, whose own run of Claude Code writes `~/.claude.json`): the brief to
+   `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from `rules.md`, the mode's section
+   and how the install went; interactive: `handoff.md` to `~/.claude/commands/`; every mode: Claude
+   Code's and VS Code's settings and its onboarding and trust flags (6.5).
 6. `starting the agent`: refused without the container's Vast key; `setup-done`, the watchdog; for tmux,
    wait for the conversation file. Last, a wait for VS Code's server, whose failure is only a warning.
 
@@ -246,7 +247,8 @@ is `idle` or `done`. A new container start resets the clocks. Notifications go t
 prompt>"` the first time and `--resume <id>` after; a resume that fails at once starts a new session
 (`D/session_id`) told to read its report. Its environment has the token, the task secrets, `AGENT_NAME`,
 `AGENT_BRANCH` and the login profile's PATH, and none of `CLAUDECODE`, `CLAUDE_CODE_*`, `CONTAINER_*`.
-`~/.claude/settings.json` (0600, every mode): `bypassPermissions`, deny rules for the ways around the
+`~/.claude/settings.json` (0600, every mode): `bypassPermissions` with its warning accepted
+(`skipDangerousModePermissionPrompt`), deny rules for the ways around the
 hooks, `env` with the token and task secrets (for the Claude Code VS Code starts), and
 `claude_settings`. VS Code's machine settings: the Claude extension without permission prompts, the
 Python interpreter, and a default terminal running `agent-attach`.

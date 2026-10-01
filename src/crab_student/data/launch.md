@@ -128,26 +128,16 @@ which continues the same launch, until it returns. Never run `launch` twice for 
 make a second agent.
 
 **Several agents** (a sweep, or several separate tasks you were given together): write one brief per
-agent, each with its own name, and launch them in one call. Flags before the briefs apply to every
-agent; flags on an agent's `===` line override them for that agent.
-
-```
-crab-student launch --batch [--hours H] [flags] --json <<'BRIEFS'
-=== NAME-1
-<its brief>
-=== NAME-2 --gpu-ram 48
-<its brief>
-BRIEFS
-```
-
-Each agent gets a machine of its own. If the call is cut off, run `crab-student start NAME --json` for
-each agent that is not yet working.
+agent, each with its own name, and run one `crab-student launch NAME ... --json` per agent, each in its
+own Bash tool call with `run_in_background: true`, all started in one message, so they come up side by
+side. Each agent gets a machine of its own. Read each result as its call finishes, and report once all
+have finished.
 
 ## 12. Report back
 
 Return exactly: the brief, a blank line, the `result_line` from the JSON, then one `Warning: <text>`
-line for each entry of `warnings`. For a batch: each brief, a blank line, then the result lines (one per
-agent) and the warnings. Add the assumptions you made, one short line each, after the warnings.
+line for each entry of `warnings` (for several agents, this for each agent in turn). Add the
+assumptions you made, one short line each, after the warnings.
 
 - Exit 3 (needs approval: every machine that fits costs more than the user's approval price of
   ${{approve_above_usd_per_hour}}/hr): the same format; the result line says the price. Approving is

@@ -15,13 +15,6 @@ from fake_vast import offer
 from crab_student import __version__, agents, cli, core, github, launch, machine, setup
 
 VIEW_KEYS = {f.name for f in dataclasses.fields(agents.View)}
-BATCH = """=== alpha --hours 2 --gpus 1 --secret WANDB_KEY --mode interactive --no-fast
-# Task A
-Train it.
-=== beta --model opus --cpus 32
-# Task B
-Sweep it.
-"""
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -64,13 +57,13 @@ def patched(monkeypatch) -> list[tuple[str, tuple]]:
 
         monkeypatch.setattr(module, name, call)
 
-    for name in ("approve_all", "start"):
+    for name in ("approve", "start"):
         stand_in(launch, name, result())
     stand_in(launch, "decline", "Declined job1: nothing was rented.")
     for name in ("stop", "delete", "send"):
         stand_in(agents, name, {"name": "job1", "result_line": f"{name}: done"})
     stand_in(agents, "report", "# Report\n")
-    stand_in(agents, "views", [view()])
+    stand_in(agents, "listing", ([view()], []))
     stand_in(agents, "view", view())
     stand_in(github, "pull", "Fetched agent/job1.")
     core.save(record())
@@ -83,14 +76,6 @@ def launched(monkeypatch) -> list[launch.LaunchArgs]:
     got: list[launch.LaunchArgs] = []
     monkeypatch.setattr(launch, "launch", lambda a, out: got.append(a) or result())
     monkeypatch.setattr("sys.stdin", io.StringIO("# Task\nDo the thing.\n"))
-    return got
-
-
-@pytest.fixture
-def batched(launched, monkeypatch) -> list[list[launch.LaunchArgs]]:
-    """launch.launch_batch replaced too: the LaunchArgs of each batch."""
-    got: list[list[launch.LaunchArgs]] = []
-    monkeypatch.setattr(launch, "launch_batch", lambda items, out: got.append(items) or result())
     return got
 
 
@@ -120,11 +105,10 @@ def test_failures_go_to_stderr_with_their_exit_code(exc, code, monkeypatch, caps
     ["", "launch", "frobnicate", "extend job1 2", "open", "open job1 --all", "launch job1 --hours 0",
      "launch job1 --hours 1 --repo . --no-repo", "launch job1 --hours nan", "offers --hours inf",
      "offers --count 0", "launch job1 --hours 1 --brief-file no-such-brief.md", "launch job1 --mode solo",
-     "launch job1 --effort max", "launch job1 --fast on", "launch --hours 1", "launch job1 --batch --hours 1",
-     "approve"],
+     "launch job1 --effort max", "launch job1 --fast on", "launch --hours 1", "approve", "approve job1 job2"],
 )  # fmt: skip
-def test_usage_mistakes_exit_2(argv, launched, batched, capsys):
-    assert exit_code(argv.split()) == 2 and not launched and not batched
+def test_usage_mistakes_exit_2(argv, launched, capsys):
+    assert exit_code(argv.split()) == 2 and not launched
 
 
 def test_version(capsys):
@@ -146,7 +130,7 @@ def test_launch_json_is_one_value_with_progress_on_stderr(monkeypatch, capsys):
 
 @pytest.mark.parametrize(
     "argv",
-    ["approve job1", "approve job1 job2", "start job1", "stop job1", "delete job1", "list",
+    ["approve job1", "start job1", "stop job1", "delete job1", "list",
      "status job1", "config", "config regions", "config regions CA", "config regions --reset", "secret list",
      "secret delete HF_TOKEN"],
 )  # fmt: skip
@@ -158,8 +142,8 @@ def test_json_prints_exactly_one_value(argv, patched, capsys):
 
 @pytest.mark.parametrize(
     "argv, layer, args",
-    [("approve job1", "approve_all", (["job1"],)), ("approve job1 job2", "approve_all", (["job1", "job2"],)),
-     ("decline job1", "decline", ("job1",)), ("start job1", "start", ("job1",)), ("stop job1", "stop", ("job1",)),
+    [("approve job1", "approve", ("job1",)), ("decline job1", "decline", ("job1",)),
+     ("start job1", "start", ("job1",)), ("stop job1", "stop", ("job1",)),
      ("delete job1 --force", "delete", ("job1", True)), ("delete job1", "delete", ("job1", False)),
      ("send job1 hello there", "send", ("job1", "hello there")), ("report job1", "report", ("job1",))],
 )  # fmt: skip
@@ -185,7 +169,7 @@ def test_a_launch_that_needs_approval_exits_3(launched, monkeypatch, capsys):
 
 
 def test_all_output_is_ascii_but_the_agents_report(patched, monkeypatch, capsys):
-    monkeypatch.setattr(agents, "views", lambda: [view(message="naïve ✓")])
+    monkeypatch.setattr(agents, "listing", lambda: ([view(message="naïve ✓")], []))
     monkeypatch.setattr(agents, "view", lambda name: view(message="naïve ✓"))
     for argv in ("list", "list --json", "status job1", "status job1 --json"):
         assert cli.main(argv.split()) == 0
@@ -286,49 +270,6 @@ def test_launch_without_options_leaves_hours_and_the_agent_settings_open(launche
     assert b.fast is False
 
 
-# ---- launch --batch ------------------------------------------------------------------------------
-
-
-def test_a_batch_gives_each_agent_its_brief_its_own_flags_and_the_batch_flags_it_does_not_set(
-    batched, monkeypatch, tmp_path, capsys
-):
-    monkeypatch.setattr("sys.stdin", io.StringIO(BATCH))
-    argv = ["launch", "--batch", "--hours", "3", "--cpus", "12", "--secret", "HF_TOKEN", "--model", "sonnet",
-            "--effort", "high", "--fast", "--repo", str(tmp_path), "--dry-run"]  # fmt: skip
-    assert cli.main(argv) == 0
-    [(alpha, beta)] = batched
-    assert (alpha.name, alpha.brief.strip()) == ("alpha", "# Task A\nTrain it.")
-    assert (beta.name, beta.brief.strip()) == ("beta", "# Task B\nSweep it.")
-    assert (alpha.req.hours, alpha.req.gpus, alpha.req.cpus, alpha.model) == (2, 1, 12, "sonnet")
-    assert (beta.req.hours, beta.req.gpus, beta.req.cpus, beta.model) == (3, 0, 32, "opus")
-    assert (alpha.mode, alpha.effort, alpha.fast) == ("interactive", "high", False)
-    assert (beta.mode, beta.effort, beta.fast) == (None, "high", True)
-    assert sorted(alpha.secrets) == ["HF_TOKEN", "WANDB_KEY"] and beta.secrets == ["HF_TOKEN"]  # (added up)
-    assert all(a.dry_run and a.repo_path == tmp_path.resolve() for a in (alpha, beta))
-    brief = tmp_path / "batch.md"
-    brief.write_text(BATCH, encoding="utf-8")
-    assert cli.main(["launch", "--batch", "--hours", "1", "--brief-file", str(brief)]) == 0
-    assert [a.name for a in batched[1]] == ["alpha", "beta"]
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["# Tasks\n" + BATCH, "one brief, no === line\n", "", "=== alpha --hours soon\nbrief\n",
-     "=== alpha --frobnicate\nbrief\n", "=== alpha and more\nbrief\n", "=== \nbrief\n",
-     "=== alpha 'unclosed\nbrief\n", "=== alpha --mode solo\nbrief\n"],
-)  # fmt: skip
-def test_a_malformed_batch_exits_2_before_anything_is_launched(text, batched, monkeypatch, capsys):
-    monkeypatch.setattr("sys.stdin", io.StringIO(text))
-    rc, _, err = run(capsys, "launch", "--batch", "--hours", "1")
-    assert rc == 2 and err.startswith("error:") and not batched
-
-
-def test_hours_are_optional_in_a_batch_too(batched, monkeypatch, capsys):
-    monkeypatch.setattr("sys.stdin", io.StringIO(BATCH))  # (beta has no --hours of its own)
-    assert run(capsys, "launch", "--batch")[0] == 0
-    assert [a.req.hours for a in batched[0]] == [2, None]
-
-
 # ---- list and status -----------------------------------------------------------------------------
 
 
@@ -337,7 +278,7 @@ def test_list_fits_the_terminal_and_keeps_its_columns_apart(monkeypatch, capsys)
     views = [view("ablation-1", message=long), view("big-train", state="failed", used_h=None, spent=None),
              view("sweep", state="done", used_h=100.5, spent=150.25),
              view("resnet-rerun", state="interactive", mode="interactive", message="in VS Code, idle 12m")]  # fmt: skip
-    monkeypatch.setattr(agents, "views", lambda: views)
+    monkeypatch.setattr(agents, "listing", lambda: (views, []))
     for width in (80, 120, 250):
         monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda *_, w=width: os.terminal_size((w, 24)))
         lines = run(capsys, "list")[1].splitlines()
@@ -349,13 +290,24 @@ def test_list_fits_the_terminal_and_keeps_its_columns_apart(monkeypatch, capsys)
 
 
 def test_list_without_agents_and_as_json(monkeypatch, capsys):
-    monkeypatch.setattr(agents, "views", lambda: [])
+    monkeypatch.setattr(agents, "listing", lambda: ([], []))
     assert "No agents yet" in run(capsys, "list")[1]
     stopped = view("job2", state="stopped", stopped_h=26.5, disk_usd_day=0.17)
-    monkeypatch.setattr(agents, "views", lambda: [view(), stopped])
+    monkeypatch.setattr(agents, "listing", lambda: ([view(), stopped], []))
     rows = json.loads(run(capsys, "list", "--json")[1])
     assert [r["name"] for r in rows] == ["job1", "job2"] and all(set(r) == VIEW_KEYS for r in rows)
     assert (rows[1]["stopped_h"], rows[1]["disk_usd_day"]) == (26.5, 0.17)
+
+
+def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast, machines, capsys):
+    core.save(record(instance_id=fake_vast.add_instance(1, "crab-student-job1-aaaa0000"), rents=[],
+                     rent={"label": "crab-student-job1-aaaa0000"}, ssh=None, last_seen=None))  # fmt: skip
+    orphan = fake_vast.add_instance(1, "crab-student-job2-bbbb0000")  # (a rent Vast did not confirm)
+    for argv in (["list"], ["list", "--json"]):
+        rc, out, err = run(capsys, *argv)
+        warned = [line for line in err.splitlines() if line.startswith("warning:")]
+        assert rc == 0 and len(warned) == 1 and str(orphan) in warned[0] and "bbbb0000" in warned[0]
+    assert [r["name"] for r in json.loads(out)] == ["job1"] and orphan in fake_vast.instances
 
 
 def test_status_detail_and_a_json_result_line_that_follows_the_state(patched, monkeypatch, capsys):

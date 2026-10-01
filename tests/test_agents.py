@@ -26,7 +26,7 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
-            "rents": [], "strays": [],
+            "rents": [],
             "instance_id": None, "dph": 0.40, "disk_usd_day": None, "mode": "colleague", "claude_settings": {},
             "machine": "1x RTX 4090",
             "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None, "stop_note": None,
@@ -106,8 +106,6 @@ DISPLAY = [  # (record fields, Vast's instance, ctl.py status, lock held) -> STA
     ({"phase": "pending", "pending": {"reason": "it would cost $6.00/hr", "max_dph": 6.0}}, None, None, False,
      "approval", "$6.00/hr"),
     ({"phase": "booting"}, None, None, True, "starting", ""),  # (a launch at work)
-    ({"phase": "renting", "rents": [{"label": "cs:job1:0", "instance_id": None}]}, None, None, False, "interrupted",
-     "start job1"),
     ({"phase": "renting"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "setup"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "failed", "error": "every offer failed"}, None, None, False, "failed", "every offer failed"),
@@ -327,30 +325,20 @@ def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_
     other = fake_vast.add_instance(1, "cs:job1:00000000", status="loading")  # (not this launch's label)
     rents = [rent("cs:job1:aaaa1111", racing), rent("cs:job1:abcd1234"), rent("cs:job1:ffff0000")]
     core.save(record(phase="renting", uploaded=False, rents=rents))
-    res = agents.delete("job1", False, out())
+    agents.delete("job1", False, out())
     assert list(fake_vast.instances) == [other] and racing not in fake_vast.instances
     assert unconfirmed not in fake_vast.instances and not core.record_path("job1").exists()
-    assert "cs:job1:ffff0000" in res["result_line"]  # (never found: the user is told to look out for it)
 
 
-def test_delete_also_destroys_a_machine_the_race_left_behind(fake_vast, machines):
-    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
-    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
-    machines.replies[("job1", "check")] = CLEAN
-    agents.delete("job1", False, out())
-    assert iid not in fake_vast.instances and late not in fake_vast.instances
-
-
-def test_list_destroys_a_machine_the_race_left_behind_once_it_shows_up(fake_vast, machines):
-    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
-    machines.replies[("job1", "status")] = status("working")
-    agents.views()
-    assert core.load("job1")["strays"]  # (not there yet: remembered)
-    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
-    agents.views()
-    assert (
-        late not in fake_vast.instances and iid in fake_vast.instances and core.load("job1")["strays"] == []
-    )
+def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):
+    kept = fake_vast.add_instance(1, "crab-student-job1-aaaa0000")
+    fake_vast.add_instance(1, "crab-student-job2-bbbb0000")  # (a rent of a launch at work)
+    orphan = fake_vast.add_instance(1, "crab-student-job3-cccc0000")
+    fake_vast.add_instance(1, "my-own-machine")  # (not rented by crab-student)
+    core.save(record(instance_id=kept, rent=rent("crab-student-job1-aaaa0000", kept)))
+    core.save(record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-job2-bbbb0000")]))
+    found = agents.orphans(list(fake_vast.instances.values()), core.all_records())
+    assert [i["id"] for i in found] == [orphan] and len(fake_vast.instances) == 4  # (nothing destroyed)
 
 
 # ---- delete a stopped agent: from its stop note, without starting it ----------------------------
@@ -457,8 +445,7 @@ def test_a_start_seen_from_here_makes_the_old_stop_notes_stale(fake_vast, fake_g
     fake_vast.instances[iid].update(actual_status="running", intended_status="running", cur_state="running")
     agents.views()  # (seen running again: it may be doing new work)
     fake_vast.instances[iid].update(actual_status="exited", intended_status="stopped", cur_state="stopped")
-    rec = core.load("job1")
-    assert rec["stop_note"] is None and rec["last_start"] == pytest.approx(time.time(), abs=60)
+    assert core.load("job1")["last_start"] == pytest.approx(time.time(), abs=60)
     fails(3, agents.delete, "job1", False, out())
     assert iid in fake_vast.instances
 

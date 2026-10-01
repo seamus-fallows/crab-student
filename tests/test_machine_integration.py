@@ -1,8 +1,8 @@
 """The machine side end to end, on Linux: the real cs.py, copied flat into <root>/crab-student as the upload
-leaves it, runs setup, the watchdog, the fake Claude in tmux, status, send and the idle stop, and an interactive
-agent's hand-off from VS Code to tmux. "GitHub" is a local bare repo and Vast a local HTTP server; tmux runs a
-server of its own (TMUX_TMPDIR). It needs tmux, git, bash and pgrep (Linux CI installs tmux), takes about 90 s,
-and `pytest -m "not integration"` leaves it out."""
+leaves it, runs setup (with the dependency install), the watchdog, the fake Claude in tmux, status, send and the
+idle stop, and an interactive agent's hand-off from VS Code to tmux. "GitHub" is a local bare repo and Vast a
+local HTTP server; tmux runs a server of its own (TMUX_TMPDIR). It needs tmux, git, bash and pgrep (Linux CI
+installs tmux), takes about 90 s, and `pytest -m "not integration"` leaves it out."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from fake_gh import git
 
 REMOTE = Path(__file__).resolve().parents[1] / "src" / "crab_student" / "remote"
 NAME, BRANCH, KEY = "itest", "agent/itest", "container-key-42"
+DEPS = "echo installing the dependencies > ../deps-ran"  # (the launch's --setup: outside the repo)
 DEPLOY_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nbm90IGEgcmVhbCBrZXk=\n-----END OPENSSH PRIVATE KEY-----\n"
 pytestmark = [
     pytest.mark.integration,
@@ -77,7 +78,9 @@ def machine(tmp_path, vast):
     config = dict(
         name=NAME, branch=BRANCH, repo_url=str(bare), repo_dir=str(repo), session_id=sid, mode="colleague"
     )
-    config.update(claude_settings={}, fake_claude=True, idle_minutes=1, notify_url="", secret_names=[])
+    config.update(
+        claude_settings={}, fake_claude=True, idle_minutes=1, notify_url="", secret_names=[], setup=DEPS
+    )
     files = {
         "config.json": json.dumps(config),
         "BRIEF.md": "# Brief\n\nWrite result.txt and a report.\n",
@@ -173,12 +176,15 @@ def wait_for(condition, seconds: float, what: str, m) -> None:
 
 
 def setup_ok(m) -> None:
-    """setup: five steps, then {"ok": true} (the fake Claude needs no install, and tmux is there)."""
+    """setup: six steps, then {"ok": true} (the fake Claude needs no install, and tmux is there); the
+    dependency install ran, from the repo, before the agent started."""
     p = cs(m, "setup", timeout=240)
     result = (p.returncode, last_json(p))
     assert result == (0, {"ok": True, "warnings": []}), p.stdout + p.stderr + diagnose(m)
     steps = [line.split()[1] for line in p.stdout.splitlines() if line.startswith("step ")]
-    assert steps == ["1/5", "2/5", "3/5", "4/5", "5/5"], p.stdout
+    assert steps == ["1/6", "2/6", "3/6", "4/6", "5/6", "6/6"], p.stdout
+    assert read(m.repo.parent / "deps-ran") == "installing the dependencies\n", diagnose(m)
+    assert json.loads(read(m.d / "deps.json")) == {"command": DEPS, "exit_code": 0}, diagnose(m)
 
 
 def test_an_agent_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(machine):
@@ -191,6 +197,7 @@ def test_an_agent_runs_to_done_takes_a_message_and_its_machine_stops_when_idle(m
     assert len(watchdogs) == 1, f"watchdogs: {watchdogs}{diagnose(m)}"
     assert os.getsid(watchdogs[0]) == watchdogs[0], "the watchdog should run in a session of its own"
     assert tmux(m, "has-session", "-t", "agent").returncode == 0, diagnose(m)
+    assert DEPS in read(m.root / ".claude" / "CLAUDE.md"), "the rules should say how the dependencies came"
     wait_for(lambda: agent(m).get("state") == "done", 90, "the agent to declare done", m)
     pushed = set(git(m.bare, "ls-tree", "-r", "--name-only", BRANCH).split())
     assert {f"agent-runs/{NAME}/result.txt", f"agent-runs/{NAME}/REPORT.md"} <= pushed, pushed
@@ -247,11 +254,13 @@ def test_an_interactive_agent_is_handed_off_from_vs_code_to_an_agent_in_tmux(mac
     p = subprocess.run(handoff, env=env, cwd=m.repo, capture_output=True, text=True, timeout=180)
     assert p.returncode == 0 and "close VS Code" in p.stdout, p.stdout + p.stderr + diagnose(m)
 
-    # (c) the watchdog forked the conversation into tmux under a new id, with the autonomous rules; the agent
-    # there carries on to done
+    # (c) agent-handoff started the agent's tmux session (none of the VS Code Claude's variables in it), which
+    # forked the conversation under a new id, with the autonomous rules; the agent there carries on to done
     st = last_json(cs(m, "status"))
     assert (st["mode"], st["frontend"]) == ("autonomous", "tmux"), st
     assert tmux(m, "has-session", "-t", "agent").returncode == 0, diagnose(m)
+    names = [x.split("=", 1)[0] for x in tmux(m, "show-environment", "-g").stdout.splitlines()]
+    assert not [n for n in names if n == "CLAUDECODE" or n.startswith("CLAUDE_CODE_")], names
     forked = read(m.d / "session_id").strip()
     assert forked not in (m.sid, vscode), diagnose(m)
     assert transcript(m, forked).startswith(transcript(m, vscode).splitlines()[0]), diagnose(m)

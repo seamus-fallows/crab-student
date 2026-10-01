@@ -41,7 +41,6 @@ class View:
     mode: str
     frontend: str | None  # where the agent's Claude runs: "tmux", or "vscode" (interactive, not handed off)
     settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
-    deps: dict | None  # the machine's install of the project's dependencies: state, command, exit_code
 
 
 def _status(rec: dict) -> dict | None:
@@ -211,7 +210,6 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         mode=rec.get("mode") or "",
         frontend=st.get("frontend") if st else last.get("frontend"),
         settings=rec.get("claude_settings") or {},
-        deps=st.get("deps") if st else None,
     )
 
 
@@ -224,7 +222,8 @@ def view(name: str) -> View:
 
 
 def stop(name: str, out: launch.Progress) -> dict:
-    """Save what the agent has, then stop the machine (the disk is kept)."""
+    """Save what the agent has, then stop the machine (the disk is kept). The final save pushes the stop note
+    that lets delete check the stopped machine without starting it."""
     with core.locked(name):
         rec = core.load(name)
         if rec["phase"] == "pending":
@@ -251,12 +250,6 @@ def stop(name: str, out: launch.Progress) -> dict:
                     + (f" ({s['error']})" if s.get("error") else "")
                     + "."
                 )
-                if s.get("note_committed"):  # (what it leaves behind: delete needs no restart to check)
-                    rec["stop_note"] = {
-                        **s["note"],
-                        "unpushed": s.get("unpushed", 0),
-                        "recorded_at": time.time(),
-                    }
             except core.CrabError as e:
                 out.line(f"Could not save first ({e.message}); the disk is kept, so nothing is lost.")
         vast.set_state(rec["instance_id"], "stopped")
@@ -357,27 +350,20 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
 
 
 def _stop_note(rec: dict) -> dict | None:
-    """What a stopped machine left behind at its latest stop, when that is known: `stop` keeps its note in the
-    record, and a stop of the machine's own leaves agent-runs/<name>/stopped.json on the branch. A note counts
-    only if written after the last start seen (a stop that could not push its note leaves an older one), and
-    the newer of the two wins. None when GitHub cannot be asked."""
-    started, notes = rec.get("last_start") or 0, []
-    kept = rec.get("stop_note")
-    if kept and kept.get("recorded_at", 0) >= started:
-        notes.append(kept)
+    """What a stopped machine left behind at its latest stop: the note its final save (the watchdog's, or
+    `stop`'s) pushed to the branch as agent-runs/<name>/stopped.json. It counts only if written after the last
+    start seen (a stop that could not push its note leaves an older one). None when there is no such note, or
+    GitHub cannot be asked."""
     repo = rec["repo"]
     try:
         text = github.read_file(repo["slug"], repo["branch"], f"agent-runs/{rec['name']}/stopped.json")
-    except core.CrabError:
+        note = json.loads(text) if text else None
+    except (core.CrabError, ValueError):
         return None
-    try:
-        pushed = json.loads(text) if text else None
-    except ValueError:
-        pushed = None
-    stopped = pushed.get("stopped_at") if isinstance(pushed, dict) else None
-    if isinstance(stopped, int | float) and stopped >= started + NOTE_MARGIN:
-        notes.append(pushed)
-    return max(notes, key=lambda n: n.get("stopped_at") or 0, default=None)
+    stopped = note.get("stopped_at") if isinstance(note, dict) else None
+    if isinstance(stopped, int | float) and stopped >= (rec.get("last_start") or 0) + NOTE_MARGIN:
+        return note
+    return None
 
 
 def _cleanup(rec: dict) -> list[str]:

@@ -36,7 +36,7 @@ def view(name: str = "job1", **fields) -> agents.View:
             "settings": {"model": "opus", "effortLevel": "high"}, "error": None,
             "machine": "1x RTX 4090 24 GB, 16 cores, Quebec, CA", "branch": f"agent/{name}",
             "git": {"dirty": 0, "unpushed": 0}, "vast_status": "running", "pending": None, "stopped_h": None,
-            "disk_usd_day": None, "deps": None}  # fmt: skip
+            "disk_usd_day": None}  # fmt: skip
     return agents.View(**{**base, **fields})
 
 
@@ -501,11 +501,3 @@ def test_offers_for_an_interactive_agent_put_hosts_near_home_first(fake_vast, ca
     core.set_config("home", "CA")
     assert json.loads(run(capsys, "offers", "--json")[1])["pick"] == 1
     assert json.loads(run(capsys, "offers", "--mode", "interactive", "--json")[1])["pick"] == 2
-
-
-def test_status_shows_the_dependency_install(patched, monkeypatch, capsys):
-    deps = {"state": "failed", "command": "uv sync", "exit_code": 2}
-    monkeypatch.setattr(agents, "view", lambda name: view(deps=deps))
-    assert any(
-        "uv sync" in line and "2" in line for line in run(capsys, "status", "job1")[1].splitlines()[1:]
-    )

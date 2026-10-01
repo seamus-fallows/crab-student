@@ -67,8 +67,8 @@ want it to keep going on its own, they type `/handoff` in that chat (optionally 
 carries on in tmux with the whole conversation, after which they can close VS Code and use everything
 below. Before that, `send` does not apply, and `status` shows the agent as `interactive`.
 
-The machine installs the project's dependencies in the background while it is set up (`status` shows
-how far it got; the launch's `--setup` changes how).
+The machine installs the project's dependencies during setup, before the agent starts (the launch's
+`--setup` changes how); a failed install is a warning in the launch's result.
 
 ## Managing agents
 

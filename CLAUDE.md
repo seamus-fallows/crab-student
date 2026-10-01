@@ -2,21 +2,31 @@
 
 crab-student rents Vast.ai machines and puts Claude Code agents on them. The user's Claude Code starts
 a background launcher (a fork of the session that follows `crab-student guide launch`), which estimates
-the task and runs `crab-student launch` (`launch --batch` for several agents at once): the CLI picks a
-machine and a backup, rents both at once and keeps the first that starts (destroying the other), puts
-the agent's branch on GitHub, uploads the machine's files and sets it up in one ssh call. There are three modes: `autonomous` and `colleague` run the agent's Claude Code in tmux on the
-machine (the first never asks, the second asks about important choices); `interactive` gives the user a
-plain Claude Code session in VS Code on the machine, which `/handoff` later moves into tmux. On the
-machine a watchdog keeps a tmux agent alive and, after `idle_minutes` without CPU, GPU or conversation
-activity (there is no time limit), saves the work and stops the machine. As soon as a launch starts, a
-window opens by itself (`crab-student open NAME` in Windows Terminal or macOS's Terminal) that shows the
-launch's progress (also kept in `agents/NAME.log`) and then becomes the agent's session. The user
-watches with `crab-student open` (tmux attach over ssh) or `open --vscode`.
+the task and runs `crab-student launch NAME` in a background Bash call (one per agent, in parallel):
+the CLI rents two machines at once and keeps the first that starts, puts the agent's branch on GitHub,
+then uploads the machine's files and sets it up (dependencies included) in one ssh call. Modes:
+`autonomous` and `colleague` run the agent's Claude Code in tmux (the first never asks, the second asks
+about important choices); `interactive` gives the user a Claude Code session in VS Code on the machine,
+which `/handoff` later moves into tmux. On the machine a watchdog keeps a tmux agent alive and, after
+`idle_minutes` without CPU, GPU or conversation activity, saves the work and stops the machine. A launch
+opens a window by itself (`crab-student open NAME`) that shows its progress (also in `agents/NAME.log`)
+and then becomes the agent's session.
 
-- `README.md` is for users. `SPEC.md` is the protocol reference: records, machine files, the ssh
-  commands, the modes and the hand-off, the onstart and dead-man contract, the stop rules and the safety
-  invariants. Update it when a protocol or an invariant changes. `docs/REQUIREMENTS.md` says what the
-  tool is for.
+`README.md` is for the user. `SPEC.md` is the protocol reference: records, machine files, the ssh
+commands, the modes and the hand-off, the onstart and dead-man contract, the stop rules and the safety
+invariants in full.
+
+## Design principle
+
+A single-user tool, used only by its owner, who wants it simple and fast.
+
+- Prefer the simplest thing that works.
+- Handle a rare failure with a clear error message that says what to do, not with new state or a
+  recovery path that spans commands.
+- No fallbacks for situations that cannot occur, and no backward-compatibility code (after a change to
+  the records, the user deletes old agents).
+- Trust the files the tool wrote itself (records, config, the machine's own files); validate external
+  input (Vast, GitHub, the user's files and flags).
 
 ## Layout
 
@@ -25,21 +35,21 @@ service: each command runs and exits.
 
 | Module | Owns |
 |---|---|
-| `cli.py` | The parser, every command's handler and all terminal output (tables, status), reading the `=== NAME [flags]` text of `launch --batch` |
-| `core.py` | `CrabError`, paths, settings (mode, model, effort, fast mode, ...) and the user's own Claude settings they default to, agent records and their OS locks, secrets (keyring, file fallback), `run`, formatting |
+| `cli.py` | The parser, every command's handler and all terminal output (tables, status, `list`'s warnings about orphan machines) |
+| `core.py` | `CrabError`, paths, settings (mode, model, effort, fast mode, ...) and the user's own Claude settings they default to, agent records and their OS locks, secrets (keyring, file fallback), VS Code's user settings file, `run`, formatting |
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
 | `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`; an interactive agent prefers hosts near `home`), the plan under the approval price (`plan`), the host lease check, the countries where Claude is unavailable (`BLOCKED`) |
-| `github.py` | `gh` and git: the user's repo, the snapshot commit, deploy keys, branches, files read from a branch (the report, the stop note), `pull` |
-| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (the Claude panel pre-filled for an interactive agent 15 s after VS Code opens; the wait for its hand-off), the window that follows a launch, the local VS Code's commit for the machine |
-| `launch.py` | `launch` and `launch_batch` (agents brought up side by side, each racing offers of its own), the approval rule, `bring_up` (the race of two machines, repo, upload, setup), the progress lines and the launch log, `approve` (several names), `decline`, `start` |
-| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the dependency install, the mode sync after a hand-off, destroying a race's late machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note of a stopped one), `send`, `report`, `open` (a launch at work; an interactive agent: VS Code, then its terminal after the hand-off) |
-| `setup.py` | `init` (including VS Code's `remote.SSH.defaultExtensions`), the skill and permission rules in `~/.claude`, the check of Claude Code's version (forks), `check_ready`, `guide` |
+| `github.py` | `gh` and git: the user's repo, the snapshot commit, the deploy key a repo's agents share, branches, files read from a branch (the report, the stop note), `pull` |
+| `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (the Claude panel pre-filled for an interactive agent 15 s after VS Code opens; polling for its hand-off), the window that follows a launch, the local VS Code's commit for the machine |
+| `launch.py` | `launch`, the approval rule, `bring_up` (the race of two machines, repo, upload, setup; a launch cut off is resumed or planned afresh), the progress lines and the launch log, `approve`, `decline`, `start` |
+| `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off, orphan machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note on a stopped one's branch), `send`, `report`, `open` (following a launch; an interactive agent: VS Code, then its terminal after the hand-off) |
+| `setup.py` | `init`, the skill and permission rules in `~/.claude` (`ALLOW`, `ASK`, `DENY`), `check_ready`, `guide` |
 | `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
-library, runs as root): `cs.py` (setup, including VS Code's server for an interactive agent, the background
-dependency install, the watchdog, Claude Code in tmux, the hand-off `agent-handoff`, and the commands the local side
-runs), `fake_claude.py` (a stand-in for `claude`, uploaded only for `--fake-claude`),
+library, runs as root): `cs.py` (setup, including the dependency install and VS Code's server for an
+interactive agent, the watchdog, Claude Code in tmux, the hand-off `agent-handoff`, and the commands the
+local side runs), `fake_claude.py` (a stand-in for `claude`, uploaded only for `--fake-claude`),
 `rules.md` with `rules-autonomous.md` and `rules-colleague.md` (the agent's rules and its mode's
 section, which become `~/.claude/CLAUDE.md`; an interactive agent has none) and `handoff.md` (the
 `/handoff` command an interactive agent gets; setup moves it into `~/.claude/commands/`, as it moves the
@@ -58,11 +68,11 @@ uv run ruff check src tests && uv run ruff format --check src tests
   plus `fake_vast` (a real HTTP server, `tests/fake_vast.py`), `fake_github` (bare repos and an
   in-process `gh`, `tests/fake_gh.py`), `user_repo`, `machines` (the local side's view of machines) and
   `ready` (what `init` leaves). The autouse `windows` records the launch windows instead of opening
-  them: tests never open real windows.
+  them, and conftest hides the `code` command, so tests never open windows or VS Code.
 - Test behaviour (records, calls on the fakes, files, exit codes, JSON), never wording or call order.
-- The machine side is tested by importing `cs.py` with `CS_ROOT` (and `CS_VENV`, `CS_PROC`) pointing at
-  a temporary folder; parts that need Linux (fcntl, tmux, pgrep, bash) are skipped elsewhere. Tests never
-  start this computer's VS Code: conftest hides the `code` command.
+- The machine side is tested by importing `cs.py` with `CS_ROOT` (and `CS_BIN`, `CS_PROFILE_D`,
+  `CS_VENV`) pointing at a temporary folder; parts that need Linux (fcntl, tmux, pgrep, bash) are
+  skipped elsewhere.
 - First real run of a change that touches renting or the machine side: the cheapest offer,
   `--fake-claude`, a private test repo or `--no-repo`, and delete the agent afterwards. What VS Code and
   its Claude extension do on a machine (the token, the pre-filled prompt, the terminal attaching to
@@ -79,74 +89,54 @@ uv run ruff check src tests && uv run ruff format --check src tests
   only for why, no dead code, no speculative options. ruff (line length 110), `ruff format`.
 - Paths are computed at call time from `Path.home()`. Records change under `core.locked(name)`: take an
   agent's lock once per command (a second lock on the same name in one process would wait on itself).
-- A batch launch brings each agent up in its own thread (progress lines prefixed `[name]`, one failure
-  not stopping the others): whatever the threads share, like the ssh config and known_hosts, is written
-  under a lock in `machine.py`.
+  Several launches may run at once as separate processes; each holds its own agent's lock.
 - Machine side: standard library only, Python 3.8 syntax (no `X | Y` at runtime, no dict `|`, no
   `removeprefix`, no `zip(strict=)`), LF line endings. The watchdog never dies of an exception.
-- Nothing the remote agent sees may name crab-student: its rules, first prompt, the watchdog's messages
-  (which start with `Automated message from the machine:`), hook messages and command output describe
-  the situation plainly. The machine's commands are `agent-status`, `agent-attach` and `agent-handoff`.
-- "Agent", not "worker", in text, identifiers and file names. There is no backward-compatibility code
-  for records made before a rename: users delete old ones.
+- "Agent", not "worker", in text, identifiers and file names.
 
-## Safety invariants (keep them)
+## Safety rules (SPEC section 1 has the detail)
 
-- **Money.** Every launch passes the price check: it rents without asking only a machine that costs
-  `approve_above_usd_per_hour` or less, else it waits (`pending`, exit 3); a failed launch tried again
-  with `start` is planned again under the same check. Only `approve` skips it, and it is an ask-rule
-  command. Restarting a stopped agent has no gate, and there is no time limit and no cost estimate: the
-  approval, the idle stop and the dead-man switch bound the bill. Never add a flag, default or retry
-  that rents more, or rents above the price without `approve`. Renting two machines at once for a launch
-  (the race) is deliberate and bounded, not a retry that rents more: at most two are in flight per
-  launch, both within the approved price, and the loser is destroyed before any upload.
-- **Never rent twice.** A rent request is never retried; each rent's label is saved in the record
-  (`rents`) before the request; an unknown outcome is resolved only by finding that exact label, and
-  such a rent keeps its place in the race meanwhile. No rent goes unaccounted for: one left behind
-  when another machine won stays in `strays` until a later `list`, `status`, `start` or `delete` finds
-  its machine by label and destroys it.
-- **Own machines only.** Act only on instance ids in the records (or an exact label of ours).
-- **Never destroy work.** Code destroys a machine by itself only before its upload (a race's loser, a
-  machine that did not start in time), or after its setup failed; `start` on a stopped agent never does. `delete` checks for unsaved work first (a running machine itself; a stopped one from the stop
-  note of its latest stop); a machine that cannot be checked needs `--force`, or starting first if it is
-  stopped.
-- **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
-  activity (conversation activity counts wherever the conversation is, tmux or VS Code), done or not,
-  always saving first (a final save also writes the stop note `delete` reads); the dead-man switch in
-  the onstart command stops it if the watchdog never runs or dies.
-- **Secrets** never go on command lines, into logs, the brief, records or git. They reach the machine
-  only inside the upload stream, as 0600 files (setup also copies the token and task secrets into the
-  machine's 0600 `~/.claude/settings.json`, for VS Code's Claude).
-- **The launcher** (a background fork, or a general-purpose background agent when forks are missing)
-  cannot ask the user anything, and a command outside `setup.ALLOW` would raise a permission prompt in
-  the user's main session. Anything that approves a pricier machine, destroys or changes settings is in
-  `setup.ASK`.
-- **Modes.** The safety parts (branch-only pushes, the secret and big-file hooks, the autosave before
-  every stop, the idle stop, the dead-man switch) hold in every mode, and all modes run Claude Code with
-  `--dangerously-skip-permissions`. A hand-off must never leave two Claude sessions on one conversation:
-  the tmux agent runs a fork of the VS Code session, under a new session id.
+- **Money**: a launch rents without asking only at or under `approve_above_usd_per_hour`, else it waits
+  (`pending`, exit 3); only `approve`, an ask-rule command, goes over. Never add a flag, default or
+  retry that rents more, or above the price without `approve`.
+- **Never rent twice**: a rent request is never retried; its label is saved in `rents` before the
+  request, and an unknown outcome is resolved only by finding that label. At most two rents race.
+- **Own machines only**: act only on instance ids in the records, or our exact rent labels.
+- **Never destroy work**: code destroys a machine by itself only before its upload or after a failed
+  setup. `delete` checks for unsaved work first, else needs `--force`.
+- **Stops are bounded**: the watchdog's idle stop (every mode, done or not) and the dead-man switch in
+  the onstart command; every stop saves first.
+- **Secrets** never go on command lines, into logs, the brief, records or git; they reach the machine
+  only inside the upload stream, as 0600 files.
+- **Branch-only pushes** and the secret and big-file hooks hold in every mode.
+- **The launcher** runs only `setup.ALLOW` commands; whatever approves, destroys or changes settings is
+  in `setup.ASK`.
+- **The remote agent never hears "crab-student"**: what it sees (rules, prompts, the watchdog's
+  `Automated message from the machine:` messages, hook and command output) describes things plainly.
+- **A hand-off** never leaves two Claude sessions on one conversation: tmux runs a fork under a new
+  session id.
 
 ## Easy to forget
 
-- `crab-student guide launch` fills `{{approve_above_usd_per_hour}}` in the guide with the current
-  setting; the skill and README name the setting without a number. Change the code, the guide and the
-  skill together when the launch's result line, flags or modes change.
+- Change `data/launch.md` (the launcher's guide) and `data/SKILL.md` with the commands they describe:
+  the launch's flags, result line and modes. `crab-student guide launch` fills
+  `{{approve_above_usd_per_hour}}` in the guide with the current setting; the skill and README name the
+  setting without a number.
 - The model, effort and fast mode reach the machine as `claude_settings` in its `~/.claude/settings.json`
-  (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`. Claude Code
-  keeps the effort picked with `/effort` per model (`modelSettings.<model>.effortLevel`; a top-level
-  `effortLevel` there is only a default), so those per-model levels come along unless an effort is
+  (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`, including
+  the per-model efforts Claude Code keeps (`modelSettings.<model>.effortLevel`) unless an effort is
   chosen.
+- Setup installs the repo's dependencies (step 3 of 6) and waits for it, up to 30 minutes; a failed
+  install is a warning in the launch's result and a line in the agent's rules, never a failed setup. So
+  the launcher runs `launch`, `start` and `approve` as background Bash calls (a Bash call stops at 10
+  minutes). VS Code's server (interactive agents) is a setup job whose failure is only a warning.
 - The machine folder stays `/root/crab-student` (the onstart command and the dead-man switch name it);
   the agent reads its brief at `/root/BRIEF.md` and never needs the folder.
-- Agents don't use Remote Control: it refuses the long-lived token they sign in with, and a full login on
-  a rented machine is not worth the risk. The user steers agents from their phone through their own
-  Claude Code session's Remote Control, which runs crab-student commands (README).
+- Agents don't use Remote Control (it refuses their long-lived token); the user steers agents from their
+  phone through their own session's Remote Control, which runs crab-student commands.
 - `crab-student open` (without `--vscode`) is interactive: the user runs it in their own terminal, Claude
   never does (a launch opens a window running it by itself, unless `open_window` is off). `open --vscode`
   only starts VS Code (for an interactive agent it waits a fixed 15 seconds before filling in the Claude
   panel), so Claude may run it.
-- The dependency install is the only background job: it never fails or holds up setup. VS Code's server (an
-  interactive agent's, when VS Code is installed locally) is a setup job that setup waits for (up to 10
-  minutes) and whose failure is only a warning. The agent never sees `D`'s paths: `agent-status` shows the install's state and the end of its log.
 - `init` needs re-running after the skill or the permission rules change.
 - Changes to `remote/` reach only agents launched afterwards (the files are uploaded at launch).

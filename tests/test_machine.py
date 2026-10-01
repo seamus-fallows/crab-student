@@ -1,22 +1,19 @@
-"""The local side of talking to machines, with no real ssh: the ssh config and host keys (shared by agents
-brought up in threads), addresses, the bundle, what remote() makes of ssh's answers, the upload's progress
-and failures, and opening terminals and VS Code."""
+"""The local side of talking to machines, with no real ssh: the ssh config, addresses, the bundle, what remote()
+makes of ssh's answers, the upload's progress and failures, and opening terminals and VS Code."""
 
 from __future__ import annotations
 
 import io
 import json
 import subprocess
+import sys
 import tarfile
-import threading
-import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from crab_student import core, machine
-from crab_student.machine import open_launch_windows  # (the real one: conftest replaces it for every test)
+from crab_student.machine import open_launch_window  # (the real one: conftest replaces it for every test)
 
 
 @pytest.fixture(autouse=True)
@@ -35,24 +32,6 @@ def fails(code: int, fn, *a) -> core.CrabError:
 def unpack(data: bytes) -> dict[str, tuple[bytes, int]]:
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         return {m.name: (tar.extractfile(m).read(), m.mode) for m in tar.getmembers()}
-
-
-def hosts_in(config: str) -> list[str]:
-    return [line.split()[1] for line in config.splitlines() if line.startswith("Host ")]
-
-
-def together(fn, calls: list[tuple]) -> None:
-    """Call fn(*args) for every args in `calls`, each in its own thread, all set off at the same moment;
-    whatever a call raised is raised here."""
-    go = threading.Barrier(len(calls), timeout=10)
-
-    def call(args: tuple) -> None:
-        go.wait()
-        fn(*args)
-
-    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-        for future in [pool.submit(call, args) for args in calls]:
-            future.result()
 
 
 def fake_run(monkeypatch, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"", raises=None) -> list:
@@ -95,9 +74,11 @@ def test_the_ssh_config_has_a_host_for_each_agent_with_an_address():
     core.save({"name": "job1", "created": "1", "ssh": {"host": "203.0.113.7", "port": 40122}})
     core.save({"name": "job2", "created": "2", "ssh": None})
     machine.write_ssh_config()
-    text = machine.config_file().read_text()
+    config = machine.config_file()
+    text = config.read_text()
     hosts = [line.split()[1] for line in text.splitlines() if line.startswith("Host ")]
     assert hosts == ["crab-student-job1"]
+    assert [p.name for p in config.parent.iterdir() if p != config] == []  # (no temporary file left)
     for line in ("HostName 203.0.113.7", "Port 40122", "User root", "HostKeyAlias crab-student-job1"):
         assert f"  {line}\n" in text
     # (paths under the home folder as "~/...": Git's ssh, which VS Code may run, reads "C:/..." as relative)
@@ -117,97 +98,17 @@ def test_opening_in_vscode_marks_the_host_as_linux_and_forgets_agents_that_are_g
     assert settings["editor.tabSize"] == 2
 
 
-def test_a_vscode_settings_file_with_comments_is_edited_line_by_line(isolated):
+def test_a_vscode_settings_file_with_comments_is_left_alone(isolated):
     path = core.vscode_settings_file()
     path.parent.mkdir(parents=True)
-    path.write_text(
-        '{\n    // my comment\n    "remote.SSH.remotePlatform": {\n        "crab-student-gone": "linux",\n'
-        '        "my-box": "linux"\n    },\n}\n'
+    raw = (
+        b'{\r\n    // my comment\r\n    "remote.SSH.remotePlatform": {\r\n        "crab-student-gone": "linux",'
+        b'\r\n        "my-box": "linux"\r\n    },\r\n}'
     )
+    path.write_bytes(raw)
     core.save({"name": "job1", "created": "1"})
     machine.remember_linux_host("job1")
-    text = path.read_text()
-    assert "// my comment" in text and '"my-box": "linux"' in text and "crab-student-gone" not in text
-    assert '"crab-student-job1": "linux",' in text
-    machine.remember_linux_host("job1")
-    assert path.read_text() == text  # (once)
-    path.write_text('{\n    // only a comment\n    "editor.tabSize": 2\n}\n')
-    machine.remember_linux_host("job1")
-    assert '"remote.SSH.remotePlatform": {"crab-student-job1": "linux"},' in path.read_text()
-
-
-@pytest.mark.parametrize("newline", ["\n", "\r\n"])
-def test_a_settings_file_with_comments_keeps_its_line_endings_and_last_line(isolated, newline):
-    path = core.vscode_settings_file()
-    path.parent.mkdir(parents=True)
-    lines = ["{", "    // c", '    "remote.SSH.remotePlatform": {', '        "box": "linux"', "    }", "}"]
-    path.write_bytes(newline.join(lines).encode())  # (no newline at the end)
-    core.save({"name": "job1", "created": "1"})
-    machine.remember_linux_host("job1")
-    want = [*lines[:3], '        "crab-student-job1": "linux",', *lines[3:]]
-    assert path.read_bytes() == newline.join(want).encode()
-
-
-def test_agents_coming_up_in_threads_all_end_up_in_the_ssh_config():
-    def come_up(i: int) -> None:
-        ssh = {"host": "203.0.113.7", "port": 40000 + i}
-        core.save({"name": f"job{i:02}", "created": f"{i:02}", "ssh": ssh})
-        machine.write_ssh_config()
-
-    together(come_up, [(i,) for i in range(16)])
-    config = machine.config_file()
-    text = config.read_text()
-    assert hosts_in(text) == [machine.alias(f"job{i:02}") for i in range(16)]
-    machine.write_ssh_config()  # (quietly, from the same records)
-    assert config.read_text() == text
-    assert [p.name for p in config.parent.iterdir() if p != config] == []  # (no temporary file left)
-
-
-def test_an_agent_saved_while_another_thread_writes_the_ssh_config_is_not_left_out(monkeypatch):
-    def add(name: str) -> None:
-        core.save({"name": name, "created": name, "ssh": {"host": "203.0.113.7", "port": 40122}})
-
-    add("job1")
-    read_records = core.all_records
-    job1_read, job2_written = threading.Event(), threading.Event()
-
-    def slow_first_read() -> list[dict]:
-        recs = read_records()
-        if not job1_read.is_set():
-            job1_read.set()
-            job2_written.wait(0.1)  # (time enough for job2's write, unless the lock keeps it out)
-        return recs
-
-    monkeypatch.setattr(core, "all_records", slow_first_read)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        first = pool.submit(machine.write_ssh_config)
-        assert job1_read.wait(10)
-        add("job2")
-        machine.write_ssh_config()
-        job2_written.set()
-        first.result(10)
-    assert hosts_in(machine.config_file().read_text()) == [machine.alias("job1"), machine.alias("job2")]
-
-
-def test_host_keys_are_forgotten_one_at_a_time(monkeypatch):
-    core.ssh_dir().mkdir(parents=True)
-    (core.ssh_dir() / "known_hosts").write_text("")
-    guard, running, most, forgotten = threading.Lock(), 0, 0, []
-
-    def keygen(cmd, **kw):  # (ssh-keygen -R rewrites the shared file: two at once would lose changes)
-        nonlocal running, most
-        with guard:
-            running += 1
-            most = max(most, running)
-            forgotten.append(cmd[cmd.index("-R") + 1])
-        time.sleep(0.01)
-        with guard:
-            running -= 1
-
-    monkeypatch.setattr(core, "run", keygen)
-    together(machine.forget_host_key, [(f"job{i}",) for i in range(8)])
-    assert most == 1
-    assert sorted(forgotten) == [machine.alias(f"job{i}") for i in range(8)]
+    assert path.read_bytes() == raw and [p.name for p in path.parent.iterdir()] == ["settings.json"]
 
 
 def test_set_address_follows_the_direct_port_and_says_when_it_moved():
@@ -289,12 +190,12 @@ def test_remote_failures(answer, unreachable, said, monkeypatch):
 
 
 def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypatch):
-    lines = [b"step 1/5 environment", b"Cloning into 'proj'...", b"step 2/5 repository",
+    lines = [b"step 1/6 environment", b"Cloning into 'proj'...", b"step 2/6 repository",
              b'{"ok": false, "step": 2, "label": "repository", "error": "clone failed"}']  # fmt: skip
     proc, progress = Upload(lines, returncode=1), []
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: proc)
     e = fails(5, machine.upload_and_setup, "job1", b"BUNDLE", progress.append)
-    assert progress == ["step 1/5 environment", "step 2/5 repository"] and proc.stdin.getvalue() == b"BUNDLE"
+    assert progress == ["step 1/6 environment", "step 2/6 repository"] and proc.stdin.getvalue() == b"BUNDLE"
     assert "repository" in e.message and "clone failed" in e.message
 
 
@@ -302,13 +203,13 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
     "last,returncode,outcome",
     [
         (b'{"ok": true}', 0, "ok"),
-        (b"step 3/5 agent settings", 255, "unreachable"),  # (the connection dropped: the launch can go on)
+        (b"step 3/6 dependencies", 255, "unreachable"),  # (the connection dropped: the launch can go on)
         (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
     ],
 )
 def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/5 environment", last], returncode)
+        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode)
     )
     try:
         machine.upload_and_setup("job1", b"BUNDLE", lambda line: None)
@@ -358,24 +259,20 @@ def test_a_racing_machine_is_checked_at_its_address_without_keeping_its_host_key
 
 
 @pytest.mark.parametrize("system", ["windows", "macos", "linux", "windows without wt"])
-def test_launch_windows_follow_each_agent(system, monkeypatch):
+def test_a_launch_window_follows_the_agent(system, monkeypatch):
     monkeypatch.setattr(machine.os, "name", "nt" if system.startswith("windows") else "posix")
     monkeypatch.setattr(machine.sys, "platform", {"macos": "darwin", "linux": "linux"}.get(system, "win32"))
     monkeypatch.setattr(core, "tool", lambda name: None if system == "windows without wt" else f"/bin/{name}")
     started = []
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
-    opened = open_launch_windows(["job1", "job2"])
-    assert opened is (system in ("windows", "macos"))
-    if system == "windows":  # one window, a tab per agent, each following its launch with open
+    assert open_launch_window("job1") is (system in ("windows", "macos"))
+    if system == "windows":  # a tab in the window named crab-student (launches side by side collect there)
         ((wt, *argv),) = started
-        tabs = [g.split("\0") for g in "\0".join(argv).split("\0;\0")]
-        assert wt == "/bin/wt" and all(
-            t[-2:] == ["open", n] and "new-tab" in t for t, n in zip(tabs, ["job1", "job2"], strict=True)
-        )
-    elif system == "macos":  # a Terminal window per agent
-        scripts = [argv[-1] for argv in started]
-        assert [argv[0] for argv in started] == ["/bin/osascript"] * 2
-        assert "open job1" in scripts[0] and "open job2" in scripts[1]
+        assert [wt, *argv[:5]] == ["/bin/wt", "-w", "crab-student", "new-tab", "--title", "job1"]
+        assert argv[5:] == [sys.executable, "-m", "crab_student", "open", "job1"]
+    elif system == "macos":  # a Terminal window
+        ((osascript, *argv),) = started
+        assert osascript == "/bin/osascript" and "open job1" in argv[-1]
     else:
         assert not started
 
@@ -443,16 +340,6 @@ def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vs
     assert vscode == {"code": [], "urls": []}
 
 
-def test_the_panel_says_when_the_dependencies_are_still_being_installed(machines, vscode):
-    machines.replies[("job1", "status")] = {
-        "frontend": "vscode",
-        "deps": {"state": "running", "command": "uv sync"},
-    }
-    machine.open_vscode(agent_record(brief="Train the model."))
-    prompt = panel_prompt(vscode["urls"][0])
-    assert prompt.startswith("Train the model.") and "uv sync" in prompt and "agent-status" in prompt
-
-
 def test_open_vscode_on_an_agent_whose_status_is_known_does_not_ask_the_machine_again(machines, vscode):
     machine.open_vscode(agent_record(brief="Train the model."), {"frontend": "vscode"})
     assert machines.calls == [] and vscode["urls"]
@@ -475,18 +362,44 @@ def test_without_a_usable_vs_code_the_machine_prepares_nothing_for_it(monkeypatc
     assert machine.local_vscode() is None
 
 
-def test_the_wait_for_a_hand_off_ends_when_the_agent_runs_in_tmux(monkeypatch, capsys):
-    answers = [{"frontend": "vscode"}, {"frontend": "tmux"}]
-    monkeypatch.setattr(machine, "remote", lambda name, args, **kw: answers.pop(0))
-    assert (
-        machine.wait_for_handoff("job1") is True and answers == [] and "/handoff" in capsys.readouterr().out
-    )
+def test_the_wait_for_a_hand_off_asks_the_machines_status_until_the_agent_runs_in_tmux(monkeypatch):
+    answers = [{"frontend": "vscode"}, {"frontend": "vscode"}, {"frontend": "tmux"}]
+    asked, slept = [], []
 
-
-@pytest.mark.parametrize("answer", [machine.Unreachable("no answer"), KeyboardInterrupt()])
-def test_the_wait_for_a_hand_off_ends_when_the_machine_cannot_be_reached_or_on_ctrl_c(monkeypatch, answer):
     def remote(name, args, **kw):
-        raise answer
+        asked.append((name, args))
+        return answers.pop(0)
 
     monkeypatch.setattr(machine, "remote", remote)
-    assert machine.wait_for_handoff("job1") is False
+    monkeypatch.setattr(machine.time, "sleep", slept.append)
+    assert machine.wait_for_handoff("job1") is True
+    assert asked == [("job1", ["status"])] * 3 and slept == [machine.HANDOFF_POLL] * 2 and answers == []
+
+
+def fake_status(monkeypatch, answers: list) -> None:
+    """machine.remote answering from `answers` (an exception is raised); no sleeping."""
+
+    def remote(name, args, **kw):
+        reply = answers.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(machine, "remote", remote)
+    monkeypatch.setattr(machine.time, "sleep", lambda seconds: None)
+
+
+def test_the_wait_for_a_hand_off_rides_out_a_short_loss_of_the_machine(monkeypatch):
+    lost = [machine.Unreachable("no answer")] * (machine.HANDOFF_MISSES - 1)
+    answers = [{"frontend": "vscode"}, *lost, {"frontend": "vscode"}, *lost, {"frontend": "tmux"}]
+    fake_status(monkeypatch, answers)
+    assert machine.wait_for_handoff("job1") is True and answers == []
+
+
+def test_the_wait_for_a_hand_off_ends_when_the_machine_is_lost_for_a_minute_or_on_ctrl_c(monkeypatch):
+    answers = [{"frontend": "vscode"}, *[machine.Unreachable("no answer")] * machine.HANDOFF_MISSES]
+    fake_status(monkeypatch, answers)
+    assert machine.wait_for_handoff("job1") is False and answers == []
+    answers = [{"frontend": "vscode"}, KeyboardInterrupt()]
+    fake_status(monkeypatch, answers)
+    assert machine.wait_for_handoff("job1") is False and answers == []

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -41,7 +39,6 @@ class View:
     mode: str
     frontend: str | None  # where the agent's Claude runs: "tmux", or "vscode" (interactive, not handed off)
     settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
-    deps: dict | None  # the machine's install of the project's dependencies: state, command, exit_code
 
 
 def _status(rec: dict) -> dict | None:
@@ -52,10 +49,15 @@ def _status(rec: dict) -> dict | None:
 
 
 def views(names: list[str] | None = None) -> list[View]:
-    """Every agent (or those named) as it is now: one Vast call, and one ssh call per running machine."""
+    return listing(names)[0]
+
+
+def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
+    """Every agent (or those named) as it is now, and the machines that belong to no agent (see orphans): one
+    Vast call, and one ssh call per running machine."""
     recs = [r for r in core.all_records() if names is None or r["name"] in names]
     insts: dict | None = {}
-    if any(r.get("instance_id") or r.get("strays") for r in recs):
+    if core.vast_key_file().exists() or any(r.get("instance_id") for r in recs):
         try:
             insts = {i["id"]: i for i in vast.instances()}
         except core.CrabError:
@@ -72,13 +74,26 @@ def views(names: list[str] | None = None) -> list[View]:
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
-        if not busy and rec.get("strays") and insts is not None:
-            _sweep(rec["name"], list(insts.values()))
         state, message = display_state(rec, inst, st, busy, insts is None)
         result.append(_view(rec, inst, st, state, message))
     if moved:
         machine.write_ssh_config()
-    return result
+    # (records read again: a launch running alongside may have saved a rent since the first read)
+    return result, orphans(list((insts or {}).values()), core.all_records())
+
+
+def orphans(insts: list[dict], recs: list[dict]) -> list[dict]:
+    """The instances labelled as rented by crab-student that are no agent's (its machine, or one of its rents):
+    most likely a rent Vast did not confirm that went through after all. Never destroyed from here."""
+    labels = {r["label"] for rec in recs for r in [rec.get("rent"), *(rec.get("rents") or [])] if r}
+    ids = {rec.get("instance_id") for rec in recs}
+    return [
+        i
+        for i in insts
+        if str(i.get("label") or "").startswith(launch.LABEL_PREFIX)
+        and i.get("label") not in labels
+        and i["id"] not in ids
+    ]
 
 
 def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
@@ -92,7 +107,7 @@ def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
             if up and fresh.get(
                 "stopped_since"
             ):  # (started again, maybe not by crab-student: old notes are stale)
-                fresh.update(last_start=time.time(), stop_note=None)
+                fresh["last_start"] = time.time()
             fresh["stopped_since"] = None if up else fresh.get("stopped_since") or time.time()
         if st:
             a = st.get("agent") or {}
@@ -112,12 +127,6 @@ def _remember(rec: dict, inst: dict | None, st: dict | None) -> bool:
     return False
 
 
-def _sweep(name: str, insts: list[dict]) -> None:
-    """Destroy the machines of the agent's unconfirmed rents that have shown up (another machine won its launch)."""
-    with contextlib.suppress(core.CrabError), core.locked(name):
-        launch.sweep_strays(core.load(name), insts=insts)
-
-
 def display_state(
     rec: dict, inst: dict | None, st: dict | None, busy: bool, vast_down: bool = False
 ) -> tuple[str, str]:
@@ -131,12 +140,7 @@ def display_state(
             return "starting", {"renting": "renting a machine", "booting": "booting", "setup": "setting up"}[
                 phase
             ]
-        if phase == "renting" and any(r["instance_id"] is None for r in rec.get("rents") or []):
-            return (
-                "interrupted",
-                f"the rent was not confirmed: crab-student start {name} looks for the machine",
-            )
-        return "interrupted", f"launch interrupted: crab-student start {name} continues it"
+        return "interrupted", f"launch interrupted: crab-student start {name} tries again"
     if phase == "failed":
         return "failed", rec.get("error") or ""
     if vast_down:
@@ -211,7 +215,6 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         mode=rec.get("mode") or "",
         frontend=st.get("frontend") if st else last.get("frontend"),
         settings=rec.get("claude_settings") or {},
-        deps=st.get("deps") if st else None,
     )
 
 
@@ -224,14 +227,15 @@ def view(name: str) -> View:
 
 
 def stop(name: str, out: launch.Progress) -> dict:
-    """Save what the agent has, then stop the machine (the disk is kept)."""
+    """Save what the agent has, then stop the machine (the disk is kept). The final save pushes the stop note
+    that lets delete check the stopped machine without starting it."""
     with core.locked(name):
         rec = core.load(name)
         if rec["phase"] == "pending":
             raise core.CrabError(
                 f"{name} is waiting for approval and has no machine yet. To drop it: crab-student decline {name}"
             )
-        if not rec.get("uploaded"):
+        if not (rec.get("uploaded") and rec.get("instance_id")):
             raise core.CrabError(
                 f"{name} has not finished launching, so there is nothing to stop. To give up on it: "
                 f"crab-student delete {name}"
@@ -251,12 +255,6 @@ def stop(name: str, out: launch.Progress) -> dict:
                     + (f" ({s['error']})" if s.get("error") else "")
                     + "."
                 )
-                if s.get("note_committed"):  # (what it leaves behind: delete needs no restart to check)
-                    rec["stop_note"] = {
-                        **s["note"],
-                        "unpushed": s.get("unpushed", 0),
-                        "recorded_at": time.time(),
-                    }
             except core.CrabError as e:
                 out.line(f"Could not save first ({e.message}); the disk is kept, so nothing is lost.")
         vast.set_state(rec["instance_id"], "stopped")
@@ -319,8 +317,8 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                         3,
                     ) from None
             elif (note := _stop_note(rec)) is not None:
-                res = {"unpushed": note.get("unpushed", 0), "dirty": note.get("not_committed_count", 0),
-                       "outputs": note.get("outputs"), "large_files": note.get("large_files")}  # fmt: skip
+                res = {"dirty": note.get("not_committed_count", 0), "outputs": note.get("outputs"),
+                       "large_files": note.get("large_files")}  # fmt: skip
             else:
                 raise core.CrabError(
                     f"{name} is stopped, and crab-student does not know what it left on the machine. Start it "
@@ -343,41 +341,34 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     ),
                     3,
                 )
-        spare, missing = launch.spare_machines(rec)  # (rented for the launch, never uploaded to)
-        for iid in ([inst["id"]] if inst else []) + spare:
+        ids, lost = [inst["id"]] if inst else [], []
+        for r in rec["rents"]:  # (a race cut off: its machines never received anything)
+            if iid := r["instance_id"] or launch.find_by_label(r["label"]):
+                ids.append(iid)
+            else:
+                lost.append(f"Warning: {launch.unconfirmed(r)}")
+        for iid in ids:
             vast.destroy(iid)
             out.line(f"Destroyed machine {iid}.")
-        lines = [f"Deleted {name}.", *_cleanup(rec)]
-        lines += [
-            f"Warning: no machine labelled {label} was found (Vast never confirmed that rent). If one shows up at "
-            "https://cloud.vast.ai/instances/, destroy it there."
-            for label in missing
-        ]
+        lines = [f"Deleted {name}.", *_cleanup(rec), *lost]
     return {"name": name, "result_line": "\n".join(lines)}
 
 
 def _stop_note(rec: dict) -> dict | None:
-    """What a stopped machine left behind at its latest stop, when that is known: `stop` keeps its note in the
-    record, and a stop of the machine's own leaves agent-runs/<name>/stopped.json on the branch. A note counts
-    only if written after the last start seen (a stop that could not push its note leaves an older one), and
-    the newer of the two wins. None when GitHub cannot be asked."""
-    started, notes = rec.get("last_start") or 0, []
-    kept = rec.get("stop_note")
-    if kept and kept.get("recorded_at", 0) >= started:
-        notes.append(kept)
+    """What a stopped machine left behind at its latest stop: the note its final save (the watchdog's, or
+    `stop`'s) pushed to the branch as agent-runs/<name>/stopped.json. It counts only if written after the last
+    start seen (a stop that could not push its note leaves an older one). None when there is no such note, or
+    GitHub cannot be asked."""
     repo = rec["repo"]
     try:
         text = github.read_file(repo["slug"], repo["branch"], f"agent-runs/{rec['name']}/stopped.json")
-    except core.CrabError:
+        note = json.loads(text) if text else None
+    except (core.CrabError, ValueError):
         return None
-    try:
-        pushed = json.loads(text) if text else None
-    except ValueError:
-        pushed = None
-    stopped = pushed.get("stopped_at") if isinstance(pushed, dict) else None
-    if isinstance(stopped, int | float) and stopped >= started + NOTE_MARGIN:
-        notes.append(pushed)
-    return max(notes, key=lambda n: n.get("stopped_at") or 0, default=None)
+    stopped = note.get("stopped_at") if isinstance(note, dict) else None
+    if isinstance(stopped, int | float) and stopped >= (rec.get("last_start") or 0) + NOTE_MARGIN:
+        return note
+    return None
 
 
 def _cleanup(rec: dict) -> list[str]:
@@ -471,27 +462,23 @@ def open_all(names: list[str]) -> int:
 
 
 def follow_launch(name: str) -> bool:
-    """Show an agent's launch as it happens: its log so far, then each new line (on a terminal the status line is
-    rewritten in place), until it ends. True once the agent is ready; else False, after saying what happened
-    and what to do."""
-    tty = sys.stdout.isatty()
-    if tty and os.name == "nt":
-        os.system("")  # (turns on the escape codes that rewrite the status line)
+    """Show an agent's launch as it happens: its log so far, then each new line, until it ends. True once the agent
+    is ready; else False, after saying what happened and what to do."""
     print(
         f"Launching {name}. Closing this window does not stop the launch (see it again: crab-student open {name})."
     )
-    shown, quiet = _LogView(name, tty), 0
+    shown, quiet = _LogView(name), 0
     while True:
         shown.update()
         if not core.record_path(name).exists():
-            shown.end(f"{name} was deleted.")
+            print(f"{name} was deleted.")
             return False
         busy = core.is_locked(name)
         quiet = 0 if busy else quiet + 1
         rec = core.load(name)
         if not busy and (rec["phase"] in ("ready", "failed", "pending") or quiet >= QUIET_ENDS):
             shown.update()
-            shown.end(_launch_outcome(rec))
+            print(core.ascii_text(_launch_outcome(rec)), flush=True)
             return rec["phase"] == "ready"
         time.sleep(FOLLOW_POLL)
 
@@ -510,14 +497,14 @@ def _launch_outcome(rec: dict) -> str:
             f"{name} is waiting for your approval: {rec['pending']['reason']}. Approve it: crab-student approve "
             f"{name} (or: crab-student decline {name})."
         )
-    return f"The launch of {name} stopped before it finished. Continue it: crab-student start {name}"
+    return f"The launch of {name} stopped before it finished. Try again: crab-student start {name}"
 
 
 class _LogView:
-    """The new lines of a launch log, printed as they come ("~" lines are the status line)."""
+    """The new lines of a launch log, printed as they come (a status line without its "~" marker)."""
 
-    def __init__(self, name: str, tty: bool):
-        self.path, self.tty, self.pos, self.status = launch.log_file(name), tty, 0, False
+    def __init__(self, name: str):
+        self.path, self.pos = launch.log_file(name), 0
 
     def update(self) -> None:
         try:
@@ -530,18 +517,4 @@ class _LogView:
         self.pos += len(complete)
         for line in complete.decode("utf-8", "replace").splitlines():
             clock, _, text = line.partition(" ")
-            if text.startswith("~ ") and self.tty:
-                sys.stdout.write(f"\r\033[K{clock} {text[2:]}")
-                self.status = True
-            else:
-                self._print(f"{clock} {text[2:]}" if text.startswith("~ ") else line)
-        sys.stdout.flush()
-
-    def _print(self, text: str) -> None:
-        if self.status:
-            sys.stdout.write("\n")
-            self.status = False
-        print(core.ascii_text(text), flush=True)
-
-    def end(self, text: str) -> None:
-        self._print(text)
+            print(core.ascii_text(f"{clock} {text.removeprefix('~ ')}"), flush=True)

@@ -7,8 +7,6 @@ import getpass
 import json
 import math
 import os
-import re
-import shlex
 import shutil
 import sys
 from dataclasses import asdict
@@ -33,17 +31,12 @@ def emit(result: dict, as_json: bool) -> None:
 HOURS_HELP = "how long the task may run, if more than a day: its host must stay available twice as long"
 
 
-def _req_args(p: argparse.ArgumentParser, defaults: bool = True) -> None:
-    """The requirement flags (without their defaults for a batch's agent, so the batch's own apply)."""
-
-    def d(value: object) -> dict:
-        return {"default": value} if defaults else {}
-
-    p.add_argument("--gpus", type=int, **d(0), help="number of GPUs (default 0: a CPU task)")
-    p.add_argument("--gpu-ram", type=float, **d(0), metavar="GB", help="memory per GPU")
-    p.add_argument("--gpu-models", **d(""), metavar="LIST", help='allowed GPU models, e.g. "4090,A100"')
-    p.add_argument("--cpus", type=int, **d(8), help="CPU cores (default 8)")
-    p.add_argument("--ram", type=float, **d(16), metavar="GB", help="system RAM (default 16)")
+def _req_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--gpus", type=int, default=0, help="number of GPUs (default 0: a CPU task)")
+    p.add_argument("--gpu-ram", type=float, default=0, metavar="GB", help="memory per GPU")
+    p.add_argument("--gpu-models", default="", metavar="LIST", help='allowed GPU models, e.g. "4090,A100"')
+    p.add_argument("--cpus", type=int, default=8, help="CPU cores (default 8)")
+    p.add_argument("--ram", type=float, default=16, metavar="GB", help="system RAM (default 16)")
     p.add_argument("--disk", type=float, metavar="GB", help="disk (default: the disk_gb setting)")
     p.add_argument(
         "--min-down", type=float, metavar="MBPS", help="minimum download speed (default: the setting)"
@@ -139,13 +132,7 @@ def _positive(text: str) -> int:
 def cmd_launch(args: argparse.Namespace) -> int:
     if args.repo and args.no_repo:
         raise core.CrabError("use either --repo or --no-repo, not both.", 2)
-    if bool(args.name) == args.batch:
-        raise core.CrabError("give the agent's NAME, or --batch for several agents.", 2)
-    text = _read_brief(args)
-    if args.batch:
-        res = launch.launch_batch(_batch(args, text), launch.Progress())
-    else:
-        res = launch.launch(_launch_args(args, args.name, text), launch.Progress())
+    res = launch.launch(_launch_args(args, _read_brief(args)), launch.Progress())
     emit(res, args.json)
     return res["exit_code"]
 
@@ -161,9 +148,9 @@ def _read_brief(args: argparse.Namespace) -> str:
     return sys.stdin.read()
 
 
-def _launch_args(args: argparse.Namespace, name: str, brief: str) -> launch.LaunchArgs:
+def _launch_args(args: argparse.Namespace, brief: str) -> launch.LaunchArgs:
     return launch.LaunchArgs(
-        name=name,
+        name=args.name,
         req=_req(args, core.load_config()),
         brief=brief,
         repo_path=Path(args.repo).resolve() if args.repo else None,
@@ -186,7 +173,7 @@ def _setup(text: str | None) -> str | None:
 
 
 def _agent_args(p: argparse.ArgumentParser) -> None:
-    """The agent's own flags, on launch and on a batch's === lines."""
+    """The agent's own flags."""
     p.add_argument("--secret", action="append", metavar="NAME", help="a stored secret to give the agent")
     p.add_argument(
         "--mode",
@@ -206,42 +193,13 @@ def _agent_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--setup",
         metavar="COMMAND",
-        help="how the machine installs the project's dependencies, in the background (default: uv sync, pip "
-        "install -e . or pip install -r requirements*.txt, as the repo says; none: no install)",
+        help="how the machine installs the project's dependencies during setup, before the agent starts (default: "
+        "uv sync, pip install -e . or pip install -r requirements*.txt, as the repo says; none: no install)",
     )
 
 
-class _AgentParser(argparse.ArgumentParser):
-    def error(self, message: str):
-        raise core.CrabError(f"a '===' line: {message}", 2)
-
-
-def _batch(args: argparse.Namespace, text: str) -> list[launch.LaunchArgs]:
-    """Several agents from one text: each starts with a line `=== NAME [flags]` (flags as for launch, over
-    the batch's own), followed by its brief."""
-    parts = re.split(r"(?m)^=== ", text)
-    if parts[0].strip() or len(parts) < 2:
-        raise core.CrabError("a batch is one or more agents, each starting with a line: === NAME [flags]", 2)
-    own = _AgentParser(prog="===", add_help=False, argument_default=argparse.SUPPRESS)
-    own.add_argument("name")
-    own.add_argument("--hours", type=float)
-    _req_args(own, defaults=False)
-    _agent_args(own)
-    items = []
-    for part in parts[1:]:
-        head, _, brief = part.partition("\n")
-        try:
-            agent = vars(own.parse_args(shlex.split(head)))
-        except ValueError as e:
-            raise core.CrabError(f"a '===' line: {e}", 2) from None
-        secrets = list(dict.fromkeys((args.secret or []) + agent.get("secret", [])))
-        merged = argparse.Namespace(**{**vars(args), **agent, "secret": secrets})
-        items.append(_launch_args(merged, agent["name"], brief))
-    return items
-
-
 def cmd_approve(args: argparse.Namespace) -> int:
-    res = launch.approve_all(args.name, launch.Progress())
+    res = launch.approve(args.name, launch.Progress())
     emit(res, args.json)
     return res["exit_code"]
 
@@ -342,11 +300,17 @@ def table(views: list[agents.View]) -> list[str]:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    views = agents.views()
+    views, orphans = agents.listing()
     if args.json:
         print(json.dumps([asdict(v) for v in views]))
     else:
         say("\n".join(table(views)))
+    for inst in orphans:
+        say(
+            f"warning: machine {inst['id']} ({inst['label']}) belongs to no agent - Vast may not have confirmed "
+            "its rent. Destroy it at https://cloud.vast.ai/instances/",
+            err=True,
+        )
     return 0
 
 
@@ -378,8 +342,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
     say(f"  repo      {v.repo}, branch {v.branch}{pushed}")
-    if deps := _deps_text(v.deps):
-        say(f"  deps      {deps}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
         say(
@@ -401,17 +363,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
         say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
     return 0
-
-
-def _deps_text(deps: dict | None) -> str:
-    """The machine's dependency install, as status shows it."""
-    state, command = (deps or {}).get("state"), (deps or {}).get("command")
-    return {
-        "running": f"installing in the background: {command}",
-        "done": f"installed: {command}",
-        "failed": f"the install failed (exit code {(deps or {}).get('exit_code')}): {command}",
-        "none": "none installed",
-    }.get(state or "", "")
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -477,20 +428,17 @@ def build_parser() -> argparse.ArgumentParser:
     c = cmd(
         "launch", cmd_launch, "start an agent on a rented machine (the task brief on stdin)", json_flag=True
     )
-    c.add_argument("name", nargs="?", help="3-40 characters: a-z, 0-9 and -")
+    c.add_argument("name", help="3-40 characters: a-z, 0-9 and -")
     c.add_argument("--hours", type=float, help=HOURS_HELP)
     _req_args(c)
-    c.add_argument(
-        "--batch", action="store_true", help="several agents: each starts with a line === NAME [flags]"
-    )
-    c.add_argument("--brief-file", metavar="PATH", help="the task brief or batch (else read from stdin)")
+    c.add_argument("--brief-file", metavar="PATH", help="the task brief (else read from stdin)")
     c.add_argument("--repo", metavar="PATH", help="your repo (default: the current folder)")
     c.add_argument("--no-repo", action="store_true", help="work in your private workspace repo instead")
     _agent_args(c)
     c.add_argument("--fake-claude", action="store_true", help="run a stand-in for Claude Code (tests)")
     c.add_argument("--dry-run", action="store_true", help="plan only: rent nothing")
-    cmd("approve", cmd_approve, "launch agents waiting for your approval", json_flag=True).add_argument(
-        "name", nargs="+"
+    cmd("approve", cmd_approve, "launch an agent waiting for your approval", json_flag=True).add_argument(
+        "name"
     )
     c = cmd("start", cmd_start, "start a stopped agent, or continue an interrupted launch", json_flag=True)
     c.add_argument("name")

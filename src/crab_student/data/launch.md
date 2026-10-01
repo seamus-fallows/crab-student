@@ -23,11 +23,11 @@ for looks unwise, do it anyway and say what worries you in your result.
 Read the code, README and configs the task involves. Find the data (where it comes from, its size),
 the dependencies, how success is measured, and anything the user already decided.
 
-The machine installs the repo's dependencies by itself, in the background, the first way that fits:
-`uv.lock` or `[tool.uv]` in `pyproject.toml` -> `uv sync`; `[project]` in `pyproject.toml` ->
-`pip install -e .`; `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`.
-Pass `--setup "COMMAND"` only when that would be wrong or something extra is needed; it replaces the
-detected install, so it must do the whole install (e.g.
+The machine installs the repo's dependencies by itself during setup, before the agent starts, the first
+way that fits: `uv.lock` or `[tool.uv]` in `pyproject.toml` -> `uv sync`; `[project]` in
+`pyproject.toml` -> `pip install -e .`; `requirements*.txt` -> `pip install -r` each; `setup.py` ->
+`pip install -e .`. Pass `--setup "COMMAND"` only when that would be wrong or something extra is
+needed; it replaces the detected install, so it must do the whole install (e.g.
 `--setup "pip install -r requirements-gpu.txt"`), or `--setup none` when nothing should be installed,
 and then say so in the brief (under Context; for interactive, in a short sentence after the task).
 
@@ -121,33 +121,24 @@ crab-student launch NAME [--hours H] [flags] [--secret NAME ...] --json <<'BRIEF
 BRIEF
 ```
 
-Use the Bash tool with a 600000 ms timeout. The launch rents two machines at once, keeps the first
-that starts and destroys the other, and opens a window on the user's screen that follows it (you need
-not do anything about that). If the call is cut off or times out, run `crab-student start NAME --json`,
-which continues the same launch, until it returns. Never run `launch` twice for one task: that would
-make a second agent.
+Run it in a Bash tool call with `run_in_background: true` and wait for it to finish: a launch can take
+longer than a Bash call's 10 minutes, since setup installs the repo's dependencies. The launch rents
+two machines at once, keeps the first that starts and destroys the other, and opens a window on the
+user's screen that follows it (you need not do anything about that). If the call ends without a result
+(it was cut off), run `crab-student start NAME --json` the same way, which continues the same launch.
+Never run `launch` twice for one task: that would make a second agent.
 
 **Several agents** (a sweep, or several separate tasks you were given together): write one brief per
-agent, each with its own name, and launch them in one call. Flags before the briefs apply to every
-agent; flags on an agent's `===` line override them for that agent.
-
-```
-crab-student launch --batch [--hours H] [flags] --json <<'BRIEFS'
-=== NAME-1
-<its brief>
-=== NAME-2 --gpu-ram 48
-<its brief>
-BRIEFS
-```
-
-Each agent gets a machine of its own. If the call is cut off, run `crab-student start NAME --json` for
-each agent that is not yet working.
+agent, each with its own name, and run one `crab-student launch NAME ... --json` per agent, each in its
+own Bash tool call with `run_in_background: true`, all started in one message, so they come up side by
+side. Each agent gets a machine of its own. Read each result as its call finishes, and report once all
+have finished.
 
 ## 12. Report back
 
 Return exactly: the brief, a blank line, the `result_line` from the JSON, then one `Warning: <text>`
-line for each entry of `warnings`. For a batch: each brief, a blank line, then the result lines (one per
-agent) and the warnings. Add the assumptions you made, one short line each, after the warnings.
+line for each entry of `warnings` (for several agents, this for each agent in turn). Add the
+assumptions you made, one short line each, after the warnings.
 
 - Exit 3 (needs approval: every machine that fits costs more than the user's approval price of
   ${{approve_above_usd_per_hour}}/hr): the same format; the result line says the price. Approving is

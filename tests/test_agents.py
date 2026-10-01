@@ -26,10 +26,10 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
-            "rents": [], "strays": [],
+            "rents": [],
             "instance_id": None, "dph": 0.40, "disk_usd_day": None, "mode": "colleague", "claude_settings": {},
             "machine": "1x RTX 4090",
-            "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None, "stop_note": None,
+            "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None,
             "repo": repo, "uploaded": phase == "ready", **fields}  # fmt: skip
 
 
@@ -106,8 +106,6 @@ DISPLAY = [  # (record fields, Vast's instance, ctl.py status, lock held) -> STA
     ({"phase": "pending", "pending": {"reason": "it would cost $6.00/hr", "max_dph": 6.0}}, None, None, False,
      "approval", "$6.00/hr"),
     ({"phase": "booting"}, None, None, True, "starting", ""),  # (a launch at work)
-    ({"phase": "renting", "rents": [{"label": "cs:job1:0", "instance_id": None}]}, None, None, False, "interrupted",
-     "start job1"),
     ({"phase": "renting"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "setup"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "failed", "error": "every offer failed"}, None, None, False, "failed", "every offer failed"),
@@ -225,15 +223,12 @@ def test_stop_saves_while_the_machine_still_runs_then_stops_it(fake_vast, monkey
     )
 
 
-@pytest.mark.parametrize("committed", [True, False])
-def test_stop_keeps_the_stop_note_its_final_save_committed(committed, fake_vast, machines):
+def test_stop_saves_with_the_stop_note_and_keeps_none_of_it_in_the_record(fake_vast, machines):
     agent(fake_vast)
-    left = note(outputs={"files": 1, "bytes": 2.0e9, "sample": ["best.pt"]})
-    machines.replies[("job1", "save")] = saved(note=left, note_committed=committed, unpushed=0)
+    machines.replies[("job1", "save")] = saved()
     agents.stop("job1", out())
-    assert "--final" in machines.calls[0][1]  # (the save that writes the note)
-    kept = {**left, "unpushed": 0, "recorded_at": pytest.approx(time.time(), abs=60)}
-    assert core.load("job1")["stop_note"] == (kept if committed else None)
+    assert "--final" in machines.calls[0][1]  # (the save that pushes the note to the branch)
+    assert not core.load("job1").get("stop_note")  # (the branch is its one source)
 
 
 @pytest.mark.parametrize(
@@ -244,6 +239,11 @@ def test_stop_still_stops_when_the_save_fails(error, fake_vast, machines):
     machines.replies[("job1", "save")] = error
     agents.stop("job1", out())
     assert fake_vast.instances[iid]["intended_status"] == "stopped"
+
+
+def test_a_launch_whose_setup_failed_has_nothing_to_stop(fake_vast):
+    core.save(record(phase="failed", uploaded=True, instance_id=None))  # (its machine was destroyed)
+    fails(1, agents.stop, "job1", out())
 
 
 def test_stopping_a_stopped_agent_changes_nothing(fake_vast, machines):
@@ -330,27 +330,18 @@ def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_
     res = agents.delete("job1", False, out())
     assert list(fake_vast.instances) == [other] and racing not in fake_vast.instances
     assert unconfirmed not in fake_vast.instances and not core.record_path("job1").exists()
-    assert "cs:job1:ffff0000" in res["result_line"]  # (never found: the user is told to look out for it)
+    assert "cs:job1:ffff0000" in res["result_line"]  # (the rent whose machine was not found is named)
 
 
-def test_delete_also_destroys_a_machine_the_race_left_behind(fake_vast, machines):
-    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
-    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
-    machines.replies[("job1", "check")] = CLEAN
-    agents.delete("job1", False, out())
-    assert iid not in fake_vast.instances and late not in fake_vast.instances
-
-
-def test_list_destroys_a_machine_the_race_left_behind_once_it_shows_up(fake_vast, machines):
-    iid = agent(fake_vast, strays=[{"label": "cs:job1:late0000", "offer_id": 2, "at": 0}])
-    machines.replies[("job1", "status")] = status("working")
-    agents.views()
-    assert core.load("job1")["strays"]  # (not there yet: remembered)
-    late = fake_vast.add_instance(2, "cs:job1:late0000", status="loading")
-    agents.views()
-    assert (
-        late not in fake_vast.instances and iid in fake_vast.instances and core.load("job1")["strays"] == []
-    )
+def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):
+    kept = fake_vast.add_instance(1, "crab-student-job1-aaaa0000")
+    fake_vast.add_instance(1, "crab-student-job2-bbbb0000")  # (a rent of a launch at work)
+    orphan = fake_vast.add_instance(1, "crab-student-job3-cccc0000")
+    fake_vast.add_instance(1, "my-own-machine")  # (not rented by crab-student)
+    core.save(record(instance_id=kept, rent=rent("crab-student-job1-aaaa0000", kept)))
+    core.save(record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-job2-bbbb0000")]))
+    found = agents.orphans(list(fake_vast.instances.values()), core.all_records())
+    assert [i["id"] for i in found] == [orphan] and len(fake_vast.instances) == 4  # (nothing destroyed)
 
 
 # ---- delete a stopped agent: from its stop note, without starting it ----------------------------
@@ -406,66 +397,42 @@ def test_a_stopped_agent_without_a_stop_note_to_trust_needs_a_start_or_force(
     assert not fake_vast.instances and not core.record_path("job1").exists() and not machines.calls
 
 
-@pytest.mark.parametrize(
-    "save, deleted",
-    [({}, True), ({"pushed": False, "unpushed": 1}, False), ({"note_committed": False}, False)],
-)
-def test_a_agent_stopped_with_stop_is_deleted_without_starting_it_when_its_save_left_nothing(
-    save, deleted, fake_vast, fake_github, machines
+@pytest.mark.parametrize("pushed", [True, False])
+def test_an_agent_stopped_with_stop_is_deleted_without_starting_it_once_its_note_is_on_the_branch(
+    pushed, fake_vast, fake_github, machines, repo, tmp_path
 ):
-    iid = agent(fake_vast)
-    machines.replies[("job1", "save")] = saved(**save)
+    """Only the branch counts: a save that says it committed the note, but did not push it, leaves nothing to
+    trust."""
+    iid = agent(fake_vast, repo=repo)
+    machines.replies[("job1", "save")] = saved(pushed=pushed)
     agents.stop("job1", out())
-    if deleted:
+    if pushed:  # (the machine's final save pushed its note)
+        push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note()))
         agents.delete("job1", False, out())
     else:
         fails(3, agents.delete, "job1", False, out())
-    assert (iid in fake_vast.instances) is not deleted and core.record_path("job1").exists() is not deleted
+    assert (iid in fake_vast.instances) is not pushed and core.record_path("job1").exists() is not pushed
     assert [call[1][0] for call in machines.calls] == ["save"]  # (never started again to check it)
     assert len(fake_vast.calls("PUT", "/")) == 1  # (the stop)
 
 
-def test_the_records_stop_note_counts_only_until_the_next_start(
+def test_a_start_seen_from_here_makes_the_old_stop_note_stale(
     fake_vast, fake_github, machines, repo, tmp_path
 ):
-    """Started again after `stop`, the agent stopped by itself: the note it left on the branch counts."""
-    started = time.time() - 3600
-    old = {**note(stopped_at=int(started) - 7200), "unpushed": 0, "recorded_at": started - 7200}
-    iid = agent(fake_vast, status="exited", repo=repo, last_start=started, stop_note=old)
-    left = note(outputs={"files": 1, "bytes": 1.0e9, "sample": ["best.pt"]})
-    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(left))
-    assert "best.pt" in fails(3, agents.delete, "job1", False, out()).message
-    assert iid in fake_vast.instances and core.record_path("job1").exists()
-
-
-def test_the_newer_of_the_two_stop_notes_counts(fake_vast, fake_github, machines, repo, tmp_path):
-    """Stopped with `stop`, started from Vast's website unseen, and stopped by itself: its own note is newer."""
-    started = time.time() - 3600
-    kept = {**note(stopped_at=int(started) + 600), "unpushed": 0, "recorded_at": started + 600}
-    iid = agent(fake_vast, status="exited", repo=repo, last_start=started, stop_note=kept)
-    left = note(outputs={"files": 1, "bytes": 1.0e9, "sample": ["best.pt"]})  # (a minute ago)
-    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(left))
-    assert "best.pt" in fails(3, agents.delete, "job1", False, out()).message
-    assert iid in fake_vast.instances
-
-
-def test_a_start_seen_from_here_makes_the_old_stop_notes_stale(fake_vast, fake_github, machines, repo):
-    """Started from Vast's website: once list sees it running, notes from before no longer count."""
-    kept = {**note(), "unpushed": 0, "recorded_at": time.time() - 60}
-    iid = agent(fake_vast, status="exited", repo=repo, stop_note=kept)
+    """Started from Vast's website: once list sees it running, the note from before no longer counts."""
+    iid = agent(fake_vast, status="exited", repo=repo)
+    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note()))
     agents.views()  # (seen stopped)
     fake_vast.instances[iid].update(actual_status="running", intended_status="running", cur_state="running")
     agents.views()  # (seen running again: it may be doing new work)
     fake_vast.instances[iid].update(actual_status="exited", intended_status="stopped", cur_state="stopped")
-    rec = core.load("job1")
-    assert rec["stop_note"] is None and rec["last_start"] == pytest.approx(time.time(), abs=60)
+    assert core.load("job1")["last_start"] == pytest.approx(time.time(), abs=60)
     fails(3, agents.delete, "job1", False, out())
     assert iid in fake_vast.instances
 
 
-def test_a_stop_note_counts_only_when_github_can_be_asked_about_a_newer_one(fake_vast, machines, monkeypatch):
-    kept = {**note(), "unpushed": 0, "recorded_at": time.time() - 60}
-    iid = agent(fake_vast, status="exited", stop_note=kept)
+def test_a_stopped_agent_cannot_be_checked_when_github_cannot_be_asked(fake_vast, machines, monkeypatch):
+    iid = agent(fake_vast, status="exited")
 
     def unreachable(*a):
         raise core.CrabError("GitHub: could not connect")

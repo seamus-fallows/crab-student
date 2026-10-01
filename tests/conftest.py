@@ -65,10 +65,10 @@ def isolated(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def windows(monkeypatch) -> list[list[str]]:
-    """The launch windows crab-student would open (the agents each followed), never opened for real."""
-    opened: list[list[str]] = []
-    monkeypatch.setattr(machine, "open_launch_windows", lambda names: opened.append(list(names)) or True)
+def windows(monkeypatch) -> list[str]:
+    """The launch windows crab-student would open (the agent each follows), never opened for real."""
+    opened: list[str] = []
+    monkeypatch.setattr(machine, "open_launch_window", lambda name: opened.append(name) or True)
     return opened
 
 

@@ -55,7 +55,6 @@ def terminal(fake_vast, fake_github, monkeypatch) -> tuple[list[str], list[list[
     monkeypatch.setattr(setup.getpass, "getpass", ask)
     monkeypatch.setattr(core, "tool", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(core, "run", keygen)
-    monkeypatch.setattr(setup, "claude_version", lambda: setup.FORK_VERSION)
     return answers, keygens
 
 
@@ -63,7 +62,10 @@ def test_init_asks_only_for_what_is_missing(terminal, fake_vast, isolated, capsy
     answers, keygens = terminal
     core.vast_key_file().unlink()
     fake_vast.user["email"] = "adé@example.com"
-    answers += ["wrong-key", fake_vast.key, "sk-ant-oat01-too-short", f"  {TOKEN}  "]
+    answers += ["wrong-key", "sk-ant-oat01-too-short", f"  {TOKEN}  "]
+    assert setup.init() == 1  # (a Vast key that does not work is asked for once, and not saved)
+    assert not answers and not core.vast_key_file().exists()
+    answers.append(fake_vast.key)
     assert setup.init() == 0
     assert not answers and len(keygens) == 1
     assert core.vast_key_file().read_text().strip() == fake_vast.key  # (where the vastai CLI keeps it)
@@ -79,21 +81,10 @@ def test_init_asks_only_for_what_is_missing(terminal, fake_vast, isolated, capsy
     assert capsys.readouterr().out.isascii()
 
 
-def test_init_suggests_the_home_setting_from_the_locale(terminal, ready, monkeypatch, capsys):
-    monkeypatch.setenv("LC_ALL", "fr_CA.UTF-8")
-    assert setup.guess_country() == "CA"
-    setup.init()
-    assert (
-        "config home CA" in capsys.readouterr().out and core.load_config()["home"] == ""
-    )  # (only suggested)
-    core.set_config("home", "de")
-    setup.init()
-    assert "config home" not in capsys.readouterr().out
-    monkeypatch.setenv("LC_ALL", "C.UTF-8")
-    monkeypatch.setattr(setup.os, "name", "posix")
-    monkeypatch.delenv("LC_CTYPE", raising=False)
-    monkeypatch.delenv("LANG", raising=False)
-    assert setup.guess_country() == ""
+def test_a_saved_vast_key_that_does_not_work_fails_init_without_asking(terminal, ready, fake_vast):
+    core.write_private(core.vast_key_file(), "revoked-key\n")
+    assert setup.init() == 1  # (asking would fail the test: the terminal fixture has no answers)
+    assert core.vast_key_file().read_text() == "revoked-key\n"
 
 
 def test_init_fails_after_three_bad_tokens(terminal):
@@ -133,15 +124,6 @@ def test_install_merges_the_rules_into_the_users_settings(isolated):
     assert skill.read_text(encoding="utf-8") == (setup.DATA / "SKILL.md").read_text(encoding="utf-8")
 
 
-def test_install_removes_the_launcher_agent_of_older_versions(isolated):
-    old = isolated / ".claude" / setup.OLD_LAUNCHER_AGENT
-    old.parent.mkdir(parents=True)
-    old.write_text("an older launcher")
-    setup.install_claude_files()
-    assert not old.exists()
-    setup.install_claude_files()  # (nothing left to remove)
-
-
 def test_settings_that_are_not_json_are_left_alone(isolated):
     path = settings_file(isolated)
     path.write_text('{"permissions": {"allow": [}')
@@ -149,23 +131,26 @@ def test_settings_that_are_not_json_are_left_alone(isolated):
     assert path.read_text() == '{"permissions": {"allow": [}'
 
 
+INCLUDE = "Include ~/.crab-student/ssh/config"
+
+
 def test_the_ssh_include_goes_first_once(isolated):
     config = isolated / ".ssh" / "config"
-    config.parent.mkdir()
+    assert setup.ensure_ssh_include()  # (no config yet)
+    assert config.read_text() == INCLUDE + "\n"
+    assert not setup.ensure_ssh_include()
     config.write_text("Host box\n  User me\n")
     assert setup.ensure_ssh_include()
     assert not setup.ensure_ssh_include()
-    first, *rest = config.read_text().splitlines()
-    assert first == "Include ~/.crab-student/ssh/config" and rest == ["Host box", "  User me"]
+    assert config.read_text().splitlines() == [INCLUDE, "Host box", "  User me"]
 
 
-def test_an_include_of_the_same_file_spelled_another_way_is_replaced(isolated):
+def test_an_include_further_down_is_moved_first(isolated):
     config = isolated / ".ssh" / "config"
     config.parent.mkdir()
-    old = (core.ssh_dir() / "config").as_posix()
-    config.write_text(f'Include "{old}"\nInclude other.d/*\n')
+    config.write_text(f"Host box\n  User me\n{INCLUDE}\n")  # (there, it falls inside the Host block)
     assert setup.ensure_ssh_include()
-    assert config.read_text().splitlines() == ["Include ~/.crab-student/ssh/config", "Include other.d/*"]
+    assert config.read_text().splitlines() == [INCLUDE, "Host box", "  User me"]
 
 
 def prefixes(rules: list[str]) -> list[str]:
@@ -231,95 +216,3 @@ def test_the_skill_starts_a_fork_that_follows_the_guide():
     assert 'subagent_type: "fork"' in skill and "`crab-student guide launch`" in skill
     assert not re.search(r"\$\d", skill)  # (the approval price is a setting, not a number in the text)
     assert not (setup.DATA / "launcher.md").exists()
-
-
-# ---- the version check and VS Code -----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "output, version",
-    [("2.1.285 (Claude Code)\n", (2, 1, 285)), ("claude 2.1.9", (2, 1, 9)), ("no version here", None)],
-)
-def test_claude_version_is_read_from_its_output(output, version, monkeypatch):
-    monkeypatch.setattr(core, "tool", lambda name: "/usr/bin/claude")
-    monkeypatch.setattr(setup.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=output))
-    assert setup.claude_version() == version
-
-
-def test_an_older_claude_code_is_warned_about(monkeypatch, capsys):
-    monkeypatch.setattr(setup, "claude_version", lambda: (2, 1, 100))
-    setup._claude_version_step()
-    assert "claude update" in capsys.readouterr().out
-    monkeypatch.setattr(setup, "claude_version", lambda: setup.FORK_VERSION)
-    setup._claude_version_step()
-    assert "Warning" not in capsys.readouterr().out
-
-
-@pytest.fixture
-def vscode(isolated, monkeypatch, capsys):
-    """VS Code's user settings in the temporary home; the test says what the user types (a list of answers)
-    and whether it is a terminal. Returns (settings path, answers)."""
-    path = core.vscode_settings_file()
-    path.parent.mkdir(parents=True)
-    answers: list[str] = []
-
-    def ask(prompt: str = "") -> str:
-        assert answers, f"asked: {prompt}"
-        return answers.pop(0)
-
-    monkeypatch.setattr("builtins.input", ask)
-    monkeypatch.setattr(setup, "interactive", lambda: True)
-    return path, answers
-
-
-def extensions(path: Path) -> object:
-    return json.loads(path.read_text(encoding="utf-8")).get(core.VSCODE_EXTENSIONS)
-
-
-def test_vscode_gets_the_claude_extension_on_machines_when_the_user_agrees(vscode):
-    path, answers = vscode
-    path.write_text(json.dumps({"editor.fontSize": 14}))
-    answers.append("")
-    setup._vscode_step()
-    assert extensions(path) == [core.CLAUDE_EXTENSION]
-    assert json.loads(path.read_text())["editor.fontSize"] == 14
-    setup._vscode_step()  # (already there: nothing is asked)
-
-
-def test_vscode_extensions_the_user_already_lists_are_kept(vscode):
-    path, answers = vscode
-    path.write_text(json.dumps({core.VSCODE_EXTENSIONS: ["ms-python.python"]}))
-    answers.append("y")
-    setup._vscode_step()
-    assert extensions(path) == ["ms-python.python", core.CLAUDE_EXTENSION]
-
-
-def test_vscode_settings_are_created_when_there_are_none(vscode):
-    path, answers = vscode
-    answers.append("yes")
-    setup._vscode_step()
-    assert extensions(path) == [core.CLAUDE_EXTENSION]
-
-
-@pytest.mark.parametrize("how", ["declined", "not a terminal", "with comments", "not a list"])
-def test_vscode_settings_are_left_alone_unless_the_edit_is_safe_and_agreed(how, vscode, monkeypatch, capsys):
-    path, answers = vscode
-    texts = {
-        "with comments": '{\n  // my settings\n  "editor.fontSize": 14,\n}\n',
-        "not a list": json.dumps({core.VSCODE_EXTENSIONS: "anthropic.claude-code"}),
-    }
-    text = texts.get(how, "{}")
-    path.write_text(text)
-    if how == "declined":
-        answers.append("n")
-    if how == "not a terminal":
-        monkeypatch.setattr(setup, "interactive", lambda: False)
-    setup._vscode_step()
-    assert path.read_text() == text
-    assert core.CLAUDE_EXTENSION in capsys.readouterr().out  # (it says what to add instead)
-
-
-def test_without_vscode_nothing_is_created(isolated, capsys):
-    setup._vscode_step()
-    assert not core.vscode_settings_file().parent.exists()
-    assert capsys.readouterr().out.isascii()

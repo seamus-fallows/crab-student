@@ -29,10 +29,8 @@ REMOTE_PLATFORM = "remote.SSH.remotePlatform"  # (VS Code: which hosts run Linux
 CLAUDE_URL = "vscode://anthropic.claude-code/open?prompt="  # (the Claude extension's panel, pre-filled)
 PROMPT_MAX = 5000
 VSCODE_URL_DELAY = 15.0  # (the new window must be connected, Claude running, when the panel is asked for)
-HANDOFF_WAIT = 600  # one ssh call waits this long on the machine for a hand-off, then the next one
-
-# The ssh config and known_hosts are shared by every agent, and a batch launch brings agents up in threads.
-_ssh_files = threading.Lock()
+HANDOFF_POLL = 5.0  # seconds between asking an interactive agent's machine whether it was handed off
+HANDOFF_MISSES = 12  # failed asks in a row (a minute) before the wait gives up
 
 
 class Unreachable(core.CrabError):
@@ -74,13 +72,18 @@ def _ssh_config_text() -> str:
     return "\n".join(lines)
 
 
+def _ssh_files():
+    """The lock on the ssh config and known_hosts, which every agent shares (parallel launches write them)."""
+    return core.locked("_ssh-files", wait=60)
+
+
 def write_ssh_config() -> None:
     """Regenerate the host entries (one per agent with an address) that ~/.ssh/config includes."""
-    # (The records are read inside the lock too: a thread that read them earlier must not write last.)
-    with _ssh_files:
+    with (
+        _ssh_files()
+    ):  # (the records are read inside it: a process that read them earlier must not write last)
         config_file().parent.mkdir(parents=True, exist_ok=True)
-        # (One temporary file per process and thread: several commands may rewrite the config at once.)
-        tmp = config_file().with_name(f"config.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp = config_file().with_name(f"config.{os.getpid()}.tmp")
         tmp.write_text(_ssh_config_text(), encoding="utf-8")
         core.replace(tmp, config_file())
 
@@ -100,7 +103,7 @@ def set_address(rec: dict, inst: dict) -> bool:
 def forget_host_key(name: str) -> None:
     """A new machine for this name has a new host key."""
     hosts = core.ssh_dir() / "known_hosts"
-    with _ssh_files:
+    with _ssh_files():
         if hosts.exists() and (keygen := core.tool("ssh-keygen")):
             core.run([keygen, "-R", alias(name), "-f", str(hosts)], check=False)
 
@@ -186,9 +189,9 @@ def bundle(extra: dict[str, tuple[bytes, int]], fake_claude: bool = False) -> by
 def upload_and_setup(
     name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600
 ) -> list[str]:
-    """One ssh call: unpack the bundle, run setup, pass its "step i/5 ..." lines on as they come; setup's
-    warnings. Anything
-    but setup's own answer (a lost connection, a timeout) is Unreachable: the launch can continue."""
+    """One ssh call: unpack the bundle, run setup (which installs the project's dependencies too), pass its
+    "step i/N ..." lines on as they come; setup's warnings. Anything but setup's own answer (a lost connection,
+    a timeout) is Unreachable: the launch can continue."""
     cmd = [
         *ssh_cmd(name),
         "-o",
@@ -259,26 +262,20 @@ def open_one(name: str) -> int:
     raise core.CrabError(f'open needs a terminal: run "crab-student open {name}" in your terminal.', 2)
 
 
-def open_launch_windows(names: list[str]) -> bool:
-    """A window that follows the launches of `names` (`crab-student open NAME` in each), then shows the agents:
-    one Windows Terminal window with a tab per agent, or a Terminal window per agent on macOS. False when no
-    window could be opened (another system, or no terminal program)."""
-
-    def command(name: str) -> list[str]:
-        return [sys.executable, "-m", "crab_student", "open", name]
-
+def open_launch_window(name: str) -> bool:
+    """A window that follows the launch of NAME (`crab-student open NAME`), then shows the agent: a tab in the
+    Windows Terminal window named crab-student (made if missing, so launches side by side collect there), or a
+    Terminal window on macOS (its tabs cannot be scripted without extra permissions). False when no window could
+    be opened (another system, or no terminal program)."""
+    command = [sys.executable, "-m", "crab_student", "open", name]
     try:
         if os.name == "nt" and (wt := core.tool("wt")):
-            args = ["-w", "new"]
-            for i, name in enumerate(names):
-                args += [*([";"] if i else []), "new-tab", "--title", name, *command(name)]
-            subprocess.Popen([wt, *args])
+            subprocess.Popen([wt, "-w", "crab-student", "new-tab", "--title", name, *command])
             return True
         if sys.platform == "darwin" and (osascript := core.tool("osascript")):
-            for name in names:  # (Terminal's tabs cannot be scripted without extra permissions)
-                text = shlex.join(command(name)).replace("\\", "\\\\").replace('"', '\\"')
-                script = f'tell application "Terminal"\n  do script "{text}"\n  activate\nend tell'
-                subprocess.Popen([osascript, "-e", script])
+            text = shlex.join(command).replace("\\", "\\\\").replace('"', '\\"')
+            script = f'tell application "Terminal"\n  do script "{text}"\n  activate\nend tell'
+            subprocess.Popen([osascript, "-e", script])
             return True
     except OSError:
         return False
@@ -408,78 +405,53 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
         flush=True,
     )
     time.sleep(VSCODE_URL_DELAY)
-    prompt = _task_prompt(name, status.get("deps") or {})
-    webbrowser.open(CLAUDE_URL + urllib.parse.quote(prompt, safe=""))
+    # (through the OS URL handler: on Windows `code` is a batch file, which mangles the % escapes)
+    webbrowser.open(CLAUDE_URL + urllib.parse.quote(_task_prompt(name), safe=""))
     return 0
 
 
 def wait_for_handoff(name: str) -> bool:
-    """Wait until the interactive agent is handed off to tmux, one long ssh call at a time: True then; False when
-    the machine cannot be reached (or cannot tell), or the user closes the wait with Ctrl+C."""
+    """Wait until the interactive agent is handed off to tmux, asking its machine every few seconds: True then;
+    False when the machine cannot be asked for a minute, or the user closes the wait with Ctrl+C."""
     print(
         f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close).",
         flush=True,
     )
+    misses = 0
     try:
-        frontend = "vscode"
-        while frontend != "tmux":
-            frontend = remote(name, ["wait-handoff", str(HANDOFF_WAIT)], timeout=HANDOFF_WAIT + 60).get(
-                "frontend"
-            )
-    except core.CrabError as e:
-        print(f"Stopped waiting: {e.message}")
-        return False
+        while True:
+            try:
+                if remote(name, ["status"], timeout=20).get("frontend") == "tmux":
+                    return True
+                misses = 0
+            except core.CrabError as e:
+                misses += 1
+                if misses >= HANDOFF_MISSES:
+                    print(f"Stopped waiting: {e.message}")
+                    return False
+            time.sleep(HANDOFF_POLL)
     except KeyboardInterrupt:
         return False
-    return True
 
 
 def remember_linux_host(name: str) -> None:
     """Tell VS Code the agent's host runs Linux (remote.SSH.remotePlatform), so Remote - SSH does not ask, and
-    drop the entries of agents that are gone. A file with comments (VS Code allows them, and trailing commas) is
-    edited as text, line by line, so the comments stay."""
+    drop the entries of agents that are gone. A file that is not plain JSON (VS Code allows comments) is left
+    alone: VS Code asks once."""
     path = core.vscode_settings_file()
     if not path.parent.exists():
         return
-    live = {alias(r["name"]) for r in core.all_records()} | {alias(name)}
     settings = core.read_vscode_settings(path)
     if settings is None:
-        _remember_linux_host_in_text(path, alias(name), live)
         return
     platforms = settings.get(REMOTE_PLATFORM, {})
     if not isinstance(platforms, dict):
         return
+    live = {alias(r["name"]) for r in core.all_records()} | {alias(name)}
     kept = {h: p for h, p in platforms.items() if not h.startswith(ALIAS_PREFIX) or h in live}
     wanted = {**kept, alias(name): "linux"}
     if wanted != platforms:
         core.write_vscode_settings(path, {**settings, REMOTE_PLATFORM: wanted})
-
-
-def _remember_linux_host_in_text(path: Path, host: str, live: set[str]) -> None:
-    """remember_linux_host for a settings file with comments: only whole lines of ours are added or removed."""
-    entry = re.compile(r'\s*"(' + re.escape(ALIAS_PREFIX) + r'[a-z0-9-]+)"\s*:\s*"linux"\s*,?\s*')
-    raw = path.read_bytes().decode("utf-8-sig")  # (bytes: the file keeps its own line endings)
-    newline, end = ("\r\n" if "\r\n" in raw else "\n"), raw[-1:] in ("\n", "\r")
-    lines = raw.splitlines()
-    kept = [s for s in lines if not ((m := entry.fullmatch(s)) and m.group(1) not in live)]
-    if not any((m := entry.fullmatch(s)) and m.group(1) == host for s in kept):
-        start = next(
-            (
-                i
-                for i, s in enumerate(kept)
-                if re.match(r'\s*"' + re.escape(REMOTE_PLATFORM) + r'"\s*:\s*\{\s*$', s)
-            ),
-            None,
-        )
-        first = next((i for i, s in enumerate(kept) if s.strip().startswith("{")), None)
-        if start is not None:
-            kept.insert(start + 1, f'        "{host}": "linux",')
-        elif first is not None and kept[first].strip() == "{":
-            kept.insert(first + 1, f'    "{REMOTE_PLATFORM}": {{"{host}": "linux"}},')
-        else:
-            return  # (a layout we don't recognise: VS Code asks once, as before)
-    if kept != lines:
-        path.write_bytes((newline.join(kept) + (newline if end else "")).encode("utf-8"))
 
 
 def agent_status(rec: dict) -> dict:
@@ -495,18 +467,11 @@ def agent_status(rec: dict) -> dict:
     }
 
 
-def _task_prompt(name: str, deps: dict) -> str:
-    """The brief, as the user would type it to Claude, with a note while the dependency install is not done (the
-    extension takes up to PROMPT_MAX characters: a longer brief is pointed to instead)."""
+def _task_prompt(name: str) -> str:
+    """The brief, as the user would type it to Claude (the extension takes up to PROMPT_MAX characters: a longer
+    brief is pointed to instead)."""
     brief = core.agents_dir() / f"{name}.brief.md"
     text = brief.read_text(encoding="utf-8").strip() if brief.exists() else ""
-    note = ""
-    if deps.get("state") in ("running", "failed"):
-        how = "are being installed" if deps["state"] == "running" else "could not be installed"
-        note = (
-            f"\n\n(The repo's dependencies {how} in the background with `{deps.get('command')}`: "
-            "`agent-status` shows how far it got. Wait for it, or fix it, rather than starting another install.)"
-        )
-    if not text or len(text) + len(note) > PROMPT_MAX:
-        text = "The task is in /root/BRIEF.md: read it, then let's start."
-    return text + note
+    if not text or len(text) > PROMPT_MAX:
+        return "The task is in /root/BRIEF.md: read it, then let's start."
+    return text

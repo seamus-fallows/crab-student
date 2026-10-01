@@ -239,26 +239,11 @@ def search(req: Req, cfg: dict) -> list[dict]:
     return [o for o in vast.search(query(req, cfg)) if fits(o, req, cfg, now)]
 
 
-def plan(
-    req: Req,
-    cfg: dict,
-    cap: float | None = None,
-    taken: set | frozenset = frozenset(),
-    found: list[dict] | None = None,
-    mode: str = "",
-) -> Plan:
+def plan(req: Req, cfg: dict, cap: float | None = None, mode: str = "") -> Plan:
     """The machine to rent and its backups, from the offers up to `cap` $/hr (over_cap, and all offers, when
-    none is that cheap), leaving out the offer ids in `taken` (and searching unless `found` is given), near
-    the `home` setting for an interactive agent (latency matters only when the user types into it):
-    CrabError(4) when nothing fits the hardware."""
-    fit = search(req, cfg) if found is None else found
-    found = [o for o in fit if o["id"] not in taken]
-    if fit and not found:
-        raise core.CrabError(
-            f"not enough machines: only {len(fit)} with {req.describe()} right now, fewer than the agents that "
-            "need one. Launch fewer at once, or loosen the requirements.",
-            4,
-        )
+    none is that cheap), near the `home` setting for an interactive agent (latency matters only when the user
+    types into it): CrabError(4) when nothing fits the hardware."""
+    found = search(req, cfg)
     if not found:
         where = f" in {', '.join(cfg['regions'])}" if cfg["regions"] else ""
         more = ', or allow more regions: crab-student config regions ""' if cfg["regions"] else ""

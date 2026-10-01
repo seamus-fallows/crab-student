@@ -34,13 +34,8 @@ prompt is only:
 
 > Run `crab-student guide launch` and follow it for the task above.
 
-If forks are not available (the Agent tool refuses "fork"; they need Claude Code v2.1.232 or later),
-start a general-purpose background agent instead, with the task in the user's words and the context in
-the prompt (repo path, relevant files, data, secrets, the mode, model, price or hours they mentioned),
-followed by the same instruction.
-
 For several agents at once (a sweep, or several tasks), start ONE launcher with all of them: it writes a
-brief for each and launches them together, each on a machine of its own.
+brief for each and launches them side by side (one launch each), each on a machine of its own.
 
 Keep talking with the user meanwhile. Tell them that once the launch starts, a window opens on their
 screen (Windows Terminal, or Terminal on macOS; a tab per agent) that shows its progress and then the
@@ -51,9 +46,9 @@ are for. When it finishes, show the user the brief(s) it gave, then the result l
 `Warning:` lines, exactly as returned.
 
 If a result says a launch needs approval, tell the user the price per hour and why, and ask. Only after
-an explicit yes in this conversation, run `crab-student approve NAME [NAME ...] --json` (Bash timeout
-600000 ms). If it is cut off, run `crab-student start NAME --json` for each, which continues it. If
-they say no: `crab-student decline NAME`.
+an explicit yes in this conversation, run `crab-student approve NAME --json`, one
+Bash call per agent with `run_in_background: true` (several can run at once). If one is cut off, run
+`crab-student start NAME --json`, which tries again. If they say no: `crab-student decline NAME`.
 
 ## Interactive agents
 
@@ -67,8 +62,8 @@ want it to keep going on its own, they type `/handoff` in that chat (optionally 
 carries on in tmux with the whole conversation, after which they can close VS Code and use everything
 below. Before that, `send` does not apply, and `status` shows the agent as `interactive`.
 
-The machine installs the project's dependencies in the background while it is set up (`status` shows
-how far it got; the launch's `--setup` changes how).
+The machine installs the project's dependencies during setup, before the agent starts (the launch's
+`--setup` changes how); a failed install is a warning in the launch's result.
 
 ## Managing agents
 

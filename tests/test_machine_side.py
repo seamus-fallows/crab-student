@@ -18,6 +18,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fake_gh import git
@@ -313,13 +314,6 @@ def test_notifications_come_once_per_transition_to_needs_you_done_or_failed(cs):
     assert notified == ["notify:needs-you", "notify:needs-you", "notify:done", "notify:failed"]
 
 
-def test_a_wake_file_ends_the_watchdogs_nap_at_once(cs):
-    (cs.D / "wake").write_text("")
-    started = time.time()
-    cs.nap(30)
-    assert time.time() - started < 5 and not (cs.D / "wake").exists()
-
-
 def test_conversations_count_in_tmux_and_in_vs_code_subagents_too(cs):
     probe = cs.Probe()
     before = probe.transcript_bytes()
@@ -466,7 +460,7 @@ def test_status_reports_the_documented_fields(cs, repo, capsys):
     assert cs.cmd_status() == 0
     st = last_json(capsys)
     assert set(st) == {"name", "mode", "frontend", "agent", "idle_seconds", "used_hours", "stopping",
-                       "stop_reason", "stop_sent_for", "git", "deps"}  # fmt: skip
+                       "stop_reason", "stop_sent_for", "git"}  # fmt: skip
     assert st["git"] == {"branch": "agent/job1", "head": head(repo)[:7], "dirty": 1, "unpushed": 1}
     assert st["agent"]["message"] == "epoch 3/10" and st["stop_sent_for"] is None
     assert (st["mode"], st["frontend"]) == ("colleague", "tmux")
@@ -759,8 +753,6 @@ def test_claude_argv_after_a_hand_off_forks_the_vs_code_conversation(cs):
         "finish the tests"
     )
     assert "without asking" in fork[-1]  # (autonomous)
-    handed_off(cs, **dict(h, pin=False))
-    assert cs.claude_argv(c, sid, first=True, lost=False)[-4:-1] == ["--resume", h["from"], "--fork-session"]
 
 
 class EndOfTest(Exception):
@@ -824,52 +816,25 @@ def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, mo
     assert calls[1][-2:] == ["--resume", new]
 
 
-def test_a_fork_refused_with_session_id_is_forked_without_it_and_the_new_conversation_found(cs, monkeypatch):
-    c = set_config(cs, mode="interactive")
-    h = handed_off(cs)
-    forked = str(uuid.uuid4())
-
-    def claude(argv):
-        if "--fork-session" in argv and "--session-id" in argv:
-            return 1  # (an older Claude Code: refused at once)
-        if "--fork-session" in argv:
-            make_transcript(cs, forked)
-        return 0
-
-    calls = run_claude(cs, monkeypatch, claude, presses=1)
-    assert "--session-id" in calls[0] and "--session-id" not in calls[1] and "--fork-session" in calls[1]
-    assert cs.session_id(c) == forked and (cs.D / "session_id").read_text() == forked
-    assert calls[2][-2:] == ["--resume", forked] and cs.read_handoff()["from"] == h["from"]
-
-
 def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_asked(cs, monkeypatch):
     c = set_config(cs, mode="interactive")
+    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000002")  # (what agent-handoff chose)
     handed_off(cs, prompt="finish the tests")
 
     def claude(argv):
         if "--fork-session" in argv:
-            return 1
-        make_transcript(cs, argv[argv.index("--session-id") + 1])
+            return 1  # (refused at once)
+        if "--session-id" in argv:
+            make_transcript(cs, argv[argv.index("--session-id") + 1])
         return 0
 
-    calls = run_claude(cs, monkeypatch, claude, presses=0)
-    assert [("--fork-session" in argv) for argv in calls] == [True, True, False]
-    assert calls[2][-1].startswith(cs.FIRST_PROMPT + cs.LOST) and calls[2][-1].endswith("finish the tests")
-    assert cs.transcript(cs.session_id(c)) and cs.read_handoff()["fork_failed"]
-    assert cs.session_id(c) != cs.read_handoff()["from"]  # (never the VS Code conversation itself)
-
-
-def test_the_forked_conversation_is_found_only_among_those_begun_since_the_fork(cs):
-    c = set_config(cs, mode="interactive")
-    h = handed_off(cs)
-    older = make_transcript(cs, str(uuid.uuid4()))
-    os.utime(older, (T0, T0))
-    handed_off(cs, **dict(h, forked_at=T0 + 60, pin=False))
-    os.utime(make_transcript(cs, h["from"]), (T0 + 120, T0 + 120))  # (VS Code wrote its last words)
-    assert cs.session_id(c) == c["session_id"]  # (nothing new yet)
-    forked = make_transcript(cs, str(uuid.uuid4()))
-    os.utime(forked, (T0 + 90, T0 + 90))
-    assert cs.session_id(c) == forked.stem and (cs.D / "session_id").read_text() == forked.stem
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
+    assert [("--fork-session" in argv) for argv in calls] == [True, False, False]
+    new = cs.session_id(c)
+    assert new not in ("f0f0f0f0-0000-4000-8000-000000000002", cs.read_handoff()["from"])
+    assert calls[1][-3:-1] == ["--session-id", new] and calls[1][-1].startswith(cs.FIRST_PROMPT + cs.LOST)
+    assert calls[1][-1].endswith("finish the tests") and cs.read_handoff()["fork_failed"]
+    assert calls[2][-2:] == ["--resume", new]  # (the new conversation from then on, never a fork again)
 
 
 # ---- the hand-off --------------------------------------------------------------------------------
@@ -878,48 +843,65 @@ def test_the_forked_conversation_is_found_only_among_those_begun_since_the_fork(
 @pytest.fixture
 def interactive(cs, monkeypatch):
     """An interactive agent after setup: its rules files in D, the /handoff command installed, a VS Code
-    conversation, and a watchdog that starts Claude in tmux at once."""
+    conversation (`sid`), and Claude in tmux as good as started. `started` gets, for each tmux session
+    agent-handoff starts, the parent Claude Code's variables it would carry. (The environment is a copy:
+    agent-handoff edits it.)"""
     machine_files(cs)
     c = set_config(cs, mode="interactive")
     cs.setup_settings(c, {})
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
     monkeypatch.setattr(cs, "agent_started", lambda c, seconds: True)
-    return make_transcript(cs, str(uuid.uuid4())).stem
+    started = []
+    monkeypatch.setattr(
+        cs, "ensure_agent_session", lambda c: started.append(sorted(k for k in os.environ if cs.inherited(k)))
+    )
+    return SimpleNamespace(sid=make_transcript(cs, str(uuid.uuid4())).stem, started=started)
 
 
-def test_handoff_switches_the_mode_writes_the_rules_and_wakes_the_watchdog(
+def test_handoff_switches_the_mode_writes_the_rules_and_starts_the_agent_in_tmux(
     cs, interactive, monkeypatch, capsys
 ):
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive)
+    for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):  # (it runs under the Claude Code in VS Code)
+        monkeypatch.setenv(var, "1")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive.sid)
     assert not (cs.ROOT / ".claude" / "CLAUDE.md").exists()
     assert cs.cmd_handoff(["autonomous", "finish", "the", "tests"]) == 0
     assert "close VS Code" in capsys.readouterr().out
     h = cs.read_handoff()
-    assert (h["mode"], h["from"], h["prompt"]) == ("autonomous", interactive, "finish the tests")
+    assert (h["mode"], h["from"], h["prompt"]) == ("autonomous", interactive.sid, "finish the tests")
     c = cs.cfg()
     assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux") and c["mode"] == "interactive"
     assert "## Work on your own" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
     assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
-    assert cs.session_id(c) not in (c["session_id"], interactive) and (cs.D / "wake").exists()
+    assert cs.session_id(c) not in (c["session_id"], interactive.sid)
+    assert interactive.started == [[]]  # (once, with none of the VS Code Claude's variables)
     assert cs.cmd_handoff(["colleague"]) == 1 and cs.read_handoff() == h  # (once only)
 
 
-@pytest.mark.parametrize("given", ["argument", "environment", "newest"])
-def test_handoff_finds_the_conversation_it_runs_in(cs, interactive, monkeypatch, given):
-    other = make_transcript(cs, str(uuid.uuid4()))
-    os.utime(other, (T0, T0))  # (an older conversation)
-    args = ["colleague", "go on"]
-    if given == "argument":
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", other.stem)  # (the argument wins)
-        args.insert(0, f"--session={interactive}")
-    elif given == "environment":
-        args.insert(0, "--session=")  # (${CLAUDE_SESSION_ID} not filled in)
-        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive)
-    assert cs.cmd_handoff(args) == 0
-    assert (cs.read_handoff()["from"], cs.read_handoff()["prompt"]) == (interactive, "go on")
+@pytest.mark.parametrize("given", ["argument", "environment", "neither"])
+def test_handoff_hands_over_the_conversation_it_runs_in_and_never_guesses(
+    cs, interactive, monkeypatch, given
+):
+    """The id /handoff passes, else the one Claude Code gives its Bash commands (when Claude runs agent-handoff
+    itself); not the newest conversation."""
+    newest = make_transcript(cs, str(uuid.uuid4())).stem
+    session = {"argument": interactive.sid, "environment": "", "neither": str(uuid.uuid4())}[given]
+    env = {"argument": newest, "environment": interactive.sid, "neither": ""}[given]  # (the argument wins)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", env)
+    code = cs.cmd_handoff(
+        [f"--session={session}", "colleague", "go on"]
+    )  # ("": ${CLAUDE_SESSION_ID} not filled)
+    if given == "neither":
+        assert code == 1 and cs.read_handoff() == {} and interactive.started == []
+        assert cs.frontend(cs.cfg()) == "vscode"
+    else:
+        assert code == 0 and interactive.started == [[]]
+        assert (cs.read_handoff()["from"], cs.read_handoff()["prompt"]) == (interactive.sid, "go on")
 
 
-def test_handoff_defaults_to_a_colleague_continuing_the_task(cs, interactive):
+def test_handoff_defaults_to_a_colleague_continuing_the_task(cs, interactive, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", interactive.sid)
     assert cs.cmd_handoff([]) == 0
     h = cs.read_handoff()
     assert h["mode"] == "colleague" and h["prompt"]
@@ -1048,10 +1030,12 @@ def test_setup_repository_clones_the_branch_once_and_configures_it(cs, bare):
     assert (repo / "work.txt").exists()
 
 
+@posix_only
 def test_setup_where_it_was_done_before_only_restarts_the_watchdog(cs, monkeypatch, capsys):
     (cs.D / "setup-done").write_text("")
     ran = []
-    for step in ("setup_environment", "setup_repository", "setup_settings", "setup_claude", "setup_start"):
+    for step in ("setup_environment", "setup_repository", "setup_dependencies", "setup_settings", "setup_claude",
+                 "setup_start"):  # fmt: skip
         monkeypatch.setattr(cs, step, lambda c, jobs, step=step: ran.append(step))
     monkeypatch.setattr(cs, "spawn_watchdog", lambda: ran.append("watchdog"))
     assert cs.cmd_setup() == 0 and last_json(capsys) == {"ok": True, "resumed": True} and ran == ["watchdog"]
@@ -1076,6 +1060,39 @@ def test_setup_of_an_interactive_agent_starts_no_claude_in_tmux(cs, monkeypatch)
 # ---- agent-attach --------------------------------------------------------------------------------
 
 
+class Clock:
+    """cs.py's clock in a test: time passes only when it sleeps (a wait for what never comes ends at once)."""
+
+    strftime = staticmethod(time.strftime)
+
+    def __init__(self) -> None:
+        self.now = T0
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def attach(cs, monkeypatch, session) -> str:
+    """agent-attach, with `session(clock)` saying whether the agent's tmux session runs: the program it opens."""
+    clock = Clock()
+    monkeypatch.setattr(cs, "time", clock)
+    monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
+    monkeypatch.setattr(
+        cs, "tmux", lambda *a: subprocess.CompletedProcess(a, 0 if session(clock) else 1, "", "")
+    )
+
+    def execvp(file, argv):
+        raise EndOfTest(file)
+
+    monkeypatch.setattr(cs.os, "execvp", execvp)
+    with pytest.raises(EndOfTest) as e:
+        cs.cmd_attach()
+    return str(e.value)
+
+
 @pytest.mark.parametrize("mode, session, term, shown, program", [
     ("colleague", True, "", "", "tmux"),
     ("colleague", False, "", "not running", "bash"),
@@ -1087,17 +1104,16 @@ def test_attach_opens_the_agents_tmux_or_a_shell(
 ):
     set_config(cs, mode=mode)
     monkeypatch.setenv("TERM_PROGRAM", term)
-    monkeypatch.setattr(cs, "spawn_watchdog", lambda: None)
-    monkeypatch.setattr(cs, "tmux", lambda *a: subprocess.CompletedProcess(a, 0 if session else 1, "", ""))
-
-    def execvp(file, argv):
-        raise EndOfTest(file)
-
-    monkeypatch.setattr(cs.os, "execvp", execvp)
-    with pytest.raises(EndOfTest) as e:
-        cs.cmd_attach()
+    opened = attach(cs, monkeypatch, lambda clock: session)
     out = capsys.readouterr().out
-    assert str(e.value) == program and (shown in out if shown else out == "")
+    assert opened == program and (shown in out if shown else out == "")
+
+
+def test_attach_right_after_a_hand_off_waits_for_the_agents_session(cs, monkeypatch, capsys):
+    set_config(cs, mode="interactive")
+    handed_off(cs)
+    opened = attach(cs, monkeypatch, lambda clock: clock.now >= T0 + 10)  # (up 10 s after the hand-off)
+    assert opened == "tmux" and capsys.readouterr().out == ""
 
 
 # ---- the fake Claude and the watchdog process ----------------------------------------------------
@@ -1175,7 +1191,7 @@ def make_python(venv: Path) -> Path:
 
 @pytest.fixture
 def spawned(cs, monkeypatch) -> list:
-    """The background jobs cs.py would start (`cs.py deps`, `cs.py prepare-vscode`, ...), never started."""
+    """The background processes cs.py would start (`cs.py watch`), never started."""
     jobs = []
     monkeypatch.setattr(cs, "spawn", lambda command, logname: jobs.append(command))
     return jobs
@@ -1214,89 +1230,102 @@ def test_pip_installs_with_the_images_python_when_it_has_one(cs, tmp_path):
     assert shlex.split(cs.deps_command(c))[0] == str(cs.VENV / "bin" / "python")
 
 
-def test_the_install_starts_in_the_background_once_and_again_only_after_a_restart_cut_it_off(cs, spawned):
-    c = set_config(cs, setup="make deps")
+def setup_installing_only(cs, monkeypatch, capsys, **config) -> tuple:
+    """cmd_setup on a repo dir with nothing in it, its steps but the install and the settings skipped: (its
+    result, the step lines it printed, the rules)."""
+    for step in ("setup_environment", "setup_repository", "setup_claude", "setup_start"):
+        monkeypatch.setattr(cs, step, lambda c, jobs: None)
+    machine_files(cs)
+    Path(set_config(cs, **config)["repo_dir"]).mkdir(parents=True)
     (cs.D / "logs").mkdir()
-    (cs.D / "booted").write_text(f"{time.time() - 100:.0f}\n")
-    cs.start_deps(c)
-    assert spawned == ["deps"] and cs.read_deps()["state"] == "running"
-    cs.start_deps(c)  # (setup running again on the same start: it is under way)
-    assert spawned == ["deps"]
-    (cs.D / "booted").write_text(f"{time.time() + 100:.0f}\n")  # (the machine was started again since)
-    cs.start_deps(c)
-    assert spawned == ["deps", "deps"]
-    (cs.D / "deps.json").write_text(json.dumps({"state": "done", "command": "make deps"}))
-    cs.start_deps(c)
-    assert spawned == ["deps", "deps"]
-
-
-def test_nothing_to_install_starts_nothing(cs, spawned):
-    Path(cs.cfg()["repo_dir"]).mkdir(parents=True)
-    for setup, skipped in ((None, False), ("none", True)):
-        cs.start_deps(set_config(cs, setup=setup))
-        assert spawned == [] and cs.read_deps() == {"state": "none", "skipped": skipped}
-
-
-def test_setup_repository_starts_the_install_and_never_waits_for_it(cs, bare, spawned):
-    cs.setup_repository(set_config(cs, setup="sleep 600"), {})
-    assert spawned == ["deps"] and cs.read_deps()["command"] == "sleep 600"
+    assert cs.cmd_setup() == 0
+    lines = capsys.readouterr().out.splitlines()
+    steps = [line.split()[1] for line in lines if line.startswith("step ")]
+    return json.loads(lines[-1]), steps, (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
 
 
 @posix_only
-@pytest.mark.parametrize("command, state, code", [("mkdir -p .venv/bin && touch .venv/bin/python", "done", 0),
-                                                  ("echo broken; exit 3", "failed", 3)])  # fmt: skip
-def test_the_background_install_records_how_it_ended_and_points_vs_code_at_the_venv(cs, command, state, code):
-    c = cs.cfg()
-    Path(c["repo_dir"]).mkdir(parents=True)
-    (cs.D / "deps.json").write_text(
-        json.dumps({"state": "running", "command": command, "started": time.time()})
-    )
-    assert cs.cmd_deps() == 0
-    d = cs.read_deps()
-    assert (d["state"], d["exit_code"]) == (state, code) and d["finished"] >= d["started"]
-    settings = json.loads((cs.VSCODE_HOME / "data" / "Machine" / "settings.json").read_text())
-    venv_python = str(Path(c["repo_dir"]) / ".venv" / "bin" / "python")
-    assert (settings["python.defaultInterpreterPath"] == venv_python) == (state == "done")
-
-
-@pytest.mark.parametrize("deps, shown", [
-    ({"state": "running", "command": "uv sync", "started": T0}, ["still being installed", "uv sync", "Resolved"]),
-    ({"state": "failed", "command": "uv sync", "exit_code": 2}, ["failed", "exit code 2", "Resolved"]),
-    ({"state": "done", "command": "uv sync"}, ["installed", "uv sync"]),
-    ({"state": "none", "skipped": True}, ["skipped"]),
+@pytest.mark.parametrize("command, code", [
+    ("mkdir -p .venv/bin && touch .venv/bin/python && echo Installed", 0),
+    ("echo Resolving; echo 'error: no matching distribution for torch' >&2; exit 3", 3),
 ])  # fmt: skip
-def test_agent_status_shows_the_dependency_install(cs, capsys, deps, shown):
+def test_setup_installs_the_dependencies_before_the_agent_starts_and_a_failure_is_only_a_warning(
+    cs, monkeypatch, capsys, command, code
+):
+    result, steps, rules = setup_installing_only(cs, monkeypatch, capsys, setup=command)
+    assert result["ok"] and steps == [f"{i}/6" for i in range(1, 7)]
+    assert (cs.D / "heartbeat").exists()  # (setup keeps the dead-man switch from stopping a long install)
+    assert cs.read_deps() == {"command": command, "exit_code": code}
+    vscode = json.loads((cs.VSCODE_HOME / "data" / "Machine" / "settings.json").read_text())
+    if code == 0:
+        assert result["warnings"] == [] and command in rules
+        venv = (
+            Path(cs.cfg()["repo_dir"]) / ".venv" / "bin" / "python"
+        )  # (the settings come after the install)
+        assert vscode["python.defaultInterpreterPath"] == str(venv)
+    else:
+        [warning] = result["warnings"]
+        assert "no matching distribution for torch" in warning and str(code) in warning
+        assert command in rules and "Resolving" in rules and "no matching distribution for torch" in rules
+        assert str(cs.D) not in rules  # (the agent gets the log's end, never the tool's folder)
+
+
+@posix_only
+def test_an_install_that_does_not_end_is_stopped_with_all_it_started(cs, monkeypatch):
+    monkeypatch.setattr(cs, "DEPS_TIMEOUT", 2)
+    c = set_config(cs, setup="sleep 300 & echo $! > child.pid; wait")
+    repo = Path(c["repo_dir"])
+    repo.mkdir(parents=True)
     (cs.D / "logs").mkdir()
-    (cs.D / "logs" / "deps.log").write_text("Resolved 42 packages\n")
-    (cs.D / "booted").write_text(f"{T0 - 10:.0f}\n")
-    (cs.D / "deps.json").write_text(json.dumps(deps))
-    assert cs.cmd_declare([]) == 0
-    out = capsys.readouterr().out
-    assert all(part in out for part in shown) and "crab" not in out
+    started = time.time()
+    cs.setup_dependencies(c, {})
+    assert time.time() - started < 60 and cs.read_deps()["exit_code"] != 0 and cs.deps_warnings()
+    child = int((repo / "child.pid").read_text())
+
+    def running() -> bool:  # (a killed process is gone, or a zombie until it is reaped)
+        try:
+            return Path(f"/proc/{child}/stat").read_text().split(") ")[-1][0] != "Z"
+        except OSError:
+            return False
+
+    assert wait_for(lambda: not running(), 10)
 
 
-def test_a_restart_that_cut_the_install_off_is_said(cs, capsys):
-    (cs.D / "deps.json").write_text(json.dumps({"state": "running", "command": "uv sync", "started": T0}))
-    (cs.D / "booted").write_text(f"{T0 + 10:.0f}\n")
-    cs.cmd_declare([])
-    assert "cut off" in capsys.readouterr().out
+@pytest.mark.parametrize("files, setup", [({"README.md": "# proj\n"}, None),
+                                          ({"requirements.txt": "numpy\n"}, "none")])  # fmt: skip
+def test_with_nothing_to_install_setup_installs_nothing_and_the_rules_say_so(cs, monkeypatch, files, setup):
+    machine_files(cs)
+    c = set_config(cs, setup=setup)
+    repo = Path(c["repo_dir"])
+    repo.mkdir(parents=True)
+    for name, text in files.items():
+        (repo / name).write_text(text)
+    monkeypatch.setattr(cs.subprocess, "Popen", lambda *a, **kw: pytest.fail("an install was started"))
+    cs.setup_dependencies(c, {})
+    cs.setup_settings(c, {})
+    assert "command" not in cs.read_deps() and cs.deps_warnings() == []
+    rules = (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
+    assert "requirements.txt" in rules and "{{" not in rules  # (how to set things up the repo's way)
+
+
+def test_the_rules_give_the_end_of_a_failed_installs_output_but_not_where_its_log_is(cs):
+    machine_files(cs)
+    (cs.D / "logs").mkdir()
+    lines = [f"Collecting package-{i}" for i in range(30)] + ["error: no torch build for CUDA 11.2"]
+    (cs.D / "logs" / "deps.log").write_text("\n".join(lines) + "\n")
+    (cs.D / "deps.json").write_text(json.dumps({"command": "uv sync", "exit_code": 2}))
+    cs.setup_settings(cs.cfg(), {})
+    rules = (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
+    assert "uv sync" in rules and "error: no torch build for CUDA 11.2" in rules and "package-29" in rules
+    assert "package-0\n" not in rules and str(cs.D) not in rules  # (the end only; never the tool's folder)
+    [warning] = cs.deps_warnings()
+    assert "uv sync" in warning and "error: no torch build for CUDA 11.2" in warning
 
 
 def test_an_interactive_agent_has_agent_status_to_look_but_no_status_to_set(cs, capsys):
     set_config(cs, mode="interactive")
-    (cs.D / "deps.json").write_text(json.dumps({"state": "done", "command": "uv sync"}))
-    assert cs.cmd_declare([]) == 0 and "uv sync" in capsys.readouterr().out
+    assert cs.cmd_declare([]) == 0 and "60 min" in capsys.readouterr().out  # (when the machine stops)
     assert cs.cmd_declare(["working", "on it"]) == 1 and not (cs.D / "agent.json").exists()
-
-
-@pytest.mark.parametrize("deps, said", [({"state": "running", "command": "uv sync"}, "uv sync"),
-                                        ({"state": "none"}, "requirements.txt")])  # fmt: skip
-def test_the_rules_say_how_the_dependencies_get_installed(cs, deps, said):
-    machine_files(cs)
-    (cs.D / "deps.json").write_text(json.dumps(deps))
-    cs.setup_settings(cs.cfg(), {})
-    rules = (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
-    assert said in rules and "{{" not in rules
 
 
 def test_shells_claude_and_vs_code_use_the_repos_venv_once_there_is_one_else_the_images(cs, tmp_path):
@@ -1376,11 +1405,3 @@ def test_setup_waits_for_vs_codes_server_and_only_warns_when_it_failed(cs, code,
     warnings = cs.vscode_server_ready({"VS Code": job})
     assert bool(warnings) == warned and all("Could not resolve host" in w for w in warnings)
     assert cs.vscode_server_ready({}) == []
-
-
-def test_wait_handoff_says_when_the_agent_runs_in_tmux(cs, monkeypatch, capsys):
-    set_config(cs, mode="interactive")
-    monkeypatch.setattr(cs, "tmux", lambda *a: subprocess.CompletedProcess(a, 0, "", ""))
-    assert cs.cmd_wait_handoff(["0"]) == 0 and last_json(capsys) == {"frontend": "vscode"}
-    cs.save_handoff({"mode": "colleague", "from": "x", "prompt": "go on", "at": 0})
-    assert cs.cmd_wait_handoff(["5"]) == 0 and last_json(capsys) == {"frontend": "tmux"}

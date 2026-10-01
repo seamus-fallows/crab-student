@@ -12,6 +12,7 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -41,7 +42,8 @@ CPU_BUSY_CORES = 0.25
 QUIET_MINUTES = 20  # a "working" agent silent this long gets a check-in (longer than its longest sleep)
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
-STEPS = ("environment", "repository", "agent settings", "Claude Code", "starting the agent")
+STEPS = ("environment", "repository", "dependencies", "agent settings", "Claude Code", "starting the agent")
+DEPS_TIMEOUT = 1800  # (30 minutes, room for CUDA wheels on a slow host, within the dead-man switch's 45)
 SESSION = "agent"  # the tmux session Claude Code runs in
 # What the config's claude_settings may set (modelSettings: the effort Claude Code keeps for each model).
 CLAUDE_KEYS = ("model", "effortLevel", "modelSettings", "fastMode")
@@ -83,7 +85,8 @@ TMUX_CONF = (
     'set -g status-left "[{name}] "\nset -g status-left-length 40\nset -g status-right "detach: Ctrl-b d "\n'
 )
 # Every Claude Code on the machine (in tmux, in VS Code, the setup check) skips permission prompts: the
-# machine is disposable, and the git hooks guard the repo.
+# machine is disposable, and the git hooks guard the repo. (As root, Claude Code refuses to skip them
+# unless IS_SANDBOX=1.)
 SETTINGS = {
     "env": {"DISABLE_AUTOUPDATER": "1", "IS_SANDBOX": "1"},
     "permissions": {
@@ -120,7 +123,7 @@ def cfg() -> dict:
 
 def write(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))  # (setup and a background job may race)
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))  # (the watchdog and a command may race)
     tmp.write_text(text)
     os.chmod(str(tmp), mode)
     os.replace(str(tmp), str(path))
@@ -193,9 +196,9 @@ def read_env_file(path: Path) -> dict:
 
 
 def inherited(key: str) -> bool:
-    """A variable Claude Code in tmux must not get: the machine's own Vast key, or a parent Claude Code's (a
-    hand-off runs from the one in VS Code)."""
-    return key.startswith(("CONTAINER_", "CLAUDE_CODE_")) or key == "CLAUDECODE"
+    """A variable Claude Code in tmux must not get: the machine's own Vast key, or a parent Claude Code's or VS
+    Code's (a hand-off runs from the Claude Code in VS Code, and starts the tmux server)."""
+    return key.startswith(("CONTAINER_", "CLAUDE_CODE_", "VSCODE_")) or key == "CLAUDECODE"
 
 
 def agent_env(c: dict) -> dict:
@@ -238,9 +241,8 @@ def report_path(c: dict) -> str:
 
 def read_handoff() -> dict:
     """The hand-off from VS Code, once there was one: mode, from (the conversation forked), prompt, at;
-    forked_at and pin (whether the fork was given its session id) once the fork was started; fork_failed."""
-    h = read_json(D / "handoff.json", {})
-    return h if isinstance(h, dict) else {}
+    fork_failed once that conversation could not be forked."""
+    return read_json(D / "handoff.json", {})
 
 
 def save_handoff(h: dict) -> None:
@@ -261,25 +263,38 @@ def frontend(c: dict) -> str:
 
 
 def cmd_setup() -> int:
+    _held = _lock(
+        D / "setup.lock", wait=True
+    )  # (a setup run again after a lost connection waits for the first)
     c, jobs = cfg(), {}
     if (D / "setup-done").exists():  # (a launch that was cut off after setup: the agent may be at work)
         spawn_watchdog()
         return out({"ok": True, "resumed": True})
-    steps = (setup_environment, setup_repository, setup_settings, setup_claude, setup_start)
+    steps = (
+        setup_environment,
+        setup_repository,
+        setup_dependencies,
+        setup_settings,
+        setup_claude,
+        setup_start,
+    )
     for i, step in enumerate(steps, 1):
         label = STEPS[i - 1]
-        print("step %d/5 %s" % (i, label), flush=True)
+        print("step %d/%d %s" % (i, len(steps), label), flush=True)
+        write(
+            D / "heartbeat", str(int(time.time())), 0o600
+        )  # (each step is bounded: the dead-man switch waits)
         try:
             step(c, jobs)
         except Exception as e:  # reported to the local side, which destroys the machine
             with open(str(D / "logs" / "setup.log"), "a") as f:
                 f.write("step %d (%s) failed: %s\n" % (i, label, e))
             return out({"ok": False, "step": i, "label": label, "error": str(e)})
-    return out({"ok": True, "warnings": vscode_server_ready(jobs)})
+    return out({"ok": True, "warnings": deps_warnings() + vscode_server_ready(jobs)})
 
 
 def vscode_server_ready(jobs: dict) -> list:
-    """Wait for VS Code's server to be in place: a warning when it is not (VS Code then installs it itself)."""
+    """Wait for VS Code's server and the Claude extension to be in place: a warning when they are not."""
     job = jobs.get("VS Code")
     if job is None:
         return []
@@ -289,8 +304,9 @@ def vscode_server_ready(jobs: dict) -> list:
     except subprocess.TimeoutExpired:
         job.kill()
     tail = last_line((D / "logs" / "vscode.log").read_text(errors="replace"))
-    return ["VS Code's server could not be put on the machine ahead of time (%s): VS Code installs it itself "
-            "when you first open the agent, which takes a minute." % tail]  # fmt: skip
+    return ["VS Code's server and its Claude extension could not be put on the machine ahead of time (%s): VS "
+            "Code installs its server when you first open the agent, and the extension only if your "
+            "remote.SSH.defaultExtensions lists %s." % (tail, CLAUDE_EXTENSION)]  # fmt: skip
 
 
 def _script(path: Path, command: str) -> None:
@@ -383,7 +399,6 @@ def setup_repository(c: dict, jobs: dict) -> None:
     git("config", "core.sshCommand", git_ssh(), cwd=repo)
     git("config", "core.hooksPath", str(D / "hooks"), cwd=repo)
     git("config", "remote.origin.push", "refs/heads/%s:refs/heads/%s" % (c["branch"], c["branch"]), cwd=repo)
-    start_deps(c)
 
 
 def setup_settings(c: dict, jobs: dict) -> None:
@@ -414,7 +429,7 @@ def move(src: Path, dest: Path) -> None:
 
 
 def write_vscode_settings(c: dict) -> None:
-    """VS Code's settings for this machine, with the Python it should use: the repo's .venv once the install
+    """VS Code's settings for this machine, with the Python it should use: the repo's .venv when the install
     made one, else the image's (the user's own interpreter path, from their computer, means nothing here)."""
     path = VSCODE_HOME / "data" / "Machine" / "settings.json"
     venv = active_venv(c)
@@ -502,7 +517,7 @@ def setup_start(c: dict, jobs: dict) -> None:
         )
 
 
-# ---- background jobs: the repo's dependencies, VS Code's server ----------------------------------
+# ---- the repo's dependencies ---------------------------------------------------------------------
 
 
 def deps_command(c: dict) -> str:
@@ -528,44 +543,31 @@ def deps_command(c: dict) -> str:
     return ""
 
 
-def read_deps() -> dict:
-    """The dependency install: state (running, done, failed, none), command, started, finished, exit_code."""
-    d = read_json(D / "deps.json", {})
-    return d if isinstance(d, dict) else {}
-
-
-def deps_cut_off(d: dict) -> bool:
-    """An install that was running when the machine stopped (it does not run again by itself)."""
-    return d.get("state") == "running" and d.get("started", 0) < booted_at()
-
-
-def start_deps(c: dict) -> None:
-    """Start installing the repo's dependencies in the background; nothing waits for it. A setup that runs again
-    leaves one that is done or under way alone."""
-    d = read_deps()
-    if d.get("state") == "done" or (d.get("state") == "running" and not deps_cut_off(d)):
-        return
+def setup_dependencies(c: dict, jobs: dict) -> None:
+    """Install the repo's dependencies, while the installs the environment step started go on. A failed install
+    never fails setup: setup's result warns of it, and the agent's rules say so."""
     command = deps_command(c)
     if not command:
-        write(D / "deps.json", json.dumps({"state": "none", "skipped": c.get("setup") == "none"}))
+        write(D / "deps.json", "{}")
         return
-    write(D / "deps.json", json.dumps({"state": "running", "command": command, "started": time.time()}))
-    spawn("deps", "deps.log")
-
-
-def cmd_deps() -> int:
-    """The background install: run the command, record how it ended, point VS Code at the environment."""
-    c, d = cfg(), read_deps()
     env = dict(agent_env(c), PIP_ROOT_USER_ACTION="ignore", PIP_PROGRESS_BAR="off", TERM="dumb")
     env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"  # (pip with the system's python3, on an image without /venv/main)
     env.pop("VIRTUAL_ENV", None)  # (uv sync would say it is not the project's environment)
-    log("installing the dependencies: " + d["command"])
-    rc = subprocess.call(["bash", "-c", d["command"]], cwd=c["repo_dir"], env=env, stdin=subprocess.DEVNULL)
-    d.update(state="failed" if rc else "done", exit_code=rc, finished=time.time())
-    write(D / "deps.json", json.dumps(d))
-    log("%s (exit code %d)" % (d["state"], rc))
-    write_vscode_settings(c)
-    return 0
+    with open(str(D / "logs" / "deps.log"), "a") as logs:
+        job = subprocess.Popen(["bash", "-c", command], cwd=c["repo_dir"], env=env, stdin=subprocess.DEVNULL,
+                               stdout=logs, stderr=subprocess.STDOUT, start_new_session=True)  # fmt: skip
+        try:
+            code = job.wait(DEPS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            os.killpg(job.pid, signal.SIGKILL)  # (the whole install, not only its shell)
+            code = job.wait()
+            logs.write("\nThe install was stopped after %d minutes.\n" % (DEPS_TIMEOUT // 60))
+    write(D / "deps.json", json.dumps({"command": command, "exit_code": code}))
+
+
+def read_deps() -> dict:
+    """The dependency install at setup: command and exit_code (no command when there was nothing to install)."""
+    return read_json(D / "deps.json", {})
 
 
 def deps_log_tail(n: int) -> list:
@@ -573,71 +575,41 @@ def deps_log_tail(n: int) -> list:
         lines = [x.rstrip() for x in (D / "logs" / "deps.log").read_text(errors="replace").splitlines()]
     except OSError:
         return []
-    return ["  " + x for x in lines if x.strip()][-n:]
+    return [x for x in lines if x.strip()][-n:]
 
 
-def deps_lines() -> list:
-    """What agent-status says about the install of the repo's dependencies."""
+def deps_warnings() -> list:
+    """Setup's warning when the dependency install failed (the machine is set up all the same)."""
     d = read_deps()
-    state, command = d.get("state"), d.get("command", "")
-    if state == "none":
-        why = "skipped at launch" if d.get("skipped") else "no install method recognised in the repo"
-        return ["dependencies: none were installed for you (%s)" % why]
-    if state == "done":
-        return ["dependencies: installed (%s)" % command]
-    if state == "failed":
-        head = "dependencies: the install failed with exit code %s (%s). The end of its log:"
-        return [head % (d.get("exit_code"), command), *deps_log_tail(12)]
-    if deps_cut_off(d):
-        return ["dependencies: the install (%s) was cut off when the machine stopped: run it again" % command]
-    if state == "running":
-        head = (
-            "dependencies: still being installed in the background, for %d min so far (%s). Wait for it rather "
-            "than starting a second install. The end of its log:"
-        )
-        return [head % ((time.time() - d.get("started", time.time())) / 60, command), *deps_log_tail(3)]
-    return []
+    if not d.get("command") or d.get("exit_code") == 0:
+        return []
+    tail = (deps_log_tail(1) or ["no output"])[0].strip()
+    return [
+        "Installing the project's dependencies (%s) failed with exit code %s (%s). The machine was set up anyway; "
+        "the install's log is %s there." % (d["command"], d["exit_code"], tail, D / "logs" / "deps.log")
+    ]
 
 
 def deps_rule() -> str:
-    """The rules' line about the dependencies, as things stand when the rules are written."""
+    """The rules' line about the dependencies (with the end of a failed install's output, never its log's path)."""
     d = read_deps()
-    state, command = d.get("state"), d.get("command", "")
-    if state == "running":
+    command, code = d.get("command"), d.get("exit_code")
+    if not command:
         return (
-            "The repo's dependencies are being installed in the background (`%s`). `agent-status` shows whether "
-            "that is still running, finished or failed, with the end of its log: wait for it (or fix it if it "
-            "failed) rather than starting a second install." % command
+            "Only Claude Code and tmux were installed for you. Set up what the task needs the way the repo does it "
+            "(`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README)."
         )
-    if state == "done":
+    if code == 0:
         return "The repo's dependencies were installed when the machine was set up (`%s`)." % command
-    if state == "failed":
-        return (
-            "Installing the repo's dependencies (`%s`) failed: `agent-status` shows the end of its log. Fix that "
-            "first." % command
-        )
+    tail = "\n".join("  " + x for x in deps_log_tail(12))
     return (
-        "Only Claude Code and tmux were installed for you. Set up what the task needs the way the repo does it "
-        "(`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README)."
+        "Installing the repo's dependencies when the machine was set up (`%s`) failed with exit code %s. Fix that "
+        "first, unless it has been fixed since. The end of its output:\n\n  ```\n%s\n  ```"
+        % (command, code, tail)
     )
 
 
-def cmd_wait_handoff(args: list) -> int:
-    """wait-handoff SECONDS: until the agent was handed off and runs in tmux, or the time is up."""
-    c, deadline = cfg(), time.time() + float(args[0] if args else 0)
-    while time.time() < deadline and not (
-        frontend(c) == "tmux" and tmux("has-session", "-t", SESSION).returncode == 0
-    ):
-        time.sleep(2)
-    return out({"frontend": frontend(c)})
-
-
 # ---- Claude Code in tmux -------------------------------------------------------------------------
-
-
-def transcripts() -> list:
-    """The conversation files of every Claude Code session here (in tmux or in VS Code)."""
-    return glob.glob(str(ROOT / ".claude" / "projects" / "*" / "*.jsonl"))
 
 
 def transcript(sid: str) -> bool:
@@ -645,19 +617,10 @@ def transcript(sid: str) -> bool:
 
 
 def session_id(c: dict) -> str:
-    """The conversation Claude Code in tmux resumes. After a hand-off whose fork could not be given its id
-    (a Claude Code that does not take --session-id with --fork-session), the newest conversation begun
-    since the fork started (the one in VS Code excepted), found once and kept."""
+    """The conversation Claude Code in tmux resumes (a hand-off, or a conversation that could not be resumed,
+    gives it a new one)."""
     path = D / "session_id"
-    sid = path.read_text().strip() if path.exists() else c["session_id"]
-    h = read_handoff()
-    if not transcript(sid) and h.get("forked_at") and not h.get("pin", True) and not h.get("fork_failed"):
-        since = h["forked_at"] - 2  # (a file's time can lag the clock a little)
-        new = [p for p in transcripts() if Path(p).stem != h["from"] and os.path.getmtime(p) >= since]
-        if new:
-            sid = Path(max(new, key=os.path.getmtime)).stem
-            write(path, sid, 0o600)
-    return sid
+    return path.read_text().strip() if path.exists() else c["session_id"]
 
 
 def fork_from(h: dict):
@@ -665,14 +628,23 @@ def fork_from(h: dict):
     return h["from"] if h.get("from") and not h.get("fork_failed") and transcript(h["from"]) else None
 
 
-def agent_started(c: dict, seconds: float) -> bool:
-    """Whether Claude Code runs in tmux with its conversation saved, waiting up to `seconds` for it."""
+def session_running() -> bool:
+    return tmux("has-session", "-t", SESSION).returncode == 0
+
+
+def wait_until(condition, seconds: float) -> bool:
+    """Whether `condition()` holds, waiting up to `seconds` for it."""
     deadline = time.time() + seconds
-    while not (tmux("has-session", "-t", SESSION).returncode == 0 and transcript(session_id(c))):
+    while not condition():
         if time.time() >= deadline:
             return False
-        time.sleep(2)
+        time.sleep(1)
     return True
+
+
+def agent_started(c: dict, seconds: float) -> bool:
+    """Whether Claude Code runs in tmux with its conversation saved, waiting up to `seconds` for it."""
+    return wait_until(lambda: session_running() and transcript(session_id(c)), seconds)
 
 
 def first_prompt(lost: bool) -> str:
@@ -683,8 +655,8 @@ def first_prompt(lost: bool) -> str:
 
 
 def claude_argv(c: dict, sid: str, first: bool, lost: bool) -> list:
-    """A saved conversation is resumed; after a hand-off, the VS Code one is forked (under `sid` when Claude
-    Code takes it); else a new one starts."""
+    """A saved conversation is resumed; after a hand-off, the VS Code one is forked under `sid`; else a new one
+    starts."""
     argv = [PY, str(D / "fake_claude.py")] if c["fake_claude"] else [str(CLAUDE)]
     argv += ["--dangerously-skip-permissions"]
     if transcript(sid):
@@ -692,8 +664,7 @@ def claude_argv(c: dict, sid: str, first: bool, lost: bool) -> list:
     h = read_handoff()
     if fork_from(h):
         prompt = HANDOFF_PROMPT.format(how=HOW[h["mode"]], prompt=h["prompt"])
-        pin = ["--session-id", sid] if h.get("pin", True) else []
-        return [*argv, "--resume", h["from"], "--fork-session", *pin, prompt]
+        return [*argv, "--resume", h["from"], "--fork-session", "--session-id", sid, prompt]
     return [*argv, "--session-id", sid, first_prompt(lost)]
 
 
@@ -704,15 +675,9 @@ def cmd_claude() -> int:
         sid, h = session_id(c), read_handoff()
         resuming = transcript(sid)
         forking = not resuming and bool(fork_from(h))
-        if forking:
-            h.update(forked_at=time.time(), pin=h.get("pin", True))
-            save_handoff(h)
         started = time.time()
         rc = subprocess.call(claude_argv(c, sid, first, lost), cwd=c["repo_dir"], env=agent_env(c))
         if (resuming or forking) and rc and time.time() - started < 20:  # it could not be resumed or forked
-            if forking and h["pin"]:  # (maybe this Claude Code refuses --session-id there: fork without it)
-                save_handoff(dict(h, pin=False))
-                continue
             if forking:  # (the VS Code conversation cannot be forked: a new one starts from the brief)
                 save_handoff(dict(h, fork_failed=True))
             write(D / "session_id", str(uuid.uuid4()), 0o600)
@@ -727,10 +692,11 @@ def cmd_claude() -> int:
 
 
 def cmd_attach() -> int:
-    """agent-attach: the agent's tmux session, else a shell (VS Code's terminals run this too)."""
+    """agent-attach: the agent's tmux session (waiting a little for one a hand-off is starting), else a shell
+    (VS Code's terminals run this too)."""
     spawn_watchdog()
     c = cfg()
-    if frontend(c) == "tmux" and tmux("has-session", "-t", SESSION).returncode == 0:
+    if frontend(c) == "tmux" and wait_until(session_running, 30):
         os.execvp("tmux", ["tmux", "-u", "attach", "-t", SESSION])  # (-u: UTF-8 even without a locale)
     if frontend(c) == "tmux":
         print("The agent's session is not running (see crab-student status %s). Opening a shell." % c["name"])
@@ -788,8 +754,7 @@ class Probe:
 
 
 def read_agent() -> dict:
-    a = read_json(D / "agent.json", {})
-    return a if isinstance(a, dict) else {}
+    return read_json(D / "agent.json", {})
 
 
 def tick(st: dict, c: dict, now: float, probe) -> list:
@@ -818,7 +783,7 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
         actions.append("nudge")
         st["nudged_at"] = now
     # An agent that says "working" but has not said a word for a while has likely ended its turn with a
-    # job still running (and nothing wakes an interactive session): remind it once per quiet stretch.
+    # job still running (and nothing prompts an interactive session): remind it once per quiet stretch.
     quiet = now - st["last_talk"] >= QUIET_MINUTES * 60
     if mode != "interactive" and state == "working" and quiet and not st["talk_nudged"]:
         actions.append("check-in")
@@ -829,7 +794,6 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
 
 
 def load_state() -> dict:
-    st = read_json(D / "state.json", {})
     defaults = {
         "used_seconds": 0.0,
         "last_activity": 0.0,
@@ -845,7 +809,7 @@ def load_state() -> dict:
         "talk_nudged": False,
         "stop_sent_at": None,
     }
-    return dict(defaults, **(st if isinstance(st, dict) else {}))
+    return dict(defaults, **read_json(D / "state.json", {}))
 
 
 def save_state(st: dict) -> None:
@@ -881,12 +845,12 @@ def spawn(command: str, logname: str) -> None:
         )
 
 
-def _lock(path: Path):
+def _lock(path: Path, wait: bool = False):
     import fcntl
 
     f = open(str(path), "a")  # noqa: SIM115 - held open: the lock lives as long as the file
     try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         return f
     except OSError:
         f.close()
@@ -901,7 +865,7 @@ def _lock_free(path: Path) -> bool:
 
 
 def ensure_agent_session(c: dict) -> None:
-    if tmux("has-session", "-t", SESSION).returncode:
+    if not session_running():
         tmux(
             "new-session",
             "-d",
@@ -917,12 +881,10 @@ def ensure_agent_session(c: dict) -> None:
         )
 
 
-def nap(seconds: float) -> None:
-    """Sleep until the next tick, or until a command wants one now (agent-handoff creates `wake`)."""
-    end = time.time() + seconds
-    while time.time() < end and not (D / "wake").exists():
-        time.sleep(min(1.0, max(0.0, end - time.time())))
-    (D / "wake").unlink(missing_ok=True)
+def drop_inherited() -> None:
+    """Remove from this process's environment what a tmux server it starts (and so the agent) must never see."""
+    for key in [k for k in os.environ if inherited(k)]:
+        os.environ.pop(key)
 
 
 def cmd_watch() -> int:
@@ -930,8 +892,7 @@ def cmd_watch() -> int:
     if not lock:
         return 0
     vast_env = vast_credentials()
-    for key in [k for k in os.environ if inherited(k)]:  # (the tmux server and the agent never see them)
-        os.environ.pop(key)
+    drop_inherited()
     st, probe, now = load_state(), Probe(), time.time()
     if st["boot"] != booted_at():  # a new container start: its own idle clock and machine time
         st.update(
@@ -963,11 +924,7 @@ def cmd_watch() -> int:
             save_state(st)
         except Exception as e:  # the watchdog never dies of a bug (the dead-man switch is the net)
             log("tick failed: %r" % (e,))
-        try:
-            nap(TICK)
-        except Exception as e:
-            log("nap failed: %r" % (e,))
-            time.sleep(TICK)
+        time.sleep(TICK)
 
 
 def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
@@ -1236,7 +1193,6 @@ def cmd_status() -> int:
             "stop_reason": st["stop_reason"],
             "stop_sent_for": int(now - st["stop_sent_at"]) if st["stop_sent_at"] else None,
             "git": git_state(c),
-            "deps": {k: v for k, v in read_deps().items() if k in ("state", "command", "exit_code")},
         }
     )
 
@@ -1261,8 +1217,6 @@ def cmd_declare(args: list) -> int:
         a, st = read_agent(), load_state()
         if machine_mode(c) != "interactive":
             print("status: %s - %s" % (a.get("state", "not set"), a.get("message", "")))
-        for line in deps_lines():
-            print(line)
         print(
             "the machine has run for %s since it was started; it stops after %d min without activity"
             % (fmt_hours(st["used_seconds"] / 3600), c["idle_minutes"])
@@ -1298,8 +1252,8 @@ def cmd_declare(args: list) -> int:
 
 def cmd_handoff(args: list) -> int:
     """agent-handoff [--session=ID] [autonomous|colleague] ["what to continue with"]: the conversation in VS
-    Code goes on in tmux. It writes that mode's rules, switches the machine's mode, and has the watchdog fork
-    the conversation into tmux under a new session id, so the two never write to the same one."""
+    Code goes on in tmux. It writes that mode's rules, switches the machine's mode, and starts the agent's tmux
+    session, which forks the conversation under a new session id, so the two never write to the same one."""
     c = cfg()
     if machine_mode(c) != "interactive":
         print(
@@ -1311,14 +1265,19 @@ def cmd_handoff(args: list) -> int:
     prompt = " ".join(" ".join(words).split()) or "the task, from where the conversation left off."
     sid = this_conversation([a.split("=", 1)[1] for a in args if a.startswith("--session=")])
     if not sid:
-        print("No conversation to hand over was found in ~/.claude/projects.", file=sys.stderr)
+        print(
+            "Could not tell which conversation to hand over: neither --session=ID nor CLAUDE_CODE_SESSION_ID names "
+            "a saved conversation in ~/.claude/projects. Hand over with the /handoff command.",
+            file=sys.stderr,
+        )
         return 1
     write_rules(c, mode)
     (ROOT / ".claude" / "commands" / "handoff.md").unlink(missing_ok=True)
     write(D / "session_id", str(uuid.uuid4()), 0o600)
     save_handoff({"mode": mode, "from": sid, "prompt": prompt, "at": int(time.time())})
+    drop_inherited()  # (this runs under the Claude Code in VS Code: its variables must not reach the agent)
     spawn_watchdog()
-    write(D / "wake", "")
+    ensure_agent_session(c)
     # (at most 90 s: Claude Code cuts a Bash command off after 2 minutes by default)
     how = "now continues" if agent_started(c, 90) else "is starting (it can take a minute) to continue"
     print(
@@ -1330,12 +1289,11 @@ def cmd_handoff(args: list) -> int:
 
 def this_conversation(given: list):
     """The conversation agent-handoff runs in: the id /handoff passed, else the one Claude Code gives its Bash
-    commands, else the newest (it is writing its transcript right now)."""
+    commands (when Claude runs agent-handoff itself); None when neither names a saved conversation."""
     for sid in [*given, os.environ.get("CLAUDE_CODE_SESSION_ID", "")]:
         if sid and transcript(sid):
             return sid
-    found = transcripts()
-    return Path(max(found, key=os.path.getmtime)).stem if found else None
+    return None
 
 
 def done_problems(c: dict) -> list:
@@ -1416,8 +1374,6 @@ def main(argv: list) -> int:
         "declare": lambda: cmd_declare(args),
         "handoff": lambda: cmd_handoff(args),
         "hook": lambda: cmd_hook(args[0], args[1:]),
-        "deps": cmd_deps,
-        "wait-handoff": lambda: cmd_wait_handoff(args),
     }
     if cmd not in handlers:
         print("usage: cs.py " + "|".join(handlers), file=sys.stderr)

@@ -2,7 +2,7 @@
 """A stand-in for Claude Code (launch --fake-claude): it does a tiny task the way an agent would, so the
 whole pipeline can be tested without spending Claude usage. It takes the command lines the machine gives
 Claude Code: a new conversation (--session-id ID PROMPT), a resumed one (--resume ID [NOTE]) and a fork
-(--resume ID --fork-session [--session-id NEW] PROMPT, which copies the conversation to a new id)."""
+(--resume ID --fork-session --session-id NEW PROMPT, which copies the conversation to the new id)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
@@ -27,8 +26,6 @@ def main(argv: list) -> int:
         return 1
     fork = "--fork-session" in argv
     sid = argv[argv.index("--session-id") + 1] if "--session-id" in argv else resume
-    if fork and "--session-id" not in argv:
-        sid = str(uuid.uuid4())
     transcript = folder / (sid + ".jsonl")
     folder.mkdir(parents=True, exist_ok=True)
     if fork:

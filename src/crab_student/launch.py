@@ -1,18 +1,16 @@
-"""Launching: the plan, the approval rule, bring-up (rent, boot, repo, upload and setup), several launches at
-once, approve, decline and start."""
+"""Launching: the plan, the approval rule, bring-up (rent, boot, repo, upload and setup), approve, decline and
+start."""
 
 from __future__ import annotations
 
 import contextlib
 import json
-import os
 import re
 import secrets
 import shlex
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +22,7 @@ SSH_TIMEOUT = 3 * 60  # and one whose ssh does not answer this long after it run
 RACERS = 2  # new machines rented at once for one launch
 POLL = 5.0
 LABEL_WAIT = 120.0
+LABEL_PREFIX = "crab-student-"  # (every rent's label: crab-student-NAME-<8 hex>)
 
 # Vast runs this as root at every container start. It saves the container's own Vast key (only this
 # machine can use it), starts the dead-man switch (stop the machine once neither this start nor the
@@ -84,17 +83,11 @@ class LaunchArgs:
 
 class Progress:
     """Progress lines on stderr (so --json keeps stdout to one value), and with the time in the agent's launch
-    log (`log_file`) once attach() names the agent (earlier lines are kept until then). status() rewrites one
-    line on a terminal and prints only changes elsewhere (and in the log, marked "~"). A prefix ("[job1] ")
-    marks the lines of one of several launches at once (never rewritten: they share the terminal)."""
+    log (`log_file`) once attach() names the agent (earlier lines are kept until then)."""
 
-    def __init__(self, stream=None, prefix: str = ""):
+    def __init__(self, stream=None):
         self.stream = stream or sys.stderr
-        self.prefix = prefix
-        self.tty = not prefix and getattr(self.stream, "isatty", lambda: False)()
-        if self.tty and os.name == "nt":
-            os.system("")  # (turns on the escape codes that rewrite the status line)
-        self.shown: str | None = None
+        self.shown: str | None = None  # (the last status line printed)
         self.t0 = self.printed = time.monotonic()
         self.name: str | None = None
         self.early: list[str] = []  # (log lines from before the agent's record existed)
@@ -118,27 +111,20 @@ class Progress:
             self.early.append(text)
 
     def line(self, text: str) -> None:
-        if self.tty and self.shown is not None:
-            self.stream.write("\n")
         self.shown = None
         self._log(text)
-        print(core.ascii_text(self.prefix + text), file=self.stream, flush=True)
+        print(core.ascii_text(text), file=self.stream, flush=True)
 
     def status(self, text: str) -> None:
-        """One changing line: rewritten in place (with the time so far) on a terminal; elsewhere printed when
-        its first part changes, and a detail change at most every 15 s (an image pull reports often)."""
+        """A changing line, with the time so far: printed (and logged, marked "~") when its first part changes, or
+        when its detail changes and 15 s have passed since the last one printed (an image pull reports often)."""
         text = core.ascii_text(text)
         new_part = text.split(" - ")[0] != (self.shown or "").split(" - ")[0]
-        due = text != self.shown and (new_part or time.monotonic() - self.printed >= 15)
-        if due:
-            self.printed = time.monotonic()
-            self._log(f"~ {text} ({self.elapsed()})")
-        if self.tty:
-            self.stream.write(f"\r\033[K{text} ({self.elapsed()})")
-            self.stream.flush()
-        elif due:
-            print(f"{self.prefix}{text} ({self.elapsed()})", file=self.stream, flush=True)
-        self.shown = text
+        if text == self.shown or not (new_part or time.monotonic() - self.printed >= 15):
+            return
+        self.shown, self.printed = text, time.monotonic()
+        self._log(f"~ {text} ({self.elapsed()})")
+        print(f"{text} ({self.elapsed()})", file=self.stream, flush=True)
 
 
 def log_file(name: str) -> Path:
@@ -189,7 +175,7 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     out.attach(a.name)
     if reason:
         return result(rec, "approval", warnings, reason=reason)
-    show_launches([a.name], out)
+    show_launch(a.name, out)
     return bring_up(a.name, out, warnings)
 
 
@@ -220,11 +206,9 @@ def approval_reason(plan: offers.Plan, cap: float) -> str | None:
     )
 
 
-def plan_repo(
-    a: LaunchArgs, cfg: dict, branch: str, snapshots: dict | None = None
-) -> tuple[dict, str, list[str]]:
+def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[str]]:
     """Where the agent's branch starts. Nothing is written anywhere yet (the starting commit is a local,
-    unreferenced object; several launches at once share one through `snapshots`)."""
+    unreferenced object)."""
     if a.no_repo:
         slug = f"{github.login()}/{cfg['workspace_repo']}"
         github.check_workspace(slug, branch)  # (a repo that does not exist yet is created after the rent)
@@ -240,10 +224,7 @@ def plan_repo(
         return repo, f"{slug} (your workspace repo) - {branch}", []
     r = github.local_repo(a.repo_path or Path.cwd())
     github.check_repo(r.slug, branch)
-    snapshots = {} if snapshots is None else snapshots
-    if str(r.top) not in snapshots:
-        snapshots[str(r.top)] = github.snapshot(r, commit=not a.dry_run)
-    sha, carried, untracked, local = snapshots[str(r.top)]
+    sha, carried, untracked, local = github.snapshot(r, commit=not a.dry_run)
     base = (
         github.git(r.top, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "a detached HEAD"
     )
@@ -331,7 +312,6 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "offers": [offers.kept(o) for o in plan.offers()],
         "failed_offers": [],
         "rents": [],  # (the rents in flight while machines race: label, offer_id, at, instance_id, running_at)
-        "strays": [],  # (unconfirmed rents the race left behind: found by label and destroyed later)
         "rent": None,  # (the kept machine's rent)
         "instance_id": None,
         "dph": None,
@@ -343,7 +323,6 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "pending": {"reason": reason, "max_dph": plan.top_price()} if reason else None,
         "last_start": None,
         "stopped_since": None,
-        "stop_note": None,
         "last_seen": None,
         "image": cfg["image"],
         "idle_minutes": cfg["idle_minutes"],
@@ -362,121 +341,22 @@ def save_new(rec: dict, brief: str, warnings: list[str]) -> None:
         core.save(rec)
 
 
-def show_launches(names: list[str], out: Progress) -> None:
-    """Open a window that follows these launches and then shows the agents (unless the open_window setting is
-    off), else say how to follow them."""
-    if not names:
-        return
-    opened = core.load_config()["open_window"] == "on" and machine.open_launch_windows(names)
-    for name in names:
-        if opened:
-            out.line(f"A window follows the launch of {name} (again any time: crab-student open {name})")
-        else:
-            out.line(f"Follow the launch of {name} in a terminal: crab-student open {name}")
-
-
-# ---- several at once -----------------------------------------------------------------------------
-
-
-def launch_batch(items: list[LaunchArgs], out: Progress) -> dict:
-    """Launch several agents at once. Everything is planned first (a problem stops the batch before anything
-    is rented), each agent picks a different machine (and races another no other agent races, when there are
-    enough), and the bring-ups run side by side."""
-    from crab_student import setup
-
-    if len({a.name for a in items}) < len(items):
-        raise core.CrabError("two agents in the batch have the same name.", 2)
-    setup.check_ready(fake_claude=any(a.fake_claude for a in items))
-    for a in items:
-        check_new(a)
-    cfg = core.load_config()
-    cap, taken, found, snapshots, planned = cfg["approve_above_usd_per_hour"], set(), {}, {}, []
-    for a in items:
-        repo, _, warnings = plan_repo(a, cfg, f"agent/{a.name}", snapshots)
-        key = json.dumps(offers.req_dict(a.req), sort_keys=True)
-        if key not in found:  # (one search per kind of machine)
-            found[key] = offers.search(a.req, cfg)
-        plan = offers.plan(a.req, cfg, cap, taken, found[key], mode=a.mode or cfg["mode"])
-        taken.add(plan.primary["id"])
-        reason = approval_reason(plan, cap)
-        planned.append((a, new_record(a, cfg, plan, repo, reason), warnings, reason, plan))
-    lines = {}
-    for (a, rec, _, reason, _), kept in zip(planned, reserve_racers([x[4] for x in planned]), strict=True):
-        rec["offers"], p = kept, kept[0]
-        lines[a.name] = f"{a.name}: {p['short']} at ${p['dph_total']:.2f}/hr - {rec['mode']}" + (
-            " - needs your approval" if reason else ""
-        )
-        out.line(lines[a.name])
-    if any(a.dry_run for a in items):
-        return batch_result([result(rec, "dry run", w, reason=r) for _, rec, w, r, _ in planned])
-    for a, rec, warnings, _, _ in planned:
-        save_new(rec, a.brief, warnings)
-        append_log(a.name, lines[a.name])
-    go = [(rec["name"], warnings) for _, rec, warnings, reason, _ in planned if not reason]
-    show_launches([name for name, _ in go], out)
-    jobs = [(name, lambda o, name=name, w=w: bring_up(name, o, w)) for name, w in go]
-    done = {r["name"]: r for r in side_by_side(jobs, out)}
-    return batch_result(
-        [done.get(rec["name"]) or result(rec, "approval", w, reason=r) for _, rec, w, r, _ in planned]
-    )
-
-
-def reserve_racers(plans: list[offers.Plan]) -> list[list[dict]]:
-    """Each agent's offers (as kept in its record) in the order it rents them: its pick, then its backups (up to
-    offers.MAX_BACKUPS) that are no agent's pick. The first backup, which it races against its pick, is one no
-    earlier agent races, so agents do not race each other for a machine; an agent left without one races its pick
-    alone. (A later backup may be another agent's racer: renting a taken offer moves on to the next.)"""
-    picks, racing, kept = {p.primary["id"] for p in plans}, set(), []
-    for p in plans:
-        backups = offers.fallbacks(
-            [p.primary, *(o for o in p.ranked[1:] if o["id"] not in picks | racing)], p.over_cap
-        )
-        racing.update(o["id"] for o in backups[:1])
-        kept.append([offers.kept(o) for o in (p.primary, *backups)])
-    return kept
-
-
-def side_by_side(jobs: list, out: Progress) -> list[dict]:
-    """Run each (name, job) in its own thread, its progress lines marked with its name. A job that fails gives a
-    failed result instead of stopping the others."""
-
-    def run(name: str, job) -> dict:
-        try:
-            return job(Progress(out.stream, prefix=f"[{name}] "))
-        except Exception as e:  # (one agent's trouble, even a bug, must not lose the others' results)
-            return failed(name, e)
-
-    if not jobs:
-        return []
-    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-        return list(pool.map(lambda job: run(*job), jobs))
-
-
-def failed(name: str, e: Exception) -> dict:
-    message, code = (e.message, e.code) if isinstance(e, core.CrabError) else (repr(e), 1)
-    line = f"{name}: launch failed - {message}"
-    return {"name": name, "state": "failed", "result_line": line, "warnings": [], "exit_code": code}
-
-
-def batch_result(results: list[dict]) -> dict:
-    """Several launches' results as one: every line, the warnings once each, and the worst exit code."""
-    codes = [r["exit_code"] for r in results]
-    bad = [c for c in codes if c not in (0, 3)]
-    return {
-        "state": "batch",
-        "results": results,
-        "result_line": "\n".join(r["result_line"] for r in results),
-        "warnings": list(dict.fromkeys(w for r in results for w in r.get("warnings", []))),
-        "exit_code": bad[0] if bad else 3 if 3 in codes else 0,
-    }
+def show_launch(name: str, out: Progress) -> None:
+    """Open a window that follows the launch and then shows the agent (unless the open_window setting is off),
+    else say how to follow it."""
+    if core.load_config()["open_window"] == "on" and machine.open_launch_window(name):
+        out.line(f"A window follows the launch of {name} (again any time: crab-student open {name})")
+    else:
+        out.line(f"Follow the launch of {name} in a terminal: crab-student open {name}")
 
 
 # ---- bring-up ------------------------------------------------------------------------------------
 
 
 def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict:
-    """Take an agent from wherever its launch got to (renting, booting, setup, failed) to ready. Its progress,
-    and a failure, also go to its launch log."""
+    """Bring an agent's launch to ready from wherever it got: a new launch races, one cut off during setup goes
+    on, and one that failed or was cut off before its upload is planned afresh. Its progress, and a failure,
+    also go to its launch log."""
     with core.locked(name, wait=900):  # (a second caller waits for a launch at work, then reports it)
         out.attach(name)
         rec = core.load(name)
@@ -490,24 +370,27 @@ def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict
 
 
 def _bring_up(rec: dict, out: Progress, warnings: list[str]) -> dict:
-    if rec["phase"] == "failed":
+    cut_off = rec["phase"] in ("renting", "booting") and bool(rec["rents"] or rec["instance_id"])
+    if cut_off:
+        out.line("The launch was cut off before its upload: destroying its machines (they hold nothing).")
+        lost = drop_unuploaded(rec)
+        for w in lost:
+            out.line(f"Warning: {w}")
+        warnings += lost
+    if cut_off or rec["phase"] == "failed":
         replan(rec, out)
         if rec["phase"] == "pending":
             return result(rec, "approval", warnings, reason=rec["pending"]["reason"])
-    sweep_strays(rec, out)
-    if rec["phase"] == "booting" and (why := wait_boot(rec, out, time.time() + START_TIMEOUT)):
-        discard(rec, why, out)
     if rec["phase"] == "renting":
-        Race(rec, out).run()
+        warnings += Race(rec, out).run()
     if rec["phase"] == "setup":
         resume_machine(rec, out)
     if rec["phase"] in ("booting", "setup"):
         prepare_repo(rec, out)
         warnings += setup_machine(rec, out)
-    sweep_strays(rec, out)  # (a rent Vast did not confirm may have shown up by now)
     machine.write_ssh_config()
     out.line(f"Ready after {out.elapsed()}.")
-    return result(rec, "working", warnings + [stray_warning(s) for s in rec["strays"]])
+    return result(rec, "working", warnings)
 
 
 def resume_machine(rec: dict, out: Progress) -> None:
@@ -525,7 +408,7 @@ def resume_machine(rec: dict, out: Progress) -> None:
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
         rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
-    if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
+    if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
         raise core.CrabError(
             f"{name}'s machine did not come back up ({why}). Try again later: crab-student start {name}"
         )
@@ -568,7 +451,9 @@ class Race:
     START_TIMEOUT after its rent, not answering ssh SSH_TIMEOUT after it runs, or failing is destroyed and the
     next unused offer rented in its place. Each rent's label is saved in `rents` before its request is sent. A
     rent whose outcome is unknown is never sent again: it keeps its place in the race until its machine shows
-    up by that label; if another machine wins first, its label is kept in `strays` for later sweeps."""
+    up by that label. The race is over within this command: a rent still unconfirmed when another machine wins,
+    or when only such rents are left after LABEL_WAIT (the launch fails), becomes a warning to look out for its
+    machine."""
 
     def __init__(self, rec: dict, out: Progress):
         self.rec, self.out = rec, out
@@ -578,7 +463,8 @@ class Race:
         self.looking: dict[str, float] = {}  # label -> when this run began to look for its machine
         self.no_credit: str | None = None
 
-    def run(self) -> None:
+    def run(self) -> list[str]:
+        """The warnings (unconfirmed rents left behind) once a machine is kept."""
         rec = self.rec
         while True:
             self.fill()
@@ -589,18 +475,17 @@ class Race:
             for r in list(rec["rents"]):
                 verdict, inst = self.check(r)
                 if verdict == "ready":
-                    self.win(r, inst)
-                    return
+                    return self.win(r, inst)
                 if verdict:
                     self.drop(r, verdict)
             if self.stuck():
-                raise core.CrabError(rent_unknown(rec))
+                self.give_up()
             self.show()
             time.sleep(POLL)
 
     def stuck(self) -> bool:
-        """Only unconfirmed rents are in flight (fill found nothing more to rent), and none of their machines has
-        shown up for LABEL_WAIT."""
+        """Only unconfirmed rents are in flight (they hold every racing slot, or no offer is left), and none of
+        their machines has shown up for LABEL_WAIT."""
         rents, now = self.rec["rents"], time.monotonic()
         return bool(rents) and all(
             r["instance_id"] is None and now - self.looking[r["label"]] >= LABEL_WAIT for r in rents
@@ -609,11 +494,9 @@ class Race:
     def fill(self) -> None:
         """Rent unused offers until RACERS are in flight (or none is left, or the account has no credit)."""
         rec = self.rec
-        first = not (rec["rents"] or rec["failed_offers"] or rec["strays"])
+        first = not (rec["rents"] or rec["failed_offers"])
         while len(rec["rents"]) < RACERS and not self.no_credit:
-            used = {r["offer_id"] for r in rec["rents"] + rec["strays"]} | {
-                f["id"] for f in rec["failed_offers"]
-            }
+            used = {r["offer_id"] for r in rec["rents"]} | {f["id"] for f in rec["failed_offers"]}
             free = [o for o in rec["offers"] if o["id"] not in used][: RACERS - len(rec["rents"])]
             if not free:
                 return
@@ -631,7 +514,7 @@ class Race:
 
     def rent(self, offer: dict) -> None:
         rec = self.rec
-        r = {"label": f"crab-student-{rec['name']}-{secrets.token_hex(4)}", "offer_id": offer["id"],
+        r = {"label": f"{LABEL_PREFIX}{rec['name']}-{secrets.token_hex(4)}", "offer_id": offer["id"],
              "at": time.time(), "instance_id": None, "running_at": None}  # fmt: skip
         rec["rents"].append(r)
         core.save(rec)  # (the label is saved before the request)
@@ -658,7 +541,7 @@ class Race:
         """("ready", the instance), (a reason to give the machine up, None), or (None, None) to wait."""
         rec, now = self.rec, time.time()
         if r["instance_id"] is None:
-            iid = find_by_label(r["label"], 0)
+            iid = find_by_label(r["label"])
             if iid is None:
                 self.looking.setdefault(r["label"], time.monotonic())
                 self.seen[r["label"]] = ("not confirmed", "")
@@ -715,16 +598,16 @@ class Race:
         core.save(self.rec)
         self.out.line(f"Offer {r['offer_id']} {why}: destroyed it.")
 
-    def win(self, r: dict, inst: dict) -> None:
-        """Keep this machine: destroy the others first (each still recorded until it is gone), then take it."""
-        rec, destroyed = self.rec, []
+    def win(self, r: dict, inst: dict) -> list[str]:
+        """Keep this machine: destroy the others first (each still recorded until it is gone), then take it. The
+        warnings: rents Vast did not confirm whose machine has not shown up."""
+        rec, destroyed, warnings = self.rec, [], []
         for other in [x for x in rec["rents"] if x is not r]:
-            iid = other["instance_id"] or find_by_label(other["label"], 0)
-            if iid:
+            if iid := other["instance_id"] or find_by_label(other["label"]):
                 vast.destroy(iid)
                 destroyed.append(f"offer {other['offer_id']}")
             else:
-                rec["strays"].append({k: other[k] for k in ("label", "offer_id", "at")})
+                warnings.append(unconfirmed(other))
             rec["rents"].remove(other)
             core.save(rec)
         offer = next(o for o in rec["offers"] if o["id"] == r["offer_id"])
@@ -747,6 +630,19 @@ class Race:
         machine.write_ssh_config()
         gone = f": destroyed {' and '.join(destroyed)}" if destroyed else ""
         self.out.line(f"Offer {r['offer_id']} is ready after {self.out.elapsed()}{gone}.")
+        for w in warnings:
+            self.out.line(f"Warning: {w}")
+        return warnings
+
+    def give_up(self) -> None:
+        """Only unconfirmed rents are left and none of their machines has shown up: the launch fails (start plans
+        it afresh)."""
+        rec = self.rec
+        message = rent_unknown(rec)
+        drop_unuploaded(rec)  # (a machine that shows up meanwhile is destroyed)
+        rec.update(phase="failed", error=message)
+        core.save(rec)
+        raise core.CrabError(message)
 
     def fail(self) -> None:
         rec, name = self.rec, self.rec["name"]
@@ -768,67 +664,26 @@ class Race:
 
 
 def rent_unknown(rec: dict) -> str:
-    lost = [r for r in rec["rents"] if r["instance_id"] is None]
-    which = " and ".join(f"offer {r['offer_id']}" for r in lost)
-    labels = " or ".join(r["label"] for r in lost)
+    """Why a race gave up: Vast confirmed none of the rents left, and none of their machines has appeared."""
+    which = " and ".join(f"offer {r['offer_id']}" for r in rec["rents"])
+    labels = " or ".join(r["label"] for r in rec["rents"])
     return (
-        f"Vast did not confirm the rent of {which} and no machine labelled {labels} has appeared. "
-        "crab-student will not rent again by itself, so you do not pay twice. Run crab-student start "
-        f"{rec['name']} in a few minutes to look again, or crab-student delete {rec['name']} to give up (then "
-        f"destroy any machine labelled {labels} at https://cloud.vast.ai/instances/)."
+        f"Vast did not confirm the rent of {which}, and no machine labelled {labels} has appeared. Try again: "
+        f"crab-student start {rec['name']} (if a machine labelled {labels} shows up later, crab-student list "
+        "points it out: destroy it at https://cloud.vast.ai/instances/)."
     )
 
 
-def stray_warning(stray: dict) -> str:
+def unconfirmed(rent: dict) -> str:
+    """The warning about a rent Vast did not confirm whose machine has not shown up."""
     return (
-        f"Vast did not confirm the rent of offer {stray['offer_id']}, and no machine labelled {stray['label']} "
-        "has shown up. If one does, crab-student destroys it (list, status, start and delete look for it); "
-        "https://cloud.vast.ai/instances/ shows your machines."
+        f"Vast did not confirm the rent of offer {rent['offer_id']}; if a machine labelled {rent['label']} shows "
+        "up, crab-student list points it out (destroy it at https://cloud.vast.ai/instances/)."
     )
 
 
-def find_by_label(label: str, wait: float) -> int | None:
-    deadline = time.monotonic() + wait
-    while True:
-        found = [i["id"] for i in vast.instances() if i.get("label") == label]
-        if found:
-            return found[0]
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(min(10.0, max(POLL, 0.01)))
-
-
-def sweep_strays(rec: dict, out: Progress | None = None, insts: list[dict] | None = None) -> None:
-    """Destroy the machines of unconfirmed rents that showed up after another machine won (none of them was ever
-    uploaded to). Under the agent's lock; `insts` is Vast's instance list when the caller has it."""
-    if not rec.get("strays"):
-        return
-    ids = {i.get("label"): i["id"] for i in (vast.instances() if insts is None else insts)}
-    for stray in list(rec["strays"]):
-        if iid := ids.get(stray["label"]):
-            vast.destroy(iid)
-            rec["strays"].remove(stray)
-            core.save(rec)
-            if out:
-                out.line(
-                    f"Destroyed instance {iid}: the rent of offer {stray['offer_id']} went through late."
-                )
-
-
-def spare_machines(rec: dict) -> tuple[list[int], list[str]]:
-    """The machines rented for the launch that never received anything (racing, or unconfirmed rents), by id or
-    found by label; and the labels of rents whose machine was not found."""
-    rents = rec.get("rents", []) + rec.get("strays", [])
-    by_label = {}
-    if any(not r.get("instance_id") for r in rents):
-        by_label = {i.get("label"): i["id"] for i in vast.instances()}
-    ids, missing = [], []
-    for r in rents:
-        if iid := r.get("instance_id") or by_label.get(r["label"]):
-            ids.append(iid)
-        else:
-            missing.append(r["label"])
-    return ids, missing
+def find_by_label(label: str) -> int | None:
+    return next((i["id"] for i in vast.instances() if i.get("label") == label), None)
 
 
 def rent_body(rec: dict, offer: dict, label: str) -> dict:
@@ -845,10 +700,10 @@ def rent_body(rec: dict, offer: dict, label: str) -> dict:
     }
 
 
-def wait_boot(rec: dict, out: Progress, deadline: float, restarting: bool = False) -> str | None:
-    """Wait until the agent's machine runs and answers ssh: None, else why not. A machine being started again
-    reads "exited" until its host has room, so only a new one fails on that (or on a boot error)."""
-    key_added, errors, began = False, 0, time.time()
+def wait_boot(rec: dict, out: Progress, deadline: float) -> str | None:
+    """Wait until the agent's machine, started again, runs and answers ssh: None, else why not. It reads "exited"
+    until its host has room, so only the deadline gives up on it."""
+    key_added, began = False, time.time()
     while True:
         inst = vast.instance(rec["instance_id"])
         if inst is None:
@@ -868,42 +723,28 @@ def wait_boot(rec: dict, out: Progress, deadline: float, restarting: bool = Fals
             if machine.reachable(rec["name"]):
                 out.line(f"Booted: ssh answers ({out.elapsed()})")
                 return None
-        elif not restarting:
-            if actual in ("exited", "offline"):
-                return f"status {actual}: {msg}"
-            errors = errors + 1 if re.search(r"\b(error|failed)\b", msg, re.I) else 0
-            if errors >= 2:
-                return msg
         if time.time() > deadline:
             last = f"{actual}{': ' + msg if msg else ''}"
             return f"not up after {_minutes(deadline - began)} (last status: {last})"
         time.sleep(POLL)
 
 
-def discard(rec: dict, why: str, out: Progress) -> None:
-    """Give up on the kept machine before its upload (it never received anything): destroy it, race again."""
-    assert not rec["uploaded"]
-    out.line(f"Offer {rec['rent']['offer_id']} is not up ({why}): destroyed it, renting again.")
-    vast.destroy(rec["instance_id"])
-    rec["failed_offers"].append({"id": rec["rent"]["offer_id"], "reason": why})
-    rec.update(instance_id=None, ssh=None, rent=None, phase="renting")
-    core.save(rec)
-    machine.write_ssh_config()
-
-
-def drop_unuploaded(rec: dict) -> None:
-    """Destroy the launch's machines that never received anything: those racing (an unconfirmed rent's label goes
-    to `strays`), and the kept machine before its upload."""
+def drop_unuploaded(rec: dict) -> list[str]:
+    """Destroy the launch's machines that never received anything: those racing (found by label when Vast did
+    not confirm the rent) and the kept machine before its upload. The warnings: rents whose machine was not
+    found."""
+    warnings = []
     for r in rec["rents"]:
-        if iid := r["instance_id"] or find_by_label(r["label"], 0):
+        if iid := r["instance_id"] or find_by_label(r["label"]):
             vast.destroy(iid)
         else:
-            rec["strays"].append({k: r[k] for k in ("label", "offer_id", "at")})
+            warnings.append(unconfirmed(r))
     rec["rents"] = []
     if rec["instance_id"] and not rec["uploaded"]:
         vast.destroy(rec["instance_id"])
         rec.update(instance_id=None, ssh=None)
     core.save(rec)
+    return warnings
 
 
 def prepare_repo(rec: dict, out: Progress) -> None:
@@ -920,13 +761,14 @@ def prepare_repo(rec: dict, out: Progress) -> None:
             github.claim_deploy_key(rec)
         github.create_branch(repo, github.key_file(repo["deploy_key"]))
     except core.CrabError as e:
-        drop_unuploaded(rec)
+        warnings = drop_unuploaded(rec)
         rec.update(phase="failed", error=e.message)
         core.save(rec)
-        raise core.CrabError(
+        message = (
             f"{e.message} (the machines rented for it were destroyed: they held nothing). Fix that, then: "
             f"crab-student start {name}"
-        ) from None
+        )
+        raise core.CrabError(" ".join([message, *warnings])) from None
     repo["branch_created"] = True
     core.save(rec)
     out.line(f"GitHub: {repo['branch']} created on {repo['slug']}")
@@ -1011,41 +853,8 @@ def setup_machine(rec: dict, out: Progress) -> list[str]:
 
 
 def approve(name: str, out: Progress) -> dict:
-    return approve_all([name], out)
-
-
-def approve_all(names: list[str], out: Progress) -> dict:
-    """Launch agents waiting for approval, each with fresh offers (a different machine each, and racers of their
-    own, as in launch_batch) up to the price the user approved; one whose price rose meanwhile waits again."""
-    names, taken, results, plans = list(dict.fromkeys(names)), set(), {}, {}
-    for name in names:
-        try:
-            got = _approve_plan(name, taken)
-        except core.CrabError as e:
-            if len(names) == 1:
-                raise
-            got = failed(name, e)
-        if isinstance(got, offers.Plan):
-            plans[name] = got
-        else:
-            results[name] = got
-    for name, kept in zip(plans, reserve_racers(list(plans.values())), strict=True):
-        with core.locked(name):
-            rec = core.load(name)
-            rec["offers"] = kept
-            core.save(rec)
-    show_launches(list(plans), out)
-    if len(names) == 1:
-        name = names[0]
-        return results[name] if results else bring_up(name, out, core.load(name).get("warnings", []))
-    jobs = [(n, lambda o, n=n: bring_up(n, o, core.load(n).get("warnings", []))) for n in plans]
-    results.update({r["name"]: r for r in side_by_side(jobs, out)})
-    return batch_result([results[n] for n in names])
-
-
-def _approve_plan(name: str, taken: set) -> dict | offers.Plan:
-    """Plan an approved launch again (fresh offers, none in `taken`): the plan when it may go, else the result
-    saying it waits for approval again."""
+    """Launch an agent waiting for approval, with fresh offers up to the price the user approved; one whose price
+    rose meanwhile waits again."""
     with core.locked(name):
         rec = core.load(name)
         pending = rec.get("pending")
@@ -1054,15 +863,12 @@ def _approve_plan(name: str, taken: set) -> dict | offers.Plan:
         repo = rec["repo"]
         if not repo["workspace"] and not repo["branch_created"]:  # (a new launch: are the checks still true?)
             github.check_repo(repo["slug"], repo["branch"])
-        plan = offers.plan(
-            offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], taken, mode=rec["mode"]
-        )
+        plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], mode=rec["mode"])
         if plan.over_cap:  # (prices went up while it waited: ask again)
             reason = approval_reason(plan, pending["max_dph"])
             rec["pending"] = {"reason": reason, "max_dph": plan.top_price()}
             core.save(rec)
             return result(rec, "approval", rec.get("warnings", []), reason=reason)
-        taken.add(plan.primary["id"])
         rec.update(
             offers=[offers.kept(o) for o in plan.offers()],
             failed_offers=[],
@@ -1072,7 +878,8 @@ def _approve_plan(name: str, taken: set) -> dict | offers.Plan:
             max_dph=pending["max_dph"],
         )
         core.save(rec)
-    return plan
+    show_launch(name, out)
+    return bring_up(name, out, rec.get("warnings", []))
 
 
 def decline(name: str) -> str:
@@ -1089,7 +896,7 @@ def start(name: str, out: Progress) -> dict:
     if rec["phase"] == "pending":
         raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
     if rec["phase"] != "ready":
-        show_launches([name], out)
+        show_launch(name, out)
         return bring_up(name, out)
     with core.locked(name):
         out.attach(name)
@@ -1107,7 +914,7 @@ def start(name: str, out: Progress) -> dict:
         rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
         out.line(f"Starting {name}...")
-        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT, restarting=True):
+        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
             raise core.CrabError(
                 f"{name} did not come back up ({why}). Vast keeps trying: check again with "
                 f"crab-student status {name}, or stop it with crab-student stop {name}."

@@ -5,11 +5,12 @@ the code does it is in the modules named here.
 
 ## 1. Safety invariants
 
-1. **Money.** A launch rents without asking only a machine that costs `approve_above_usd_per_hour` or
-   less; otherwise it records `pending` and exits 3. Only `approve`, an ask-rule command, launches it,
-   at up to the price it showed. A failed launch tried again with `start` is planned again up to the
-   record's `max_dph` or the current setting, whichever is higher. Starting a stopped agent has no
-   gate. No time limit, no cost estimate: the approval, the idle stop and the dead-man switch bound the
+1. **Money.** The launcher picks the offers but is never told the price; the CLI checks it. A launch
+   rents without asking only when its pick costs `approve_above_usd_per_hour` or less, and then rents
+   no backup that costs more; otherwise it records `pending` and exits 3. Only `approve`, an ask-rule
+   command, launches it, at up to the highest price among its offers. A failed launch tried again with
+   `start` is checked again against the record's `max_dph` or the current setting, whichever is
+   higher. Starting a stopped agent has no gate. No time limit, no cost estimate: the approval, the idle stop and the dead-man switch bound the
    bill.
 2. **Never rent twice.** A rent request is never retried. Its label is saved in `rents` before the
    request; an unknown outcome (timeout, connection error, 5xx) is resolved only by finding that exact
@@ -78,11 +79,12 @@ One JSON file per agent, written only by the command holding the agent's lock. `
 | `ready` | the launch finished; whether the machine runs comes from Vast |
 | `failed` | `error` says why; it holds no machine |
 
-Other fields: `req` (hours, gpus, gpu_ram_gb, gpu_models, cpus, ram_gb, disk_gb, min_down_mbps);
+Other fields: `disk_gb`;
 `mode` (follows the machine after a hand-off); `claude_settings`; `max_dph` (the most it may rent at
 without asking again); `fake_claude`; `setup` (a command, `none`, or null to detect); `secrets` (names);
 `session_id`; `repo` (slug, workspace, branch, start_sha, local_dir, carried, untracked, deploy_key
-`{id, file, created}`, branch_created, dir on the machine); `offers` (the pick and up to four backups);
+`{id, file, created}`, branch_created, dir on the machine); `offers` (the launcher's pick and up to four
+backups, in order: id, machine_id, dph_total, storage_cost, summary, short);
 `failed_offers`; `rents` (while racing: `{label, offer_id, at, instance_id (null while unconfirmed),
 running_at}`); `rent`, `instance_id`, `dph`, `disk_usd_day`, `machine`, `short`, `ssh`; `uploaded`;
 `pending` (`{reason, max_dph}`); `warnings`; `last_start` (last rented or started, or seen running again
@@ -95,10 +97,10 @@ rent label `crab-student-<name>-<8 hex>` (new per rent request); deploy key titl
 
 ## 4. The launch (`launch.py`)
 
-1. **Plan** (writes nothing): name, brief, secrets, mode and Claude's settings (4.4), repo (4.1),
-   offers (4.3). `--dry-run` stops here.
-2. **Record**, under the agent's lock: `pending` (exit 3) when no machine that fits is within the
-   price, else `renting`.
+1. **Plan** (writes nothing): name, brief, secrets, mode and Claude's settings (4.4), repo (4.1), the
+   offers given with `--offers` (4.3). `--dry-run` stops here.
+2. **Record**, under the agent's lock: `pending` (exit 3) when the pick costs more than the price, else
+   `renting` (backups over the price dropped).
 3. **The race** (`Race`): two offers are rented at once and the first machine running and answering ssh
    is kept (`booting`), the others destroyed first; a machine that fails or does not start in time is
    destroyed and the next offer rented in its place. An unconfirmed rent keeps its slot while it is
@@ -109,8 +111,11 @@ rent label `crab-student-<name>-<8 hex>` (new per rent request); deploy key titl
    the machine and fails the launch (exit 5); a lost connection leaves `setup`.
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
    and setup, which resumes; `renting`/`booting` with machines destroys them (nothing was uploaded) and
-   plans afresh; `failed` plans afresh. Planning afresh has the same price check (1.1).
-   `approve` plans again up to the price it showed (higher prices: it waits again), then races.
+   tries again; `failed` tries again. Trying again takes the record's offers that have not failed, or
+   those given with `start NAME --offers IDS`, looks them up again, and has the same price check (1.1);
+   none left: exit 4, the error naming `start NAME --offers`. `--offers` on a launch that has its machine
+   (set up, or cut off during setup): exit 2. `approve` looks the record's offers up again and races
+   those at or under the price it showed; all pricier by now: it waits again; none left: exit 4.
 6. **Progress**: plain lines on stderr, also in `agents/<name>.log` (a failure as `Launch failed: ...`).
    Once the record exists and the launch goes ahead, a window runs `crab-student open NAME` (5.4) unless
    `open_window` is `off`: a tab in the Windows Terminal window named crab-student (`wt -w crab-student
@@ -131,13 +136,20 @@ share one: a new agent takes the key another agent on the repo holds, else a new
 read-write. It is removed from GitHub and `keys/` when the last agent holding it is deleted. Taking and
 releasing happen under the repo's key lock, with the record saved inside it.
 
-**4.3 Offers** (`offers.py`). Defaults: 0 GPUs, 8 cores, 16 GB RAM, `disk_gb`, `min_download_mbps`,
-`min_reliability`. `fits` checks every offer again, with GPU models, `regions`, the host's lease (at
-least `max(2 x hours, 24) + 1` hours left) and `BLOCKED` (countries where Anthropic's API is
-unavailable). `rank` drops GPU offers clearly worse in speed per dollar; among similar prices it prefers,
-for an interactive agent, hosts near `home`, then reliability and download speed. `fallbacks`: up to
-four backups on other machines. All come from the offers within the price when any fits, else from all
-(the launch waits for approval; backups then cost at most 1.25x the pick).
+**4.3 Offers** (`offers.py`). The launcher picks the machine (`data/launch.md` section 5, which
+`guide launch` fills with the `home` country); the CLI only applies rules. Every offer, browsed or
+named by a launch, passes `fixed`: rentable, verified, not external, reliability at least
+`min_reliability`, a direct port, download at least `min_download_mbps`, room for the disk asked for, a
+driver for the image's CUDA (`cuda_max_good`, CPU tasks too), not a mining card (GPU name `CMP...`),
+not `BLOCKED` (countries where Anthropic's API is unavailable), the `regions` setting, and a lease of at
+least `max(2 x hours, 24) + 1` hours. `crab-student offers` browses with filters (GPU count or range,
+GPU memory, models, compute capability range, vCPUs, RAM, disk, down and up speed, max price, region,
+hours; `--sort`, `--limit`, `--kinds` to group by kind of GPU, or by CPU model for a CPU task); prices
+include the disk (`allocated_storage`). A task with no GPU (`--gpus 0`) gets machines with at least
+`CPU_TASK_CPUS` (24) vCPUs and `CPU_TASK_RAM_GB` (64 GB). No offer fits: exit 4. `launch NAME --offers
+A,B,C`: 1 to `MAX_OFFERS` (5) different ids, the pick first (else exit 2), looked up again by id
+(`named`); one gone or failing `fixed` is skipped with a line, two on one machine are refused (exit 2),
+none left: exit 4 and no record.
 
 **4.4 Mode, Claude's settings and the result.** The mode is `--mode`, else the `mode` setting. Each of
 `model`, `effortLevel`, `fastMode` is the flag, else the setting, else the user's

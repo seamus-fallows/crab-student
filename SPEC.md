@@ -10,8 +10,8 @@ the code does it is in the modules named here.
    no backup that costs more; otherwise it records `pending` and exits 3. Only `approve`, an ask-rule
    command, launches it, at up to the highest price among its offers. A failed launch tried again with
    `start` is checked again against the record's `max_dph` or the current setting, whichever is
-   higher. Starting a stopped agent has no gate. No time limit, no cost estimate: the approval, the idle stop and the dead-man switch bound the
-   bill.
+   higher. Starting a stopped agent has no gate. No time limit, no cost estimate: the approval, the
+   idle stop and the dead-man switch bound the bill.
 2. **Never rent twice.** A rent request is never retried. Its label is saved in `rents` before the
    request; an unknown outcome (timeout, connection error, 5xx) is resolved only by finding that exact
    label. The race (4) has at most two rents in flight, both within the price, and destroys every

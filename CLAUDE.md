@@ -43,10 +43,10 @@ service: each command runs and exits.
 | `offers.py` | The offer search: the fixed rules every offer passes (`fixed`: reliability, the CUDA driver, no mining cards, the lease, the countries where Claude is unavailable `BLOCKED`, `regions`), the filters `offers` browses with (`Filters`, `fits`; a CPU task's floor), and looking up the offers a launch names (`named`). Which machine to rent is the launcher's choice, not code |
 | `github.py` | `gh` and git: the user's repo, the snapshot commit, the deploy key a repo's agents share, branches, files read from a branch (the report, the stop note), `pull` |
 | `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (the Claude panel pre-filled for an interactive agent 15 s after VS Code opens; polling for its hand-off), the window that follows a launch, the local VS Code's commit for the machine |
-| `launch.py` | `launch` (the offers given, `available`, and the price check, `priced`), `bring_up` (the race of two machines, repo, upload, setup; a launch cut off is resumed or planned afresh), the progress lines and the launch log, `approve`, `decline`, `start` |
+| `launch.py` | `launch` (the offers given, `available`, and the price check, `priced`), `bring_up` (the race of two machines, repo, upload, setup; a launch cut off is resumed or tried again), the progress lines and the launch log, `approve`, `decline`, `start` |
 | `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off, orphan machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note on a stopped one's branch), `send`, `report`, `open` (following a launch; an interactive agent: VS Code, then its terminal after the hand-off) |
 | `setup.py` | `init`, the skill and permission rules in `~/.claude` (`ALLOW`, `ASK`, `DENY`), `check_ready`, `guide` |
-| `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
+| `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the user's `home` country) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
 library, runs as root): `cs.py` (setup, including the dependency install and VS Code's server for an
@@ -83,8 +83,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
 ## Conventions
 
 - Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no
-  machine fits, 5 setup failed. Raise `core.CrabError(message, code)`; the message says what happened
-  and what to do, with the exact command.
+  machine fits or the offers named can no longer be rented, 5 setup failed. Raise
+  `core.CrabError(message, code)`; the message says what happened and what to do, with the exact
+  command.
 - Terminal output is ASCII. `--json` prints exactly one JSON value on stdout; progress goes to stderr;
   errors go to stderr as `error: ...`.
 - Style: short functions, type hints, docstrings only where the name does not say it all, comments

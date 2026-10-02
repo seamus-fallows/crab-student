@@ -83,14 +83,15 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
 
 
 def orphans(insts: list[dict], recs: list[dict]) -> list[dict]:
-    """The instances labelled as rented by crab-student that are no agent's (its machine, or one of its rents):
-    most likely a rent Vast did not confirm that went through after all. Never destroyed from here."""
+    """The instances labelled as rented by crab-student on this computer that are no agent's (its machine, or one
+    of its rents): most likely a rent Vast did not confirm that went through after all. Teammates' machines on a
+    shared Vast account carry another install id, so they never show. Never destroyed from here."""
     labels = {r["label"] for rec in recs for r in [rec.get("rent"), *(rec.get("rents") or [])] if r}
     ids = {rec.get("instance_id") for rec in recs}
     return [
         i
         for i in insts
-        if str(i.get("label") or "").startswith(launch.LABEL_PREFIX)
+        if str(i.get("label") or "").startswith(launch.own_label_prefix())
         and i.get("label") not in labels
         and i["id"] not in ids
     ]

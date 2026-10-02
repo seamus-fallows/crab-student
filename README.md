@@ -284,7 +284,10 @@ branch stays on GitHub.
   deliberate and bounded: at most two are in flight, both within the price you allow, and the one not
   kept is destroyed before anything is uploaded to it. If Vast never confirms a rent, the launch says
   so (with a warning, or by failing when nothing else came up), and if that machine shows up later,
-  `crab-student list` points it out for you to destroy on Vast's website.
+  `crab-student list` points it out for you to destroy on Vast's website. Teammates who share your Vast
+  account and use crab-student are safe: every machine's label carries an id of the computer that
+  rented it, so `list` never points out theirs, and nothing acts on a machine that is not in your
+  records.
 - **Nothing is destroyed automatically** once an agent has run on it: crab-student destroys a machine
   by itself only before anything was uploaded to it (it lost its launch's race, failed to start, or its
   launch was cut off and is being started again) or when its setup failed.

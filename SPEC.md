@@ -17,8 +17,8 @@ the code does it is in the modules named here.
    label. The race (4) has at most two rents in flight, both within the price, and destroys every
    machine but the one kept before anything is uploaded to it.
 3. **Own machines only.** Act only on instance ids in the records, or on an instance with the exact
-   label of a record's rent. `list` points out other instances labelled `crab-student-...`, never
-   touching them.
+   label of a record's rent. `list` points out other instances labelled with this computer's install
+   id, never touching them; a teammate's machines on a shared Vast account carry another id.
 4. **Never destroy work.** Code destroys a machine by itself only before its upload (`uploaded` false)
    or right after its setup failed. `start` on a stopped agent never destroys. `delete` checks for
    unsaved work first (5.3).
@@ -45,6 +45,7 @@ the code does it is in the modules named here.
 ```
 ~/.crab-student/
   config.json            settings that differ from the defaults (README lists them)
+  install_id             6 hex digits, made once: this computer's part of every rent label
   secrets.json           {"names": [...]}: names of stored task secrets
   secrets/<key>          0600, only when no system keyring works
   agents/<name>.json     the record (3); agents/<name>.lock its OS lock
@@ -92,7 +93,7 @@ after a stop); `stopped_since`; `last_seen` (the last machine status, for displa
 `idle_minutes`, `notify_url` (copied at launch).
 
 Names: 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
-rent label `crab-student-<name>-<8 hex>` (new per rent request); deploy key title
+rent label `crab-student-<install id>-<name>-<8 hex>` (new per rent request); deploy key title
 `crab-student <created>`; tmux session `agent` on the machine.
 
 ## 4. The launch (`launch.py`)
@@ -172,8 +173,8 @@ NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 failed; unknown (Vast or ssh did not answer); stopped (why, how long ago, the disk's cost per day);
 needs you; done; working; interactive (Claude in VS Code: active, or idle for how long). A `status`
 reporting another mode (after a hand-off) updates the record; a stopped machine seen running again moves
-`last_start`. `list` warns on stderr about orphans: instances labelled `crab-student-...` that are no
-record's machine or rent.
+`last_start`. `list` warns on stderr about orphans: instances labelled `crab-student-<install id>-...`
+that are no record's machine or rent.
 
 **5.2 stop** (a machine that received its files): `cs.py save --reason user --final` if it runs (best
 effort), then Vast `stopped`. **start** (stopped): Vast `running`, `last_start` set, a wait for ssh that

@@ -334,14 +334,19 @@ def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_
 
 
 def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):
-    kept = fake_vast.add_instance(1, "crab-student-job1-aaaa0000")
-    fake_vast.add_instance(1, "crab-student-job2-bbbb0000")  # (a rent of a launch at work)
-    orphan = fake_vast.add_instance(1, "crab-student-job3-cccc0000")
+    core.home().mkdir(parents=True, exist_ok=True)
+    (core.home() / "install_id").write_text("abc123")  # (this computer's id in its rents' labels)
+    kept = fake_vast.add_instance(1, "crab-student-abc123-job1-aaaa0000")
+    fake_vast.add_instance(1, "crab-student-abc123-job2-bbbb0000")  # (a rent of a launch at work)
+    orphan = fake_vast.add_instance(1, "crab-student-abc123-job3-cccc0000")
+    fake_vast.add_instance(1, "crab-student-def456-job3-cccc0000")  # (a teammate's, on a shared Vast account)
     fake_vast.add_instance(1, "my-own-machine")  # (not rented by crab-student)
-    core.save(record(instance_id=kept, rent=rent("crab-student-job1-aaaa0000", kept)))
-    core.save(record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-job2-bbbb0000")]))
+    core.save(record(instance_id=kept, rent=rent("crab-student-abc123-job1-aaaa0000", kept)))
+    core.save(
+        record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-abc123-job2-bbbb0000")])
+    )
     found = agents.orphans(list(fake_vast.instances.values()), core.all_records())
-    assert [i["id"] for i in found] == [orphan] and len(fake_vast.instances) == 4  # (nothing destroyed)
+    assert [i["id"] for i in found] == [orphan] and len(fake_vast.instances) == 5  # (nothing destroyed)
 
 
 # ---- delete a stopped agent: from its stop note, without starting it ----------------------------

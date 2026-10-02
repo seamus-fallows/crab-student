@@ -296,9 +296,10 @@ def test_list_without_agents_and_as_json(monkeypatch, capsys):
 
 
 def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast, machines, capsys):
-    core.save(record(instance_id=fake_vast.add_instance(1, "crab-student-job1-aaaa0000"), rents=[],
-                     rent={"label": "crab-student-job1-aaaa0000"}, ssh=None, last_seen=None))  # fmt: skip
-    orphan = fake_vast.add_instance(1, "crab-student-job2-bbbb0000")  # (a rent Vast did not confirm)
+    ours = launch.own_label_prefix()
+    core.save(record(instance_id=fake_vast.add_instance(1, f"{ours}job1-aaaa0000"), rents=[],
+                     rent={"label": f"{ours}job1-aaaa0000"}, ssh=None, last_seen=None))  # fmt: skip
+    orphan = fake_vast.add_instance(1, f"{ours}job2-bbbb0000")  # (a rent Vast did not confirm)
     for argv in (["list"], ["list", "--json"]):
         rc, out, err = run(capsys, *argv)
         warned = [line for line in err.splitlines() if line.startswith("warning:")]

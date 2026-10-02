@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fake_vast import offer
+from fake_vast import cpu_offer, offer
 
 from crab_student import __version__, agents, cli, core, github, launch, machine, setup
 
@@ -37,7 +37,7 @@ def record(name: str = "job1", **fields) -> dict:
     return {"name": name, "created": core.now_iso(), "phase": "ready", "pending": None, "instance_id": 5001,
             "repo": {"slug": "ada/proj", "branch": f"agent/{name}", "workspace": False, "dir": "/root/work/proj"},
             "offers": [], "dph": 0.42, "short": "1x RTX 4090 (Quebec, CA)", "mode": "colleague",
-            "claude_settings": {}, "idle_minutes": 60, "req": {"hours": None}, **fields}  # fmt: skip
+            "claude_settings": {}, "idle_minutes": 60, "disk_gb": 64, **fields}  # fmt: skip
 
 
 def result(state: str = "working", code: int = 0) -> dict:
@@ -102,10 +102,13 @@ def test_failures_go_to_stderr_with_their_exit_code(exc, code, monkeypatch, caps
 
 @pytest.mark.parametrize(
     "argv",
-    ["", "launch", "frobnicate", "extend job1 2", "open", "open job1 --all", "launch job1 --hours 0",
-     "launch job1 --hours 1 --repo . --no-repo", "launch job1 --hours nan", "offers --hours inf",
-     "offers --count 0", "launch job1 --hours 1 --brief-file no-such-brief.md", "launch job1 --mode solo",
-     "launch job1 --effort max", "launch job1 --fast on", "launch --hours 1", "approve", "approve job1 job2"],
+    ["", "launch", "frobnicate", "extend job1 2", "open", "open job1 --all", "launch job1",
+     "launch job1 --offers 1 --repo . --no-repo", "launch job1 --offers x", "launch job1 --offers 1,,2",
+     "launch job1 --offers 0", "launch job1 --offers 1 --disk nan", "launch job1 --offers 1 --hours 3",
+     "offers --hours inf", "offers --hours 0", "offers --gpus 4-2", "offers --gpus two", "offers --ram -1",
+     "offers --limit 0", "offers --sort fastest", "launch job1 --offers 1 --brief-file no-such-brief.md",
+     "launch job1 --offers 1 --mode solo", "launch job1 --offers 1 --effort max", "launch job1 --offers 1 --fast on",
+     "launch --offers 1", "start job1 --offers 1,a", "approve", "approve job1 job2"],
 )  # fmt: skip
 def test_usage_mistakes_exit_2(argv, launched, capsys):
     assert exit_code(argv.split()) == 2 and not launched
@@ -123,7 +126,7 @@ def test_launch_json_is_one_value_with_progress_on_stderr(monkeypatch, capsys):
 
     monkeypatch.setattr(launch, "launch", fake_launch)
     monkeypatch.setattr("sys.stdin", io.StringIO("# Task\n"))
-    rc, out, err = run(capsys, "launch", "job1", "--hours", "1", "--json")
+    rc, out, err = run(capsys, "launch", "job1", "--offers", "1", "--json")
     assert rc == 0 and len(out.splitlines()) == 1 and json.loads(out)["result_line"]
     assert "Planning job1" in err and "Booting" in err and out.isascii() and err.isascii()
 
@@ -164,7 +167,7 @@ def test_pull_and_a_message_on_stdin(patched, monkeypatch, capsys):
 
 def test_a_launch_that_needs_approval_exits_3(launched, monkeypatch, capsys):
     monkeypatch.setattr(launch, "launch", lambda a, out: result("approval", 3))
-    rc, out, _ = run(capsys, "launch", "job1", "--hours", "1", "--json")
+    rc, out, _ = run(capsys, "launch", "job1", "--offers", "1", "--json")
     assert rc == 3 and json.loads(out)["needs_approval"]
 
 
@@ -217,13 +220,13 @@ def test_secrets_are_stored_listed_and_deleted_without_showing_values(monkeypatc
 
 
 def test_launch_takes_the_brief_from_stdin_or_a_file(launched, monkeypatch, tmp_path, capsys):
-    assert cli.main(["launch", "job1", "--hours", "2"]) == 0
+    assert cli.main(["launch", "job1", "--offers", "1"]) == 0
     brief = tmp_path / "brief.md"
     brief.write_text("# Task\nFrom a file, café.\n", encoding="utf-8")
-    assert cli.main(["launch", "job2", "--hours", "2", "--brief-file", str(brief)]) == 0
+    assert cli.main(["launch", "job2", "--offers", "1", "--brief-file", str(brief)]) == 0
     # Windows decodes a pipe with its ANSI code page unless told otherwise; Git Bash sends UTF-8.
     monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO("Café ✓\n".encode()), encoding="cp1252"))
-    assert cli.main(["launch", "job3", "--hours", "2"]) == 0
+    assert cli.main(["launch", "job3", "--offers", "1"]) == 0
     briefs = [a.brief for a in launched]
     assert briefs == ["# Task\nDo the thing.\n", "# Task\nFrom a file, café.\n", "Café ✓\n"]
 
@@ -232,41 +235,34 @@ def test_launch_refuses_a_missing_brief(ready, monkeypatch, capsys):
     core.write_private(core.vast_key_file(), "key\n")
     for stdin in (SimpleNamespace(isatty=lambda: True), io.StringIO(""), io.StringIO(" \n")):
         monkeypatch.setattr("sys.stdin", stdin)
-        rc, _, err = run(capsys, "launch", "job1", "--hours", "1")
+        rc, _, err = run(capsys, "launch", "job1", "--offers", "1")
         assert rc == 2 and err.startswith("error:")
     assert not core.record_path("job1").exists()
 
 
-@pytest.mark.parametrize(
-    "flags, gpus", [("", 0), ("--gpu-ram 24", 1), ("--gpu-models 4090,A100", 1), ("--gpus 2 --gpu-ram 40", 2)]
-)
-def test_asking_for_gpu_memory_or_models_means_a_gpu(flags, gpus, launched, capsys):
-    assert cli.main(["launch", "job1", "--hours", "3", *flags.split()]) == 0
-    assert launched[0].req.gpus == gpus
-
-
 def test_launch_passes_its_options_on(launched, tmp_path, capsys):
     core.set_config("disk_gb", "80")
-    argv = ("launch job1 --hours 3 --gpu-ram 24 --secret HF_TOKEN --secret WANDB_KEY --model sonnet --mode autonomous "
+    argv = ("launch job1 --offers 31,7,12 --secret HF_TOKEN --secret WANDB_KEY --model sonnet --mode autonomous "
             "--effort xhigh --fast")  # fmt: skip
     assert cli.main([*argv.split(), "--repo", str(tmp_path), "--dry-run", "--fake-claude"]) == 0
     a = launched[0]
-    assert (a.name, a.req.hours, a.req.gpu_ram_gb, a.req.disk_gb) == ("job1", 3, 24, 80)
+    assert (a.name, a.offer_ids, a.disk_gb) == ("job1", [31, 7, 12], 80)  # (the pick first; the disk setting)
+    assert cli.main(["launch", "job4", "--offers", "5", "--disk", "120"]) == 0 and launched[1].disk_gb == 120
     assert a.secrets == ["HF_TOKEN", "WANDB_KEY"] and a.repo_path == tmp_path.resolve() and not a.no_repo
     assert (a.model, a.mode, a.effort, a.fast, a.dry_run, a.fake_claude) == (
         "sonnet", "autonomous", "xhigh", True, True, True)  # fmt: skip
     assert (
-        cli.main(["launch", "job2", "--setup", "uv sync --extra gpu"]) == 0
-        and launched[1].setup == "uv sync --extra gpu"
+        cli.main(["launch", "job2", "--offers", "1", "--setup", "uv sync --extra gpu"]) == 0
+        and launched[2].setup == "uv sync --extra gpu"
     )
-    assert cli.main(["launch", "job3", "--setup", " "]) == 2
+    assert cli.main(["launch", "job3", "--offers", "1", "--setup", " "]) == 2
 
 
-def test_launch_without_options_leaves_hours_and_the_agent_settings_open(launched, capsys):
-    assert cli.main(["launch", "job1"]) == 0 and cli.main(["launch", "job2", "--no-fast"]) == 0
+def test_launch_without_options_leaves_the_agent_settings_open(launched, capsys):
+    assert cli.main(["launch", "job1", "--offers", "1"]) == 0
+    assert cli.main(["launch", "job2", "--offers", "1", "--no-fast"]) == 0
     a, b = launched
-    assert (a.req.hours, a.req.cpus, a.mode, a.model, a.effort, a.fast, a.setup) == (None, 8, None, None, None, None,
-                                                                                    None)  # fmt: skip
+    assert (a.mode, a.model, a.effort, a.fast, a.setup, a.disk_gb) == (None, None, None, None, None, 64)
     assert b.fast is False
 
 
@@ -439,17 +435,42 @@ def test_guide_launch_prints_the_guide(capsys):
     assert run(capsys, "guide", "other")[0] == 2
 
 
-def test_offers_shows_the_pick_and_rents_nothing(fake_vast, capsys):
-    fake_vast.offers = [offer(1, dph_total=0.30), offer(2, dph_total=0.33), offer(3, dph_total=0.90)]
-    data = json.loads(run(capsys, "offers", "--gpus", "1", "--json")[1])
-    assert data["pick"] == data["offers"][0]["id"] == 1 and len(data["offers"]) == 3
-    rc, out, _ = run(capsys, "offers", "--gpus", "1")
-    assert rc == 0 and len([line for line in out.splitlines() if "RTX 4090" in line]) == 3
+def test_offers_lists_what_fits_cheapest_first_and_rents_nothing(fake_vast, capsys):
+    fake_vast.offers = [
+        offer(1, dph_total=0.90),
+        offer(2, dph_total=0.30),
+        offer(3, dph_total=0.33, num_gpus=2),
+    ]
+    data = json.loads(run(capsys, "offers", "--gpus", "1-2", "--json")[1])
+    assert [o["id"] for o in data["offers"]] == [2, 3, 1] and data["count"] == 3
+    assert data["offers"][0].keys() >= {"usd_per_hour", "gpus", "vcpus", "host_vcpus", "down_usd_per_tb"}
+    data = json.loads(run(capsys, "offers", "--gpus", "1", "--limit", "1", "--json")[1])
+    assert [o["id"] for o in data["offers"]] == [2] and data["count"] == 2
+    rc, out, _ = run(capsys, "offers", "--gpus", "1-2")
+    assert rc == 0 and out.isascii() and sum("RTX 4090" in line for line in out.splitlines()) == 3
     assert all(method == "POST" for method, *_ in fake_vast.requests)  # (searches only)
 
 
-def test_offers_for_an_interactive_agent_put_hosts_near_home_first(fake_vast, capsys):
-    fake_vast.offers = [offer(1, dph_total=0.30, geolocation="Bavaria, DE"), offer(2, dph_total=0.33)]
-    core.set_config("home", "CA")
-    assert json.loads(run(capsys, "offers", "--json")[1])["pick"] == 1
-    assert json.loads(run(capsys, "offers", "--mode", "interactive", "--json")[1])["pick"] == 2
+def test_offers_kinds_are_by_gpu_or_by_cpu_for_a_task_with_no_gpu(fake_vast, capsys):
+    fake_vast.offers = [
+        offer(1, dph_total=0.40),
+        offer(2, dph_total=0.50),
+        offer(3, dph_total=0.45, gpu_ram=49152),
+        cpu_offer(4),
+        cpu_offer(5, cpu_name="Xeon E5-2680 v4", cpu_cores_effective=28, cpu_cores=56),
+    ]
+    kinds = json.loads(run(capsys, "offers", "--gpus", "1", "--kinds", "--json")[1])["kinds"]
+    assert [(k["kind"], k["offers"]) for k in kinds] == [
+        ("1x RTX 3060 12GB", 2),
+        ("1x RTX 4090 24GB", 2),
+        ("1x RTX 4090 48GB", 1),
+    ]
+    kinds = json.loads(run(capsys, "offers", "--kinds", "--json")[1])["kinds"]  # (offers 1-3: 16 vCPUs)
+    assert [(k["offers"], k["whole_cpu"]) for k in kinds] == [(1, 1), (1, 0)]
+    assert kinds[0]["kind"].startswith("AMD Ryzen") and kinds[1]["kind"] == "Xeon E5-2680 v4"
+    assert run(capsys, "offers", "--kinds")[0] == 0
+
+
+def test_offers_with_nothing_fitting_is_exit_4(fake_vast, capsys):
+    fake_vast.offers = [offer(1)]  # (16 vCPUs: under a CPU task's minimum)
+    assert run(capsys, "offers")[0] == 4

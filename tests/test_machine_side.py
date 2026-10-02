@@ -980,7 +980,7 @@ def test_claude_settings_carry_the_launch_choices_the_token_and_the_secrets(cs):
 
 @pytest.mark.parametrize("mode", ["autonomous", "colleague", "interactive"])
 def test_the_machine_is_set_up_from_the_config_the_local_side_writes(cs, mode):
-    from crab_student import core, launch, offers
+    from crab_student import core, launch
 
     offer = {
         "id": 7,
@@ -989,11 +989,10 @@ def test_the_machine_is_set_up_from_the_config_the_local_side_writes(cs, mode):
         "cpu_ram": 16000,
         "geolocation": "Quebec, CA",
     }
-    plan = offers.Plan(offers.Req(), offer, [], [offer], over_cap=False)
     repo = {"slug": "ada/proj", "branch": "agent/job1", "dir": str(cs.ROOT / "work" / "proj")}
-    a = launch.LaunchArgs("job1", offers.Req(), "Train.", None, False, ["HF_TOKEN"], False, False,
+    a = launch.LaunchArgs("job1", [7], 64, "Train.", None, False, ["HF_TOKEN"], False, False,
                           mode=mode, model="opus", fast=True)  # fmt: skip
-    rec = launch.new_record(a, core.load_config(), plan, repo, None)
+    rec = launch.new_record(a, core.load_config(), [offer], repo, None)
     (cs.D / "config.json").write_text(json.dumps(launch.machine_config(rec)))
     machine_files(cs)
     c = cs.cfg()

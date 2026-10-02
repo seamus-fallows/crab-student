@@ -141,7 +141,7 @@ def test_a_launch_names_offers_by_id_and_gets_those_still_to_be_had(fake_vast):
     fake_vast.offers = [offer(1), offer(2, rentable=False), offer(3, cuda_max_good=11.0), offer(4), offer(5)]
     found = offers.named([4, 1, 2, 3, 9], 80, cfg())
     assert ids(found) == [1, 4]  # (2 is taken, 3 fails the fixed rules, 9 is gone)
-    (method, _, body), *_ = fake_vast.calls("POST", "/api/v0/bundles/")
+    (_, _, body), *_ = fake_vast.calls("POST", "/api/v0/bundles/")
     assert body["ask_contract_id"] == {"in": [4, 1, 2, 3, 9]} and body["allocated_storage"] == 80
     fake_vast.offers = [offer(1, disk_space=50)]
     assert offers.named([1], 80, cfg()) == {}  # (no room for the disk)

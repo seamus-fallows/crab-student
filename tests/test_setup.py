@@ -206,16 +206,19 @@ def test_the_markdown_and_the_rules_name_only_real_commands_and_flags():
         assert command in subs, command
     for rule in prefixes(setup.ALLOW + setup.ASK):
         assert rule.split()[1] in subs, rule
-    assert set(re.findall(r"--[a-z][a-z-]+", guide)) <= set(subs["launch"]._option_string_actions)
+    launcher_flags = set().union(*(subs[c]._option_string_actions for c in ("offers", "launch", "start")))
+    assert set(re.findall(r"--[a-z][a-z-]+", guide)) <= launcher_flags
     every_flag = set().union(*(p._option_string_actions for p in subs.values()))
     assert set(re.findall(r"--[a-z][a-z-]+", skill)) <= every_flag
 
 
-def test_the_guide_names_the_approval_price_from_the_settings():
+def test_the_guide_says_where_the_user_is_and_never_the_approval_price():
     raw = (setup.DATA / "launch.md").read_text(encoding="utf-8")
-    assert "{{approve_above_usd_per_hour}}" in raw and "$5/hr" in setup.guide("launch")
-    core.set_config("approve_above_usd_per_hour", "7.5")
-    assert "$7.5/hr" in setup.guide("launch")
+    assert "{{home}}" in raw and "approve_above_usd_per_hour" not in raw
+    core.set_config("approve_above_usd_per_hour", "7.25")
+    assert "{{" not in setup.guide("launch") and "7.25" not in setup.guide("launch")
+    core.set_config("home", "ca")
+    assert "the user is in CA" in setup.guide("launch")
 
 
 def test_the_skill_starts_a_fork_that_follows_the_guide():

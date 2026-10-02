@@ -67,7 +67,8 @@ NO_CREDIT = re.compile(r"credit|insufficient.?(funds|balance)", re.I)
 @dataclass
 class LaunchArgs:
     name: str
-    req: offers.Req
+    offer_ids: list[int]  # the pick, then its backups
+    disk_gb: float
     brief: str
     repo_path: Path | None
     no_repo: bool
@@ -151,15 +152,21 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
     check_new(a)
     cfg = core.load_config()
     repo, repo_line, warnings = plan_repo(a, cfg, f"agent/{a.name}")
-    plan = offers.plan(a.req, cfg, cfg["approve_above_usd_per_hour"], mode=a.mode or cfg["mode"])
-    p = plan.primary
-    reason = approval_reason(plan, cfg["approve_above_usd_per_hour"])
-    rec = new_record(a, cfg, plan, repo, reason)
+    chosen = available(a.offer_ids, a.disk_gb, cfg, out)
+    if not chosen:
+        raise core.CrabError(
+            "none of the offers given can be rented any more: look at the offers again (crab-student offers) "
+            "and launch with others.",
+            4,
+        )
+    chosen, reason = priced(chosen, cfg["approve_above_usd_per_hour"])
+    rec = new_record(a, cfg, chosen, repo, reason)
+    p, backups = chosen[0], chosen[1:]
     out.line(f"Planning {a.name}")
     out.line(f"  machine  {offers.summary(p)} - ${p['dph_total']:.2f}/hr (offer {p['id']})")
-    if plan.fallbacks:
-        top = max(o["dph_total"] for o in plan.fallbacks)
-        n = len(plan.fallbacks)
+    if backups:
+        top = max(o["dph_total"] for o in backups)
+        n = len(backups)
         out.line(
             f"  backups  {n} more offer{'s' if n > 1 else ''}, up to ${top:.2f}/hr (the first is rented at the "
             "same time: the first machine ready is kept)"
@@ -181,6 +188,7 @@ def launch(a: LaunchArgs, out: Progress) -> dict:
 
 def check_new(a: LaunchArgs) -> None:
     core.check_name(a.name)
+    check_offer_ids(a.offer_ids)
     if core.record_path(a.name).exists():
         raise core.CrabError(
             f"an agent named {a.name} already exists. Pick another name, or delete it first: "
@@ -196,14 +204,40 @@ def check_new(a: LaunchArgs) -> None:
             )
 
 
-def approval_reason(plan: offers.Plan, cap: float) -> str | None:
-    """Why the user must approve the launch first: nothing that fits costs `cap` $/hr or less."""
-    if not plan.over_cap:
-        return None
-    return (
-        f"it would cost ${plan.primary['dph_total']:.2f}/hr, and no machine that fits costs ${cap:.2f}/hr "
-        "or less (approve_above_usd_per_hour)"
-    )
+def check_offer_ids(ids: list[int]) -> None:
+    if not 0 < len(ids) <= offers.MAX_OFFERS or len(set(ids)) < len(ids):
+        raise core.CrabError(
+            f"give 1 to {offers.MAX_OFFERS} different offers, the pick first: --offers ID,ID,ID", 2
+        )
+
+
+def available(ids: list[int], disk_gb: float, cfg: dict, out: Progress) -> list[dict]:
+    """The offers among `ids` that can still be rented, in their order; each one gone is said. Two on one machine
+    are refused: a fault of the host would sink both."""
+    found = offers.named(ids, disk_gb, cfg)
+    for i in ids:
+        if i not in found:
+            out.line(f"Offer {i} can no longer be rented.")
+    chosen, machines = [found[i] for i in ids if i in found], {}
+    for o in chosen:
+        if (m := o.get("machine_id") or o["id"]) in machines:
+            raise core.CrabError(
+                f"offers {machines[m]} and {o['id']} are on the same machine: give backups on other machines.",
+                2,
+            )
+        machines[m] = o["id"]
+    return chosen
+
+
+def priced(chosen: list[dict], cap: float) -> tuple[list[dict], str | None]:
+    """The offers a launch may rent, and why it needs the user's approval first: no reason when the pick costs
+    `cap` $/hr or less (backups over it are left out); else every offer stays, and the user approves the highest
+    price among them."""
+    pick, top = chosen[0]["dph_total"], max(o["dph_total"] for o in chosen)
+    if pick <= cap:
+        return [o for o in chosen if o["dph_total"] <= cap], None
+    backups = f"; its backups cost up to ${top:.2f}/hr" if top > pick else ""
+    return chosen, f"it costs more than ${cap:.2f}/hr (approve_above_usd_per_hour){backups}"
 
 
 def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[str]]:
@@ -294,13 +328,13 @@ def setup_text(setup: str | None) -> str:
     )
 
 
-def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: str | None) -> dict:
+def new_record(a: LaunchArgs, cfg: dict, chosen: list[dict], repo: dict, reason: str | None) -> dict:
     return {
         "name": a.name,
         "created": core.now_iso(),
         "phase": "pending" if reason else "renting",
         "error": None,
-        "req": offers.req_dict(a.req),
+        "disk_gb": a.disk_gb,
         "max_dph": cfg["approve_above_usd_per_hour"],  # (the most it may rent at without asking again)
         "mode": a.mode or cfg["mode"],
         "claude_settings": claude_settings(a, cfg),
@@ -309,7 +343,7 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "secrets": a.secrets,
         "session_id": str(uuid.uuid4()),
         "repo": repo,
-        "offers": [offers.kept(o) for o in plan.offers()],
+        "offers": [offers.kept(o) for o in chosen],
         "failed_offers": [],
         "rents": [],  # (the rents in flight while machines race: label, offer_id, at, instance_id, running_at)
         "rent": None,  # (the kept machine's rent)
@@ -320,7 +354,7 @@ def new_record(a: LaunchArgs, cfg: dict, plan: offers.Plan, repo: dict, reason: 
         "short": None,
         "ssh": None,
         "uploaded": False,
-        "pending": {"reason": reason, "max_dph": plan.top_price()} if reason else None,
+        "pending": {"reason": reason, "max_dph": max(o["dph_total"] for o in chosen)} if reason else None,
         "last_start": None,
         "stopped_since": None,
         "last_seen": None,
@@ -353,24 +387,32 @@ def show_launch(name: str, out: Progress) -> None:
 # ---- bring-up ------------------------------------------------------------------------------------
 
 
-def bring_up(name: str, out: Progress, warnings: list[str] | tuple = ()) -> dict:
+def bring_up(
+    name: str, out: Progress, warnings: list[str] | tuple = (), offer_ids: list[int] | None = None
+) -> dict:
     """Bring an agent's launch to ready from wherever it got: a new launch races, one cut off during setup goes
-    on, and one that failed or was cut off before its upload is planned afresh. Its progress, and a failure,
-    also go to its launch log."""
+    on, and one that failed or was cut off before its upload is tried again (with `offer_ids` when given). Its
+    progress, and a failure, also go to its launch log."""
     with core.locked(name, wait=900):  # (a second caller waits for a launch at work, then reports it)
         out.attach(name)
         rec = core.load(name)
         if rec["phase"] == "pending":
             raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
         try:
-            return _bring_up(rec, out, list(warnings))
+            return _bring_up(rec, out, list(warnings), offer_ids)
         except core.CrabError as e:
             out.line(f"Launch failed: {e.message}")
             raise
 
 
-def _bring_up(rec: dict, out: Progress, warnings: list[str]) -> dict:
+def _bring_up(rec: dict, out: Progress, warnings: list[str], offer_ids: list[int] | None) -> dict:
     cut_off = rec["phase"] in ("renting", "booting") and bool(rec["rents"] or rec["instance_id"])
+    if offer_ids and not (cut_off or rec["phase"] == "failed"):
+        raise core.CrabError(
+            f"{rec['name']} has its machine: --offers is only for a launch that failed or was cut off before its "
+            "upload.",
+            2,
+        )
     if cut_off:
         out.line("The launch was cut off before its upload: destroying its machines (they hold nothing).")
         lost = drop_unuploaded(rec)
@@ -378,7 +420,7 @@ def _bring_up(rec: dict, out: Progress, warnings: list[str]) -> dict:
             out.line(f"Warning: {w}")
         warnings += lost
     if cut_off or rec["phase"] == "failed":
-        replan(rec, out)
+        replan(rec, out, offer_ids)
         if rec["phase"] == "pending":
             return result(rec, "approval", warnings, reason=rec["pending"]["reason"])
     if rec["phase"] == "renting":
@@ -414,31 +456,38 @@ def resume_machine(rec: dict, out: Progress) -> None:
         )
 
 
-def replan(rec: dict, out: Progress) -> None:
-    """A failed launch tried again: fresh offers up to the price it may rent at, else it waits for approval."""
-    cfg = core.load_config()
-    cap = max(rec.get("max_dph") or 0, cfg["approve_above_usd_per_hour"])
-    plan = offers.plan(offers.Req(**rec["req"]), cfg, cap, mode=rec["mode"])
+def replan(rec: dict, out: Progress, offer_ids: list[int] | None) -> None:
+    """A failed launch tried again: with the offers given, else with those of its offers that have not failed, if
+    they can still be rented. Over the price it may rent at, it waits for approval."""
+    cfg, name, failed = core.load_config(), rec["name"], {f["id"] for f in rec["failed_offers"]}
+    ids = offer_ids or [o["id"] for o in rec["offers"] if o["id"] not in failed]
+    chosen = available(ids, rec["disk_gb"], cfg, out)
+    if not chosen:
+        rec.update(phase="failed", error="none of its offers can be rented any more")
+        core.save(rec)
+        raise core.CrabError(
+            f"none of {name}'s offers can be rented any more: look at the offers again (crab-student offers) "
+            f"and give others: crab-student start {name} --offers ID,ID",
+            4,
+        )
+    chosen, reason = priced(chosen, max(rec.get("max_dph") or 0, cfg["approve_above_usd_per_hour"]))
+    pending = {"reason": reason, "max_dph": max(o["dph_total"] for o in chosen)} if reason else None
     rec.update(
-        offers=[offers.kept(o) for o in plan.offers()],
+        offers=[offers.kept(o) for o in chosen],
         failed_offers=[],
         rents=[],
         rent=None,
         instance_id=None,
         ssh=None,
         uploaded=False,
-        phase="renting",
+        phase="pending" if reason else "renting",
         error=None,
-        pending=None,
+        pending=pending,
     )
-    if plan.over_cap:
-        rec.update(
-            phase="pending", pending={"reason": approval_reason(plan, cap), "max_dph": plan.top_price()}
-        )
     core.save(rec)
-    if not plan.over_cap:
-        n = len(rec["offers"])
-        out.line(f"Trying {rec['name']} again with {n} fresh offer{'s' if n > 1 else ''}.")
+    if not reason:
+        n = len(chosen)
+        out.line(f"Trying {name} again with {n} offer{'s' if n > 1 else ''}.")
 
 
 def _minutes(seconds: float) -> str:
@@ -519,7 +568,7 @@ class Race:
         rec["rents"].append(r)
         core.save(rec)  # (the label is saved before the request)
         try:
-            r["instance_id"] = vast.rent(offer["id"], rent_body(rec, offer, r["label"]))
+            r["instance_id"] = vast.rent(offer["id"], rent_body(rec, r["label"]))
         except vast.VastError as e:
             rec["rents"].remove(r)
             if e.status == 402 or NO_CREDIT.search(e.message):
@@ -617,7 +666,7 @@ class Race:
             rent=r,
             instance_id=r["instance_id"],
             dph=offer["dph_total"],
-            disk_usd_day=round(storage * rec["req"]["disk_gb"] / 30, 3) if storage else None,
+            disk_usd_day=round(storage * rec["disk_gb"] / 30, 3) if storage else None,
             machine=offer["summary"],
             short=offer["short"],
             phase="booting",
@@ -657,8 +706,8 @@ class Race:
         rec.update(phase="failed", error=f"no offer could be rented or started ({reasons})")
         core.save(rec)
         raise core.CrabError(
-            f"every offer failed ({reasons}). Try again later with crab-student start {name}, or "
-            "loosen the requirements.",
+            f"every offer failed ({reasons}). Look at the offers again (crab-student offers) and give others: "
+            f"crab-student start {name} --offers ID,ID",
             4,
         )
 
@@ -686,17 +735,14 @@ def find_by_label(label: str) -> int | None:
     return next((i["id"] for i in vast.instances() if i.get("label") == label), None)
 
 
-def rent_body(rec: dict, offer: dict, label: str) -> dict:
-    env = {"CS_VAST_URL": vast.base_url()}
-    if not rec["req"]["gpus"] and offer["gpu_host"]:
-        env["NVIDIA_DISABLE_REQUIRE"] = "1"  # (a CPU task on a GPU host: start whatever the driver)
+def rent_body(rec: dict, label: str) -> dict:
     return {
         **RENT_FIXED,
         "image": rec["image"],
-        "disk": float(rec["req"]["disk_gb"]),
+        "disk": float(rec["disk_gb"]),
         "label": label,
         "onstart": ONSTART,
-        "env": env,
+        "env": {"CS_VAST_URL": vast.base_url()},
     }
 
 
@@ -853,8 +899,8 @@ def setup_machine(rec: dict, out: Progress) -> list[str]:
 
 
 def approve(name: str, out: Progress) -> dict:
-    """Launch an agent waiting for approval, with fresh offers up to the price the user approved; one whose price
-    rose meanwhile waits again."""
+    """Launch an agent waiting for approval, with those of its offers still to be had at up to the price the user
+    approved; one whose offers all cost more by now waits again."""
     with core.locked(name):
         rec = core.load(name)
         pending = rec.get("pending")
@@ -863,14 +909,24 @@ def approve(name: str, out: Progress) -> dict:
         repo = rec["repo"]
         if not repo["workspace"] and not repo["branch_created"]:  # (a new launch: are the checks still true?)
             github.check_repo(repo["slug"], repo["branch"])
-        plan = offers.plan(offers.Req(**rec["req"]), core.load_config(), pending["max_dph"], mode=rec["mode"])
-        if plan.over_cap:  # (prices went up while it waited: ask again)
-            reason = approval_reason(plan, pending["max_dph"])
-            rec["pending"] = {"reason": reason, "max_dph": plan.top_price()}
+        chosen = available([o["id"] for o in rec["offers"]], rec["disk_gb"], core.load_config(), out)
+        if not chosen:
+            raise core.CrabError(
+                f"the machines {name} would rent can no longer be rented: drop it (crab-student decline {name}) "
+                "and launch it again.",
+                4,
+            )
+        within = [o for o in chosen if o["dph_total"] <= pending["max_dph"]]
+        if not within:  # (prices went up while it waited: ask again)
+            reason = f"it costs more than the ${pending['max_dph']:.2f}/hr you approved"
+            rec.update(
+                offers=[offers.kept(o) for o in chosen],
+                pending={"reason": reason, "max_dph": max(o["dph_total"] for o in chosen)},
+            )
             core.save(rec)
             return result(rec, "approval", rec.get("warnings", []), reason=reason)
         rec.update(
-            offers=[offers.kept(o) for o in plan.offers()],
+            offers=[offers.kept(o) for o in within],
             failed_offers=[],
             rents=[],
             phase="renting",
@@ -890,14 +946,21 @@ def decline(name: str) -> str:
     return f"Declined {name}: nothing was rented."
 
 
-def start(name: str, out: Progress) -> dict:
-    """Start a stopped agent again, or continue a launch that was interrupted or failed."""
+def start(name: str, out: Progress, offer_ids: list[int] | None = None) -> dict:
+    """Start a stopped agent again, or continue a launch that was interrupted or failed (on `offer_ids`, when
+    given, instead of its own offers)."""
     rec = core.load(name)
     if rec["phase"] == "pending":
         raise core.CrabError(f"{name} is waiting for approval: crab-student approve {name}", 3)
+    if offer_ids is not None:
+        check_offer_ids(offer_ids)
     if rec["phase"] != "ready":
         show_launch(name, out)
-        return bring_up(name, out)
+        return bring_up(name, out, offer_ids=offer_ids)
+    if offer_ids:
+        raise core.CrabError(
+            f"{name} is set up: --offers is only for a launch that failed or was cut off.", 2
+        )
     with core.locked(name):
         out.attach(name)
         rec = core.load(name)

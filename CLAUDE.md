@@ -2,9 +2,10 @@
 
 crab-student rents Vast.ai machines and puts Claude Code agents on them. The user's Claude Code starts
 a background launcher (a fork of the session, or a general-purpose background agent where forks are
-unavailable, that follows `crab-student guide launch`), which estimates
-the task and runs `crab-student launch NAME` in a background Bash call (one per agent, in parallel):
-the CLI rents two machines at once and keeps the first that starts, puts the agent's branch on GitHub,
+unavailable, that follows `crab-student guide launch`), which works out
+what the task needs, picks a machine and backups from `crab-student offers`, and runs `crab-student
+launch NAME --offers ...` in a background Bash call (one per agent, in parallel): the CLI checks the
+price, rents two of the offers at once and keeps the first that starts, puts the agent's branch on GitHub,
 then uploads the machine's files and sets it up (dependencies included) in one ssh call. Modes:
 `autonomous` and `colleague` run the agent's Claude Code in tmux (the first never asks, the second asks
 about important choices); `interactive` gives the user a Claude Code session in VS Code on the machine,
@@ -39,13 +40,13 @@ service: each command runs and exits.
 | `cli.py` | The parser, every command's handler and all terminal output (tables, status, `list`'s warnings about orphan machines) |
 | `core.py` | `CrabError`, paths, settings (mode, model, effort, fast mode, ...) and the user's own Claude settings they default to, agent records and their OS locks, secrets (keyring, file fallback), VS Code's user settings file, `run`, formatting |
 | `vast.py` | The Vast REST client (urllib). The only code that calls Vast from the user's computer |
-| `offers.py` | Requirements, the search, the picking rule (`rank`, `fallbacks`; an interactive agent prefers hosts near `home`), the plan under the approval price (`plan`), the host lease check, the countries where Claude is unavailable (`BLOCKED`) |
+| `offers.py` | The offer search: the fixed rules every offer passes (`fixed`: reliability, the CUDA driver, no mining cards, the lease, the countries where Claude is unavailable `BLOCKED`, `regions`), the filters `offers` browses with (`Filters`, `fits`; a CPU task's floor), and looking up the offers a launch names (`named`). Which machine to rent is the launcher's choice, not code |
 | `github.py` | `gh` and git: the user's repo, the snapshot commit, the deploy key a repo's agents share, branches, files read from a branch (the report, the stop note), `pull` |
 | `machine.py` | ssh: the generated ssh config, one-shot `cs.py` commands, the upload and setup, `open` / `open --all` / VS Code (the Claude panel pre-filled for an interactive agent 15 s after VS Code opens; polling for its hand-off), the window that follows a launch, the local VS Code's commit for the machine |
-| `launch.py` | `launch`, the approval rule, `bring_up` (the race of two machines, repo, upload, setup; a launch cut off is resumed or planned afresh), the progress lines and the launch log, `approve`, `decline`, `start` |
+| `launch.py` | `launch` (the offers given, `available`, and the price check, `priced`), `bring_up` (the race of two machines, repo, upload, setup; a launch cut off is resumed or tried again), the progress lines and the launch log, `approve`, `decline`, `start` |
 | `agents.py` | Views for `list` and `status` (display states, mode, frontend, the mode sync after a hand-off, orphan machines), `stop`, `delete` (the safety check: the machine's own `check`, or the stop note on a stopped one's branch), `send`, `report`, `open` (following a launch; an interactive agent: VS Code, then its terminal after the hand-off) |
 | `setup.py` | `init`, the skill and permission rules in `~/.claude` (`ALLOW`, `ASK`, `DENY`), `check_ready`, `guide` |
-| `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the approval price) |
+| `data/SKILL.md`, `data/launch.md` | The skill `init` installs, and the launcher's procedure (`guide launch`, which fills in the user's `home` country) |
 
 Machine side (`src/crab_student/remote/`, uploaded flat to `/root/crab-student/`; Python 3.8+ standard
 library, runs as root): `cs.py` (setup, including the dependency install and VS Code's server for an
@@ -82,8 +83,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
 ## Conventions
 
 - Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no
-  machine fits, 5 setup failed. Raise `core.CrabError(message, code)`; the message says what happened
-  and what to do, with the exact command.
+  machine fits or the offers named can no longer be rented, 5 setup failed. Raise
+  `core.CrabError(message, code)`; the message says what happened and what to do, with the exact
+  command.
 - Terminal output is ASCII. `--json` prints exactly one JSON value on stdout; progress goes to stderr;
   errors go to stderr as `error: ...`.
 - Style: short functions, type hints, docstrings only where the name does not say it all, comments
@@ -97,9 +99,10 @@ uv run ruff check src tests && uv run ruff format --check src tests
 
 ## Safety rules (SPEC section 1 has the detail)
 
-- **Money**: a launch rents without asking only at or under `approve_above_usd_per_hour`, else it waits
-  (`pending`, exit 3); only `approve`, an ask-rule command, goes over. Never add a flag, default or
-  retry that rents more, or above the price without `approve`.
+- **Money**: a launch rents without asking only when its pick costs `approve_above_usd_per_hour` or less
+  (backups over it are dropped), else it waits (`pending`, exit 3); only `approve`, an ask-rule command,
+  goes over. The launcher picks offers but is never told the price; the CLI enforces it. Never add a
+  flag, default or retry that rents more, or above the price without `approve`.
 - **Never rent twice**: a rent request is never retried; its label is saved in `rents` before the
   request, and an unknown outcome is resolved only by finding that label. At most two rents race.
 - **Own machines only**: act only on instance ids in the records, or our exact rent labels.
@@ -120,9 +123,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
 ## Easy to forget
 
 - Change `data/launch.md` (the launcher's guide) and `data/SKILL.md` with the commands they describe:
-  the launch's flags, result line and modes. `crab-student guide launch` fills
-  `{{approve_above_usd_per_hour}}` in the guide with the current setting; the skill and README name the
-  setting without a number.
+  the launch's flags, result line and modes. `crab-student guide launch` fills `{{home}}` (the user's
+  country, for the keystroke lag) in the guide. The guide never shows the approval price, so the launcher
+  picks for the task; the skill and README name the setting without a number.
 - The model, effort and fast mode reach the machine as `claude_settings` in its `~/.claude/settings.json`
   (never as `claude` flags); unset keys come from the user's own `~/.claude/settings.json`, including
   the per-model efforts Claude Code keeps (`modelSettings.<model>.effortLevel`) unless an effort is

@@ -81,7 +81,7 @@ The machine installs the project's dependencies during setup, before the agent s
 | to tell it something | `crab-student send NAME` with the text on stdin |
 | to stop it (it saves first) | `crab-student stop NAME` |
 | to start it again | `crab-student start NAME --json` |
-| what machines cost | `crab-student offers [--hours H] [--gpus N --gpu-ram GB]` |
+| what machines cost | `crab-student offers [--gpus N --gpu-ram GB] [--kinds]` |
 
 Summarize the output in plain words; do not paste tables unless asked. A state of `needs you` means
 the agent asked a question: show it, and pass the answer on with `send` (or the user can type to the
@@ -112,5 +112,6 @@ long it has sat), and it can usually be deleted without starting it again.
 - The user stores secrets themselves in a terminal (`crab-student secret set NAME`); you never see or
   handle secret values.
 - Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no
-  machine fits, 5 setup failed. The error on stderr says what to do.
+  machine fits or the offers chosen can no longer be rented, 5 setup failed. The error on stderr says
+  what to do.
 - Windows: pass text on stdin, and never pass arguments that start with `/` (Git Bash rewrites them).

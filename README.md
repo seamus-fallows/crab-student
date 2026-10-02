@@ -69,11 +69,11 @@ Ask your Claude Code in plain words: "run the ablation on a GPU with crab-studen
 with Claude on it to work on this", "process the dataset on a remote machine". It starts a background
 *launcher* (a fork of your session, so it has seen what you said; where forks are unavailable, a
 background agent given your words) and your conversation carries on. The
-launcher reads the relevant code, estimates what the task needs (GPUs and GPU memory, cores, RAM,
-disk), writes a brief for the agent, and runs `crab-student launch`. Anything you state yourself (the
-GPU, the disk, the hours, the region, the name, the mode, the model) is used as you said it; only the
-rest is estimated, with generous margins, since running out of disk or memory costs more than a little
-extra does. You then see the brief and one line like:
+launcher reads the relevant code, works out what the task needs (GPUs and GPU memory, cores, RAM,
+disk), picks a machine, writes a brief for the agent, and runs `crab-student launch`. Anything you
+state yourself (the GPU, the disk, the hours, the region, the name, the mode, the model) is used as you
+said it; only the rest is estimated, with generous margins, since running out of disk or memory costs
+more than a little extra does. You then see the brief and one line like:
 
 ```
 ablation-lr: working on 1x RTX 4090 (Quebec, CA) at $0.42/hr - colleague - branch agent/ablation-lr - watch: crab-student open ablation-lr
@@ -89,23 +89,26 @@ On other systems, or with `crab-student config open_window off`, run `crab-stude
 yourself: on an agent that is still launching it shows the same progress. (Every launch also keeps its
 progress, with times, in `~/.crab-student/agents/NAME.log`.)
 
-You never type a price. crab-student picks a reliable machine that fits, cheapest first (for GPU work,
-a faster GPU when it clearly pays for itself; among similar prices, the most reliable and fastest
-downloading). For an interactive agent, when you set `home` to your country code
-(`crab-student config home CA`), among similar prices it takes a host in your country first, then one
-on your continent, since you feel the lag when you type. It never picks a host in a country where
-Anthropic's API is unavailable (mainland China, Hong Kong, Russia, Iran and the others missing from
-https://www.anthropic.com/supported-countries), since Claude Code could not work there. If every
-machine that fits costs more than `approve_above_usd_per_hour` an hour, nothing is rented until you
-approve it (see Money and safety).
-`crab-student offers --gpus 1 --gpu-ram 24` shows what would be picked (add `--mode interactive` to see
-an interactive agent's pick), without renting anything. There is no cost estimate and no time limit:
-you decide when a machine has done its job (see Money and safety).
+You never type a price. The launcher picks the machine the way you would if you compared every offer:
+it works out what will slow the task down (the GPU, the CPU, the network, the downloads, Claude's own
+thinking time), browses `crab-student offers`, and favours speed over cost when the extra is in
+proportion (a $5/hr machine for 1.5x the speed of a $2/hr one, yes; $100/hr for 1.5x, no). It picks
+a machine and 2-4 backups on other hosts, and says in one line why. Set `home` to your country code
+(`crab-student config home CA`) so it weighs how far a host is from you: you feel the lag when you
+type to an agent. Every offer passes fixed rules first: a verified host at least `min_reliability`
+reliable, a driver for the image's CUDA, no mining cards, enough disk and download speed, a lease long
+enough, your `regions`, and never a country where Anthropic's API is unavailable (mainland China, Hong
+Kong, Russia, Iran and the others missing from https://www.anthropic.com/supported-countries), since
+Claude Code could not work there. A task that uses no GPU gets a machine with at least 24 vCPUs and
+64 GB of RAM. If the pick costs more than `approve_above_usd_per_hour` an hour, nothing is rented until
+you approve it (see Money and safety). `crab-student offers --gpus 1 --gpu-ram 24 --kinds` shows what is
+on offer, grouped by kind of GPU (`--help` lists the filters), without renting anything. There is no
+cost estimate and no time limit: you decide when a machine has done its job (see Money and safety).
 
 **Two machines at once.** How long a new machine takes to start varies a lot (a host that must first
 download the Docker image can take several minutes; one that has it cached, one or two). So a launch
-rents its pick and its first backup (the next best machine at any price up to your approval price)
-at the same time, keeps whichever is ready first (running and answering ssh), and
+rents the launcher's pick and its first backup (which the launcher makes nearly as good) at the same
+time, keeps whichever is ready first (running and answering ssh), and
 destroys the other at once, before anything is uploaded to it. A machine that has not started within 5
 minutes, does not answer ssh within 3 minutes of starting, or fails is destroyed too and the next
 backup rented in its place, so at most two are ever in flight for one launch.
@@ -265,15 +268,17 @@ branch stays on GitHub.
 - **Dead-man switch.** If the machine's own watchdog never starts or dies, the machine still stops
   itself within about 45 minutes. A machine without a key to stop itself is refused at setup, and one
   whose stop call Vast ignores is stopped by the next `list` or `status`.
-- **Approval, by price per hour.** A launch rents without asking when a machine that fits costs
-  `approve_above_usd_per_hour` or less (see Settings for the default). If every machine that fits costs
-  more, it does not rent: it waits for `crab-student approve NAME`, which your Claude Code only runs
-  with your OK (`crab-student decline NAME` drops it). Only a launch can ask for approval:
+- **Approval, by price per hour.** A launch rents without asking when the launcher's pick costs
+  `approve_above_usd_per_hour` or less (see Settings for the default); backups that cost more are left
+  out. If the pick costs more, it does not rent: it waits for `crab-student approve NAME`, which your
+  Claude Code only runs with your OK, and which rents at up to the highest price among its offers
+  (`crab-student decline NAME` drops it). The launcher is never told the approval price: it picks for
+  the task, and crab-student enforces the price. Only a launch can ask for approval:
   there is no dollar budget and no cap on running machines, and starting a stopped agent needs no
   approval. The approval, the idle stop and the dead-man switch are what bound the bill.
-- **No leases about to end.** A host that plans to take its machine back within a day (or, when the
-  launch gives `--hours`, within twice that many hours if longer) plus an hour is not picked, so the
-  machine is not taken away in the middle of a job.
+- **No leases about to end.** A host that plans to take its machine back within a day plus an hour is
+  never offered (`crab-student offers --hours H`, for a longer job, asks for twice H), so the machine is
+  not taken away in the middle of a job.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
   a rent request whose outcome is unknown (so you never pay twice). Renting two machines for a launch is
   deliberate and bounded: at most two are in flight, both within the price you allow, and the one not
@@ -314,24 +319,24 @@ default.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `approve_above_usd_per_hour` | 5 | A launch waits for `approve` when every machine that fits costs more than this per hour (0: approve every launch) |
+| `approve_above_usd_per_hour` | 5 | A launch waits for `approve` when its pick costs more than this per hour (0: approve every launch) |
 | `idle_minutes` | 60 | Idle stop after this long with nothing happening |
 | `mode` | `colleague` | `autonomous`, `colleague` or `interactive` for launches that do not say |
 | `model` | (yours) | The Claude model agents use; empty: your own `~/.claude/settings.json` `model`, else Claude Code's default |
 | `effort` | (yours) | `low`, `medium`, `high` or `xhigh`; empty: the effort your own Claude Code uses |
 | `fast_mode` | (yours) | `on` or `off`; empty: your `fastMode` |
 | `image` | `vastai/base-image:cuda-12.8.1-auto` | Docker image (Ubuntu, CUDA, Python) |
-| `disk_gb` | 50 | Disk when the launch does not say |
+| `disk_gb` | 64 | Disk when the launch does not say (the launcher usually does: 1.5x its estimate, at least 64 GB) |
 | `min_reliability` | 0.98 | Only hosts at least this reliable |
 | `min_download_mbps` | 200 | Only hosts that download at least this fast |
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
-| `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): interactive agents prefer hosts in it, then on its continent, among similar prices |
+| `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): the launcher weighs how far a host is from you |
 | `workspace_repo` | `crab-student-work` | The repo for `--no-repo` tasks |
 | `notify_url` | (none) | Where notifications go |
 | `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |
 
 `mode`, `model`, `effort`, `fast_mode`, `idle_minutes`, `notify_url` and `image` apply to agents launched
-after the change. When a launch does not say, it asks for 8 cores, 16 GB of RAM and `disk_gb` of disk.
+after the change. `min_reliability`, `min_download_mbps` and `regions` are rules every offer must pass.
 
 ## How it works
 
@@ -351,10 +356,12 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
 
 - **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`, and its window says
   it stopped): `crab-student start NAME` continues it. Cut off during setup, it carries on with the
-  same machine; earlier, it destroys the machines (they hold nothing) and starts over with fresh offers.
+  same machine; earlier, it destroys the machines (they hold nothing) and tries again with the offers
+  that have not failed. If those are gone, the error says so: `crab-student start NAME --offers ID,ID`
+  tries others (`crab-student offers` shows them).
   Closing the window that follows a launch does not stop the launch.
 - **"Vast did not confirm the rent"**: crab-student never sends a rent request twice. If the launch
-  failed for it, `crab-student start NAME` tries again with fresh offers. If `list` later warns about a
+  failed for it, `crab-student start NAME` tries again. If `list` later warns about a
   machine that belongs to no agent, destroy it at https://cloud.vast.ai/instances/.
 - **Setup failed**: the machine was destroyed (it held nothing) and the error says why; fix it and
   `crab-student start NAME` tries again. A refused Claude token: `crab-student init --claude-token`.

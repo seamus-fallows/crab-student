@@ -213,6 +213,6 @@ def install_claude_files() -> None:
 def guide(topic: str) -> str:
     if topic != "launch":
         raise core.CrabError("the only guide is: crab-student guide launch", 2)
-    price = core.load_config()["approve_above_usd_per_hour"]
+    home = core.load_config()["home"].upper()
     text = (DATA / "launch.md").read_text(encoding="utf-8")
-    return text.replace("{{approve_above_usd_per_hour}}", f"{price:g}")
+    return text.replace("{{home}}", home or "an unknown country")

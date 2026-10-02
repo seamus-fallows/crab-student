@@ -7,8 +7,11 @@ import getpass
 import json
 import math
 import os
+import re
 import shutil
+import statistics
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -26,45 +29,47 @@ def emit(result: dict, as_json: bool) -> None:
         say(result["result_line"])
 
 
-# ---- requirements --------------------------------------------------------------------------------
-
-HOURS_HELP = "how long the task may run, if more than a day: its host must stay available twice as long"
+# ---- argument types ------------------------------------------------------------------------------
 
 
-def _req_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--gpus", type=int, default=0, help="number of GPUs (default 0: a CPU task)")
-    p.add_argument("--gpu-ram", type=float, default=0, metavar="GB", help="memory per GPU")
-    p.add_argument("--gpu-models", default="", metavar="LIST", help='allowed GPU models, e.g. "4090,A100"')
-    p.add_argument("--cpus", type=int, default=8, help="CPU cores (default 8)")
-    p.add_argument("--ram", type=float, default=16, metavar="GB", help="system RAM (default 16)")
-    p.add_argument("--disk", type=float, metavar="GB", help="disk (default: the disk_gb setting)")
-    p.add_argument(
-        "--min-down", type=float, metavar="MBPS", help="minimum download speed (default: the setting)"
-    )
+def _amount(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("must be a number, 0 or more")
+    return value
 
 
-def _req(args: argparse.Namespace, cfg: dict) -> offers.Req:
-    models = [m.strip() for m in args.gpu_models.split(",") if m.strip()]
-    gpus = args.gpus or (1 if args.gpu_ram or models else 0)
-    hours = args.hours
-    numbers = (hours or 1, args.gpu_ram, args.ram, args.disk or 1, args.min_down or 0)
-    if (
-        not all(math.isfinite(x) for x in numbers)
-        or (hours is not None and hours <= 0)
-        or gpus < 0
-        or args.cpus < 1
-    ):
-        raise core.CrabError("hours must be a number above 0, and the other requirements plain numbers.", 2)
-    return offers.Req(
-        hours=hours,
-        gpus=gpus,
-        gpu_ram_gb=args.gpu_ram,
-        gpu_models=models,
-        cpus=args.cpus,
-        ram_gb=args.ram,
-        disk_gb=args.disk or cfg["disk_gb"],
-        min_down_mbps=cfg["min_download_mbps"] if args.min_down is None else args.min_down,
-    )
+def _hours(text: str) -> float:
+    if not _amount(text):
+        raise argparse.ArgumentTypeError("must be a number of hours above 0")
+    return float(text)
+
+
+def _gpus(text: str) -> tuple[int, int]:
+    m = re.fullmatch(r"(\d+)(?:-(\d+))?", text.strip())
+    if not m or int(m.group(2) or m.group(1)) < int(m.group(1)):
+        raise argparse.ArgumentTypeError("a count (2) or a range (2-8)")
+    return int(m.group(1)), int(m.group(2) or m.group(1))
+
+
+def _offer_ids(text: str) -> list[int]:
+    ids = [i.strip() for i in text.split(",")]
+    if not all(i.isdigit() and int(i) > 0 for i in ids):
+        raise argparse.ArgumentTypeError("offer ids separated by commas, the pick first: 123,456,789")
+    return [int(i) for i in ids]
+
+
+def _words(text: str) -> list[str]:
+    return [w.strip() for w in text.split(",") if w.strip()]
+
+
+def _positive(text: str) -> int:
+    if not text.isdigit() or int(text) < 1:
+        raise argparse.ArgumentTypeError("must be a whole number, 1 or more")
+    return int(text)
 
 
 # ---- commands ------------------------------------------------------------------------------------
@@ -96,37 +101,109 @@ def _show(value: object) -> str:
     return ", ".join(value) if isinstance(value, list) else str(value)
 
 
+SORTS = {
+    "price": lambda v: (v["usd_per_hour"], v["id"]),
+    "cpus": lambda v: -(v["vcpus"] or 0),
+    "down": lambda v: -v["down_mbps"],
+    "reliability": lambda v: -(v["reliability"] or 0),
+}
+
+
 def cmd_offers(args: argparse.Namespace) -> int:
     cfg = core.load_config()
-    cap = cfg["approve_above_usd_per_hour"]
-    plan = offers.plan(_req(args, cfg), cfg, cap, mode=args.mode or cfg["mode"])
-    shown, backups = plan.ranked[: args.count], {o["id"] for o in plan.fallbacks}
-    if args.json:
-        print(json.dumps({"offers": shown, "pick": plan.primary["id"], "fallbacks": sorted(backups)}))
-        return 0
-    width = max(len(offers.summary(o)) for o in shown)
-    say(f"   {'OFFER':<10}{'MACHINE':<{width + 2}}{'$/HR':<8}{'DOWN':<11}RELIABILITY")
-    for o in shown:
-        mark = "*" if o is plan.primary else "+" if o["id"] in backups else " "
-        rel = o.get("reliability2") or o.get("reliability") or 0
-        say(
-            f"{mark}  {o['id']:<10}{offers.summary(o):<{width + 2}}${o['dph_total']:<7.2f}"
-            f"{o.get('inet_down', 0):>5.0f} Mbps  {rel * 100:.1f}%"
-        )
-    say(
-        f"\n{len(plan.ranked)} machines fit {plan.req.describe()}. * the pick, + its backups. Nothing was rented."
+    f = offers.Filters(
+        gpus=args.gpus,
+        gpu_ram_gb=args.gpu_ram,
+        gpu_models=_words(args.gpu_models),
+        min_compute_cap=args.min_compute_cap,
+        max_compute_cap=args.max_compute_cap,
+        cpus=int(args.cpus),
+        ram_gb=args.ram,
+        disk_gb=args.disk or cfg["disk_gb"],
+        min_down_mbps=args.min_down,
+        min_up_mbps=args.min_up,
+        max_price=args.max_price,
+        regions=_words(args.region),
+        hours=args.hours,
     )
-    if plan.over_cap:
-        say(
-            f"Every machine that fits costs over ${cap:.2f}/hr, so a launch would ask for your approval first."
-        )
+    now = time.time()
+    found = sorted((offers.shown(o, now) for o in offers.search(f, cfg)), key=SORTS[args.sort])
+    if not found:
+        raise core.CrabError("no offer fits these filters right now: loosen them.", 4)
+    kinds = offer_kinds(found, f.cpu_task) if args.kinds else None
+    if args.json:
+        print(json.dumps({"kinds": kinds} if kinds else {"count": len(found), "offers": found[: args.limit]}))
+        return 0
+    say("\n".join(kinds_table(kinds, f.cpu_task) if kinds else map(offer_line, found[: args.limit])))
+    floor = (
+        f" (no GPU used: at least {offers.CPU_TASK_CPUS} vCPUs and {offers.CPU_TASK_RAM_GB} GB of RAM)"
+        if f.cpu_task
+        else ""
+    )
+    say(f"\n{len(found)} offers fit{floor}. Prices include {f.disk_gb:g} GB of disk. Nothing was rented.")
     return 0
 
 
-def _positive(text: str) -> int:
-    if not text.isdigit() or int(text) < 1:
-        raise argparse.ArgumentTypeError("must be a whole number, 1 or more")
-    return int(text)
+def _n(x: float | None) -> str:
+    return "?" if x is None else f"{x:.4g}"
+
+
+def offer_line(v: dict) -> str:
+    gpu = (
+        f"{v['gpus']}x {v['gpu']} {v['gpu_ram_gb']:g}GB cc{v['compute_cap']:g} {_n(v['gpu_mem_bw_gbps'])}GB/s "
+        f"pcie {_n(v['pcie_gbps'])}GB/s{' nvlink' if v['nvlink'] else ''}"
+    )
+    lease = "?" if v["lease_days"] is None else f"{v['lease_days']:g}d"
+    return (
+        f"{v['id']:<9} m{v['machine']:<7} ${v['usd_per_hour']:<6.3f} {gpu} | {_n(v['vcpus'])}/{_n(v['host_vcpus'])} "
+        f"vCPU {v['cpu'] or '?'} | {v['ram_gb']}GB RAM | disk {v['disk_gb']}GB {v['disk_mbps']}MB/s | "
+        f"net {v['down_mbps']}/{v['up_mbps']} Mbps, ${v['down_usd_per_tb']:g}/${v['up_usd_per_tb']:g} per TB "
+        f"down/up | reliability {_n(v['reliability'])} | {v['location'] or '?'} | lease {lease}"
+    )
+
+
+def offer_kinds(found: list[dict], cpu_task: bool) -> list[dict]:
+    """The offers grouped by kind of GPU (count, model, memory), or by CPU model for a task that uses no GPU,
+    cheapest first."""
+    groups: dict[str, list[dict]] = {}
+    for v in found:
+        key = (v["cpu"] or "?") if cpu_task else f"{v['gpus']}x {v['gpu']} {v['gpu_ram_gb']:g}GB"
+        groups.setdefault(key, []).append(v)
+    kinds = []
+    for key, vs in groups.items():
+        prices = [v["usd_per_hour"] for v in vs]
+        kind = {"kind": key, "offers": len(vs), "min_usd_per_hour": min(prices),
+                "median_usd_per_hour": statistics.median(prices)}  # fmt: skip
+        if cpu_task:
+            cpus, ram = [v["vcpus"] or 0 for v in vs], [v["ram_gb"] for v in vs]
+            whole = sum(bool(v["host_vcpus"]) and (v["vcpus"] or 0) >= v["host_vcpus"] for v in vs)
+            kind.update(vcpus=[min(cpus), max(cpus)], ram_gb=[min(ram), max(ram)], whole_cpu=whole)
+        else:
+            kind.update(compute_cap=vs[0]["compute_cap"], gpu_mem_bw_gbps=vs[0]["gpu_mem_bw_gbps"])
+        kinds.append(kind)
+    return sorted(kinds, key=lambda k: k["min_usd_per_hour"])
+
+
+def kinds_table(kinds: list[dict], cpu_task: bool) -> list[str]:
+    width = max(12, *(len(k["kind"]) for k in kinds)) + 2
+    if cpu_task:
+        lines = [
+            f"{'CPU':<{width}}{'OFFERS':>6}  {'FROM $/HR':>9}  {'MEDIAN':>7}  {'VCPUS':>9}  {'RAM GB':>10}  WHOLE CPU"
+        ]
+        for k in kinds:
+            cpus, ram = "-".join(_n(x) for x in k["vcpus"]), "-".join(map(str, k["ram_gb"]))
+            lines.append(
+                f"{k['kind']:<{width}}{k['offers']:>6}  {k['min_usd_per_hour']:>9.3f}  {k['median_usd_per_hour']:>7.3f}"
+                f"  {cpus:>9}  {ram:>10}  {k['whole_cpu']} of {k['offers']}"
+            )
+        return lines
+    lines = [f"{'GPUS':<{width}}{'OFFERS':>6}  {'FROM $/HR':>9}  {'MEDIAN':>7}  {'CC':>4}  MEM BW GB/S"]
+    for k in kinds:
+        lines.append(
+            f"{k['kind']:<{width}}{k['offers']:>6}  {k['min_usd_per_hour']:>9.3f}  {k['median_usd_per_hour']:>7.3f}"
+            f"  {k['compute_cap']:>4g}  {_n(k['gpu_mem_bw_gbps'])}"
+        )
+    return lines
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
@@ -151,7 +228,8 @@ def _read_brief(args: argparse.Namespace) -> str:
 def _launch_args(args: argparse.Namespace, brief: str) -> launch.LaunchArgs:
     return launch.LaunchArgs(
         name=args.name,
-        req=_req(args, core.load_config()),
+        offer_ids=args.offers,
+        disk_gb=args.disk or core.load_config()["disk_gb"],
         brief=brief,
         repo_path=Path(args.repo).resolve() if args.repo else None,
         no_repo=args.no_repo,
@@ -210,7 +288,7 @@ def cmd_decline(args: argparse.Namespace) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    res = launch.start(args.name, launch.Progress())
+    res = launch.start(args.name, launch.Progress(), args.offers)
     emit(res, args.json)
     return res["exit_code"]
 
@@ -415,22 +493,53 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("value", nargs="?")
     c.add_argument("--reset", action="store_true", help="return KEY to its default")
     c = cmd(
-        "offers", cmd_offers, "show the machines a launch would pick from (rents nothing)", json_flag=True
+        "offers", cmd_offers, "the machines on offer that fit, cheapest first (rents nothing)", json_flag=True
     )
-    _req_args(c)
-    c.add_argument("--hours", type=float, help=HOURS_HELP)
     c.add_argument(
-        "--mode",
-        choices=core.MODES,
-        help="the agent's mode; interactive prefers hosts near the home setting (default: the mode setting)",
+        "--gpus",
+        type=_gpus,
+        default=(0, 0),
+        metavar="N|N-M",
+        help="GPUs the task uses, a count or a range (default 0: no GPU used, any machine with at least "
+        f"{offers.CPU_TASK_CPUS} vCPUs and {offers.CPU_TASK_RAM_GB} GB of RAM)",
     )
-    c.add_argument("--count", type=_positive, default=10, help="how many to show (default 10)")
+    c.add_argument("--gpu-ram", type=_amount, default=0, metavar="GB", help="memory per GPU")
+    c.add_argument("--gpu-models", default="", metavar="LIST", help='GPU models, e.g. "4090,5090,A100"')
+    c.add_argument(
+        "--min-compute-cap", type=_amount, default=0, metavar="CC", help="e.g. 8.0: Ampere or newer"
+    )
+    c.add_argument("--max-compute-cap", type=_amount, default=0, metavar="CC", help="e.g. 9.0: no Blackwell")
+    c.add_argument("--cpus", type=_amount, default=0, help="vCPUs")
+    c.add_argument("--ram", type=_amount, default=0, metavar="GB", help="RAM")
+    c.add_argument(
+        "--disk", type=_amount, metavar="GB", help="disk, in the prices (default: the disk_gb setting)"
+    )
+    c.add_argument("--min-down", type=_amount, default=0, metavar="MBPS", help="download speed")
+    c.add_argument("--min-up", type=_amount, default=0, metavar="MBPS", help="upload speed")
+    c.add_argument("--max-price", type=_amount, default=0, metavar="USD", help="$/hr")
+    c.add_argument("--region", default="", help="continents (europe, north-america, ...) or country codes")
+    c.add_argument(
+        "--hours",
+        type=_hours,
+        help="for a job that may run over a day: the host's lease must last twice as long",
+    )
+    c.add_argument("--sort", choices=list(SORTS), default="price", help="(default: price)")
+    c.add_argument("--limit", type=_positive, default=30, help="how many offers to show (default 30)")
+    c.add_argument(
+        "--kinds", action="store_true", help="a line per kind of GPU (CPU model, if no GPU is used)"
+    )
     c = cmd(
         "launch", cmd_launch, "start an agent on a rented machine (the task brief on stdin)", json_flag=True
     )
     c.add_argument("name", help="3-40 characters: a-z, 0-9 and -")
-    c.add_argument("--hours", type=float, help=HOURS_HELP)
-    _req_args(c)
+    c.add_argument(
+        "--offers",
+        type=_offer_ids,
+        required=True,
+        metavar="IDS",
+        help="the offers to rent (see crab-student offers): the pick, then its backups, e.g. 123,456,789",
+    )
+    c.add_argument("--disk", type=_amount, metavar="GB", help="disk (default: the disk_gb setting)")
     c.add_argument("--brief-file", metavar="PATH", help="the task brief (else read from stdin)")
     c.add_argument("--repo", metavar="PATH", help="your repo (default: the current folder)")
     c.add_argument("--no-repo", action="store_true", help="work in your private workspace repo instead")
@@ -442,6 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c = cmd("start", cmd_start, "start a stopped agent, or continue an interrupted launch", json_flag=True)
     c.add_argument("name")
+    c.add_argument(
+        "--offers",
+        type=_offer_ids,
+        metavar="IDS",
+        help="for a launch that failed or was cut off before its upload: other offers to rent, the pick first",
+    )
     cmd("decline", cmd_decline, "drop a launch waiting for your approval").add_argument("name")
     cmd("list", cmd_list, "every agent at a glance", json_flag=True)
     cmd("status", cmd_status, "one agent in detail", json_flag=True).add_argument("name")

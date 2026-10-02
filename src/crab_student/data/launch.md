@@ -39,28 +39,36 @@ and then say so in the brief (under Context; for interactive, in a short sentenc
 - Uncommitted changes to tracked files are carried over to the agent automatically; untracked files are
   not. If the task needs an untracked file, say so in a warning line; never commit for the user.
 
-## 5. Estimate what it needs, with room to spare
+## 5. Pick the machine
 
-Cores, RAM, disk and download speed are a small part of a machine's price, and running out of any of
-them costs far more than the extra: a crashed job, a full disk, a slow download. So round up. Flags
-you leave out keep their defaults (8 cores, 16 GB RAM, the disk and download settings).
+Pick the machine the user would choose if they compared every offer. They care about speed more than
+cost: pay more for a faster machine when the extra is in proportion to the gain. $5/hr instead of $2/hr
+for 1.5x the speed is worth it; $100/hr instead of $1/hr for 1.5x is not.
 
-- GPU or CPU: CPU unless the task uses CUDA, trains or runs neural models.
-- GPU memory (`--gpu-ram`, per GPU): inference in fp16/bf16 about 2 GB per billion parameters; LoRA
-  about 3 GB per billion; full fine-tuning with Adam in mixed precision about 16 GB per billion; small
-  models (CNNs, tabular) 8-16 GB. Add 30% for activations and buffers, then round up to the next common
-  size (16, 24, 32, 48, 80).
-- `--gpus` above 1 only if the code already supports several GPUs.
-- `--gpu-models` only for a hard need, e.g. bf16 needs Ampere or newer:
-  `"A100,H100,L40,A6000,4090,3090,L4"`.
-- `--cpus`: 8 is the default; 16 or more for heavy data processing or many parallel processes.
-- `--ram`: at least 16 GB, and 3x what is held in memory at once.
-- `--disk`: 30 GB for the image and environment, plus the data twice over (a download and an unpacked
-  or converted copy), plus checkpoints and outputs, plus 50%.
-- `--min-down 500` when more than 20 GB will be downloaded.
-- `--hours` is optional. Pass it when the job may run for more than a day, so that the machine's rental
-  offer lasts long enough: expected run time plus setup, and say in the brief how sure you are. There is
-  no time limit; the machine stops when it has been idle for the idle time.
+Speed is the whole time the user waits: setup (the image and dependencies download first), the task's
+downloads and uploads (the host's network speed and its distance from the data), the run itself, and for
+an interactive agent the lag on every keystroke (the user is in {{home}}). Much of an agent's time goes to
+Claude thinking and editing, which no machine speeds up: judge a faster machine by how much it shortens
+the whole wait, not only the parts it runs.
+
+1. **Work out what the task needs and what will bottleneck it** from the code and data: GPU or not, GPU
+   memory and count, GPU generation (check pinned library versions), CPU, RAM, disk and network. Speed
+   is worth paying for only where the bottleneck is. Leave room to spare: running out costs far more
+   than the extra. For `--disk`, ask for 1.5x your estimate, and at least 64 GB.
+2. **Look at the offers.** `crab-student offers [filters] --disk GB --kinds` summarises what fits (by GPU,
+   or by CPU for a CPU task); then list the promising ones (`--help` shows the filters). Prices include
+   the disk. Every offer shown can run the agent, and a CPU task's have at least 24 vCPUs and 64 GB of
+   RAM. Add `--hours H` for a job that may run over a day, so the host's lease outlasts it.
+3. **Choose the pick and 2-4 backups** on other machines (other `machine` numbers). The launch rents the
+   pick and the first backup at once and keeps whichever starts first, so make the first backup nearly
+   as good as the pick. Backups can be a different kind of machine: write the brief so it works on any
+   of them (for example, "use every GPU on the machine").
+
+For several agents, give each its own offers, dealing out the best ones one per agent first; no offer may
+appear in two lists.
+
+Write one line for your report: the pick, its price, and why it beats the obvious alternatives, e.g.
+`1x H100 (Texas) at $1.90/hr: about 3 h to finish, against 8 h on an RTX 4090 at $0.40/hr.`
 
 ## 6. Name it
 
@@ -109,14 +117,10 @@ For interactive, the brief is just the task as the user would type it to Claude:
 context they gave (repo, files, data). No headings or extra instructions. It is pre-filled in the chat
 for the user to read and send.
 
-## 10. Optionally check the price
-
-`crab-student offers <the same flags>` shows what would be picked. It rents nothing.
-
-## 11. Launch
+## 10. Launch
 
 ```
-crab-student launch NAME [--hours H] [flags] [--secret NAME ...] --json <<'BRIEF'
+crab-student launch NAME --offers PICK,BACKUP1,BACKUP2 --disk GB [flags] [--secret NAME ...] --json <<'BRIEF'
 <the brief>
 BRIEF
 ```
@@ -129,22 +133,21 @@ user's screen that follows it (you need not do anything about that). If the call
 Never run `launch` twice for one task: that would make a second agent.
 
 **Several agents** (a sweep, or several separate tasks you were given together): write one brief per
-agent, each with its own name, and run one `crab-student launch NAME ... --json` per agent, each in its
-own Bash tool call with `run_in_background: true`, all started in one message, so they come up side by
-side. Each agent gets a machine of its own. Read each result as its call finishes, and report once all
-have finished.
+agent, each with its own name and offers, and run one `crab-student launch NAME ... --json` per agent,
+each in its own Bash tool call with `run_in_background: true`, all started in one message, so they come
+up side by side. Read each result as its call finishes, and report once all have finished.
 
-## 12. Report back
+## 11. Report back
 
-Return exactly: the brief, a blank line, the `result_line` from the JSON, then one `Warning: <text>`
-line for each entry of `warnings` (for several agents, this for each agent in turn). Add the
-assumptions you made, one short line each, after the warnings.
+Return exactly: the brief, a blank line, the `result_line` from the JSON, your line on the machine, then
+one `Warning: <text>` line for each entry of `warnings` (for several agents, this for each agent in turn).
+Add the assumptions you made, one short line each, after the warnings.
 
-- Exit 3 (needs approval: every machine that fits costs more than the user's approval price of
-  ${{approve_above_usd_per_hour}}/hr): the same format; the result line says the price. Approving is
-  the user's decision, so leave it to them.
+- Exit 3 (needs approval: the machine costs more than the user's approval price): the same format; the
+  result line says the price. Approving is the user's decision, so leave it to them.
 - Exit 2 with "already exists": if you already ran `launch` with that name for this task, run
   `crab-student start NAME --json` instead (it continues that launch); otherwise pick another name once.
-- Exit 4 (no machine fits): loosen the requirements you estimated once if the task allows it (fewer
-  cores, less RAM, other GPU models), never the ones the user stated; else report.
+- Exit 4 (the offers can no longer be rented, or every one failed to start): look at the offers again and
+  pick again once, as the error says (`launch` again, or `crab-student start NAME --offers ... --json`
+  once the agent exists); else report.
 - Exit 1 or 5: the brief, then `Launch failed: <the error>` with the suggestion it gives.

@@ -937,7 +937,11 @@ def test_setup_settings_fills_the_rules_and_merges_claude_json(cs, mode, section
     )
     state = json.loads((cs.ROOT / ".claude.json").read_text())
     assert state["theme"] == "dark" and state["projects"]["/other"] == {"x": 1}
-    assert state["hasCompletedOnboarding"] and state["bypassPermissionsModeAccepted"]
+    assert state["hasCompletedOnboarding"]
+    settings = json.loads((cs.ROOT / ".claude" / "settings.json").read_text())
+    assert settings[
+        "skipDangerousModePermissionPrompt"
+    ]  # (the bypass warning would block an unattended start)
     trusted = {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}
     assert state["projects"][c["repo_dir"]] == trusted
 

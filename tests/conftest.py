@@ -125,9 +125,17 @@ class FakeMachines:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             self.uploads[name] = {m.name: (tar.extractfile(m).read(), m.mode) for m in tar.getmembers()}
         for i, label in enumerate(
-            ("environment", "repository", "agent settings", "Claude Code", "starting the agent"), 1
+            (
+                "environment",
+                "repository",
+                "dependencies",
+                "Claude Code",
+                "agent settings",
+                "starting the agent",
+            ),
+            1,
         ):
-            on_line(f"step {i}/5 {label}")
+            on_line(f"step {i}/6 {label}")
         if self.setup_result:
             raise self.setup_result
         return []

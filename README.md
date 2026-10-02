@@ -67,7 +67,8 @@ missing):
 
 Ask your Claude Code in plain words: "run the ablation on a GPU with crab-student", "give me a machine
 with Claude on it to work on this", "process the dataset on a remote machine". It starts a background
-*launcher* (a fork of your session, so it has seen what you said) and your conversation carries on. The
+*launcher* (a fork of your session, so it has seen what you said; where forks are unavailable, a
+background agent given your words) and your conversation carries on. The
 launcher reads the relevant code, estimates what the task needs (GPUs and GPU memory, cores, RAM,
 disk), writes a brief for the agent, and runs `crab-student launch`. Anything you state yourself (the
 GPU, the disk, the hours, the region, the name, the mode, the model) is used as you said it; only the
@@ -297,10 +298,10 @@ branch stays on GitHub.
 ### What your Claude Code may do without asking
 
 `init` adds these rules to `~/.claude/settings.json`. Allowed: `guide`, `offers`, `launch`, `list`,
-`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `secret list` (a `launch` over the price
-limit waits for `approve` by itself; restarting a stopped agent with `start` only gives an agent you
-already have more machine time). Always asked first: `approve`, `decline`, `delete`, `config`, `init`,
-`secret set`, `secret delete`.
+`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `delete`, `decline`, `secret list` (a
+`launch` over the price limit waits for `approve` by itself; restarting a stopped agent with `start`
+only gives an agent you already have more machine time; `delete` refuses to destroy unsaved work unless
+forced). Always asked first: `approve`, `delete --force`, `config`, `init`, `secret set`, `secret delete`.
 
 The launcher runs in the background and cannot ask you anything, so it can use only the allowed
 commands; a command outside that list would interrupt you with a permission prompt in your main

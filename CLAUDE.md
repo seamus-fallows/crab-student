@@ -1,7 +1,8 @@
 # crab-student - notes for Claude Code
 
 crab-student rents Vast.ai machines and puts Claude Code agents on them. The user's Claude Code starts
-a background launcher (a fork of the session that follows `crab-student guide launch`), which estimates
+a background launcher (a fork of the session, or a general-purpose background agent where forks are
+unavailable, that follows `crab-student guide launch`), which estimates
 the task and runs `crab-student launch NAME` in a background Bash call (one per agent, in parallel):
 the CLI rents two machines at once and keeps the first that starts, puts the agent's branch on GitHub,
 then uploads the machine's files and sets it up (dependencies included) in one ssh call. Modes:
@@ -109,8 +110,8 @@ uv run ruff check src tests && uv run ruff format --check src tests
 - **Secrets** never go on command lines, into logs, the brief, records or git; they reach the machine
   only inside the upload stream, as 0600 files.
 - **Branch-only pushes** and the secret and big-file hooks hold in every mode.
-- **The launcher** runs only `setup.ALLOW` commands; whatever approves, destroys or changes settings is
-  in `setup.ASK`.
+- **The launcher** runs only `setup.ALLOW` commands; whatever approves a pricier machine, forces a delete
+  or changes settings or secrets is in `setup.ASK` (a plain `delete` is allowed: it refuses to lose work).
 - **The remote agent never hears "crab-student"**: what it sees (rules, prompts, the watchdog's
   `Automated message from the machine:` messages, hook and command output) describes things plainly.
 - **A hand-off** never leaves two Claude sessions on one conversation: tmux runs a fork under a new

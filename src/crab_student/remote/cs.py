@@ -42,7 +42,7 @@ CPU_BUSY_CORES = 0.25
 QUIET_MINUTES = 20  # a "working" agent silent this long gets a check-in (longer than its longest sleep)
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
-STEPS = ("environment", "repository", "dependencies", "agent settings", "Claude Code", "starting the agent")
+STEPS = ("environment", "repository", "dependencies", "Claude Code", "agent settings", "starting the agent")
 DEPS_TIMEOUT = 1800  # (30 minutes, room for CUDA wheels on a slow host, within the dead-man switch's 45)
 SESSION = "agent"  # the tmux session Claude Code runs in
 # What the config's claude_settings may set (modelSettings: the effort Claude Code keeps for each model).
@@ -89,6 +89,7 @@ TMUX_CONF = (
 # unless IS_SANDBOX=1.)
 SETTINGS = {
     "env": {"DISABLE_AUTOUPDATER": "1", "IS_SANDBOX": "1"},
+    "skipDangerousModePermissionPrompt": True,  # (the "Bypass Permissions mode" warning, accepted)
     "permissions": {
         "defaultMode": "bypassPermissions",
         "deny": [
@@ -274,16 +275,15 @@ def cmd_setup() -> int:
         setup_environment,
         setup_repository,
         setup_dependencies,
+        setup_claude,  # (before the settings: Claude Code's installer writes ~/.claude.json too)
         setup_settings,
-        setup_claude,
         setup_start,
     )
     for i, step in enumerate(steps, 1):
         label = STEPS[i - 1]
         print("step %d/%d %s" % (i, len(steps), label), flush=True)
-        write(
-            D / "heartbeat", str(int(time.time())), 0o600
-        )  # (each step is bounded: the dead-man switch waits)
+        # (each step is bounded: the dead-man switch waits for it)
+        write(D / "heartbeat", str(int(time.time())), 0o600)
         try:
             step(c, jobs)
         except Exception as e:  # reported to the local side, which destroys the machine
@@ -414,7 +414,7 @@ def setup_settings(c: dict, jobs: dict) -> None:
     write_claude_settings(c)
     write_vscode_settings(c)
     state = read_json(ROOT / ".claude.json", {})
-    state.update(hasCompletedOnboarding=True, bypassPermissionsModeAccepted=True)
+    state.update(hasCompletedOnboarding=True)
     state.setdefault("projects", {}).setdefault(c["repo_dir"], {}).update(
         hasTrustDialogAccepted=True, hasCompletedProjectOnboarding=True
     )

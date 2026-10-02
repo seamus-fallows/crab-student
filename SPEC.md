@@ -29,8 +29,9 @@ the code does it is in the modules named here.
    brief, records or git. They reach the machine only inside the upload stream, as 0600 files (and in
    its 0600 `~/.claude/settings.json`).
 7. **The launcher** cannot ask the user anything, and a command outside `setup.ALLOW` would raise a
-   permission prompt in the user's session. Whatever approves a pricier machine, destroys, discards or
-   changes settings is in `setup.ASK`; editing `~/.crab-student` is denied (`setup.DENY`).
+   permission prompt in the user's session. Whatever approves a pricier machine, forces a delete or
+   changes settings or secrets is in `setup.ASK` (a plain `delete` is allowed: it refuses to lose work);
+   editing `~/.crab-student` is denied (`setup.DENY`).
 8. **The remote agent never hears "crab-student".** Its rules, prompts, the watchdog's messages, hook
    and command output describe the situation plainly; its commands are `agent-status`, `agent-attach`
    and `agent-handoff`.
@@ -209,10 +210,11 @@ the first; each step touches `heartbeat`, so the dead-man switch waits for a lon
    `requirements*.txt` -> `pip install -r` each; `setup.py` -> `pip install -e .`. Waited for (30
    minutes at most); `deps.json` keeps `{command, exit_code}`; a failure is a warning in setup's result,
    never a failed setup.
-4. `agent settings`: the brief to `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from
-   `rules.md`, the mode's section and how the install went; interactive: `handoff.md` to
-   `~/.claude/commands/`; every mode: Claude Code's and VS Code's settings (6.5).
-5. `Claude Code`: wait for the install jobs; one tiny `claude -p` checks the token.
+4. `Claude Code`: wait for the install jobs; one tiny `claude -p` checks the token.
+5. `agent settings` (after the install, whose own run of Claude Code writes `~/.claude.json`): the brief to
+   `/root/BRIEF.md`; autonomous and colleague: `~/.claude/CLAUDE.md` from `rules.md`, the mode's section
+   and how the install went; interactive: `handoff.md` to `~/.claude/commands/`; every mode: Claude
+   Code's and VS Code's settings and its onboarding and trust flags (6.5).
 6. `starting the agent`: refused without the container's Vast key; `setup-done`, the watchdog; for tmux,
    wait for the conversation file. Last, a wait for VS Code's server, whose failure is only a warning.
 
@@ -246,7 +248,8 @@ is `idle` or `done`. A new container start resets the clocks. Notifications go t
 prompt>"` the first time and `--resume <id>` after; a resume that fails at once starts a new session
 (`D/session_id`) told to read its report. Its environment has the token, the task secrets, `AGENT_NAME`,
 `AGENT_BRANCH` and the login profile's PATH, and none of `CLAUDECODE`, `CLAUDE_CODE_*`, `CONTAINER_*`.
-`~/.claude/settings.json` (0600, every mode): `bypassPermissions`, deny rules for the ways around the
+`~/.claude/settings.json` (0600, every mode): `bypassPermissions` with its warning accepted
+(`skipDangerousModePermissionPrompt`), deny rules for the ways around the
 hooks, `env` with the token and task secrets (for the Claude Code VS Code starts), and
 `claude_settings`. VS Code's machine settings: the Claude extension without permission prompts, the
 Python interpreter, and a default terminal running `agent-attach`.

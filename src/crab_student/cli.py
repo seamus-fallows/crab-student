@@ -483,6 +483,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Set when run from inside VS Code (its terminal, or Claude Code in it). Inherited, it makes Code.exe, started
+    # by the vscode:// link that fills in the Claude panel, run as Node and fail ("bad option: --open-url").
+    os.environ.pop("ELECTRON_RUN_AS_NODE", None)
     # Briefs and messages come as UTF-8 (Git Bash too); Windows would decode a pipe with its ANSI code page.
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")

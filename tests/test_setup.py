@@ -154,25 +154,32 @@ def test_an_include_further_down_is_moved_first(isolated):
 
 
 def prefixes(rules: list[str]) -> list[str]:
-    assert all(re.fullmatch(r"Bash\(crab-student [a-z ]+:\*\)", r) for r in rules), rules
-    return [r[len("Bash(") : -len(":*)")] for r in rules]
+    assert all(re.fullmatch(r"Bash\(crab-student [a-z ]+(:\*| \*--force\*)\)", r) for r in rules), rules
+    return [re.sub(r"(:\*| \*--force\*)\)$", "", r[len("Bash(") :]) for r in rules]
+
+
+def matches(rule: str, line: str) -> bool:
+    """Claude Code's matching of a Bash rule: `:*` at the end is a prefix, `*` elsewhere any text."""
+    pattern = rule[len("Bash(") : -1]
+    if pattern.endswith(":*"):
+        return line.startswith(pattern[:-2])
+    return re.fullmatch(".*".join(map(re.escape, pattern.split("*"))), line) is not None
 
 
 def test_the_permission_rules():
-    allow, ask = prefixes(setup.ALLOW), prefixes(setup.ASK)
-    # Spending beyond the gate, destroying and changing settings always ask; the launcher needs no prompt.
-    ask_first = ["approve job1", "decline job1", "delete job1 --force", "config idle_minutes 5", "init",
+    # Spending beyond the gate, forcing a delete and changing settings or secrets always ask (an ask rule wins
+    # over an allow rule); the launcher, and a plain delete (it refuses to lose work), need no prompt.
+    ask_first = ["approve job1", "delete job1 --force", "delete --force job1", "config idle_minutes 5", "init",
                  "secret set HF_TOKEN", "secret delete HF_TOKEN"]  # fmt: skip
-    launcher = ["guide launch", "offers --gpus 1", "list --json", "secret list", "launch job1 --hours 2",
-                "start job1 --json", "status job1 --json"]  # fmt: skip
+    allowed = ["guide launch", "offers --gpus 1", "list --json", "secret list", "launch job1 --hours 2",
+               "start job1 --json", "status job1 --json", "delete job1", "decline job1"]  # fmt: skip
     assert not any("extend" in rule for rule in setup.ALLOW + setup.ASK)  # (there is no time limit)
     for command in ask_first:
+        assert any(matches(r, f"crab-student {command}") for r in setup.ASK), command
+    for command in allowed:
         line = f"crab-student {command}"
-        assert any(line.startswith(p) for p in ask), command
-        assert not any(line.startswith(p) for p in allow), command  # (even as a bare string prefix)
-    for command in launcher:
-        line = f"crab-student {command}"
-        assert any(line.startswith(p) for p in allow) and not any(line.startswith(p) for p in ask), command
+        assert any(matches(r, line) for r in setup.ALLOW), command
+        assert not any(matches(r, line) for r in setup.ASK), command
 
 
 def test_the_skill_and_the_launch_guide():

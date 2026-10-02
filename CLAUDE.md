@@ -105,7 +105,9 @@ uv run ruff check src tests && uv run ruff format --check src tests
   flag, default or retry that rents more, or above the price without `approve`.
 - **Never rent twice**: a rent request is never retried; its label is saved in `rents` before the
   request, and an unknown outcome is resolved only by finding that label. At most two rents race.
-- **Own machines only**: act only on instance ids in the records, or our exact rent labels.
+- **Own machines only**: act only on instance ids in the records, or our exact rent labels. A Vast
+  account may be shared with teammates: labels carry this computer's `core.install_id()`, and `list`
+  flags only labels with it.
 - **Never destroy work**: code destroys a machine by itself only before its upload or after a failed
   setup. `delete` checks for unsaved work first, else needs `--force`.
 - **Stops are bounded**: the watchdog's idle stop (every mode, done or not) and the dead-man switch in

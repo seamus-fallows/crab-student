@@ -58,6 +58,16 @@ def keys_dir() -> Path:
     return home() / "keys"
 
 
+def install_id() -> str:
+    """This computer's id in the labels of the machines it rents (6 hex digits, made once): on a Vast account
+    shared with teammates, their machines must never look like ours."""
+    path = home() / "install_id"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(os.urandom(3).hex() + "\n", encoding="utf-8")
+    return path.read_text(encoding="utf-8").strip()
+
+
 def vast_key_file() -> Path:
     """The Vast key the vastai CLI keeps: switching it switches every Vast tool at once."""
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "vastai" / "vast_api_key"

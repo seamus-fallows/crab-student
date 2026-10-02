@@ -22,7 +22,7 @@ SSH_TIMEOUT = 3 * 60  # and one whose ssh does not answer this long after it run
 RACERS = 2  # new machines rented at once for one launch
 POLL = 5.0
 LABEL_WAIT = 120.0
-LABEL_PREFIX = "crab-student-"  # (every rent's label: crab-student-NAME-<8 hex>)
+LABEL_PREFIX = "crab-student-"  # (every rent's label: crab-student-<install id>-NAME-<8 hex>)
 
 # Vast runs this as root at every container start. It saves the container's own Vast key (only this
 # machine can use it), starts the dead-man switch (stop the machine once neither this start nor the
@@ -563,7 +563,7 @@ class Race:
 
     def rent(self, offer: dict) -> None:
         rec = self.rec
-        r = {"label": f"{LABEL_PREFIX}{rec['name']}-{secrets.token_hex(4)}", "offer_id": offer["id"],
+        r = {"label": f"{own_label_prefix()}{rec['name']}-{secrets.token_hex(4)}", "offer_id": offer["id"],
              "at": time.time(), "instance_id": None, "running_at": None}  # fmt: skip
         rec["rents"].append(r)
         core.save(rec)  # (the label is saved before the request)
@@ -729,6 +729,11 @@ def unconfirmed(rent: dict) -> str:
         f"Vast did not confirm the rent of offer {rent['offer_id']}; if a machine labelled {rent['label']} shows "
         "up, crab-student list points it out (destroy it at https://cloud.vast.ai/instances/)."
     )
+
+
+def own_label_prefix() -> str:
+    """How the labels of this computer's rents start (teammates sharing the Vast account have their own)."""
+    return f"{LABEL_PREFIX}{core.install_id()}-"
 
 
 def find_by_label(label: str) -> int | None:

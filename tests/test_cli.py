@@ -296,14 +296,16 @@ def test_list_without_agents_and_as_json(monkeypatch, capsys):
 
 
 def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast, machines, capsys):
-    ours = launch.own_label_prefix()
-    core.save(record(instance_id=fake_vast.add_instance(1, f"{ours}job1-aaaa0000"), rents=[],
-                     rent={"label": f"{ours}job1-aaaa0000"}, ssh=None, last_seen=None))  # fmt: skip
-    orphan = fake_vast.add_instance(1, f"{ours}job2-bbbb0000")  # (a rent Vast did not confirm)
+    kept, lost = (
+        f"crab-student-{name}-{core.install_id()}-{x}" for name, x in (("job1", "aaaa"), ("job2", "bbbb"))
+    )
+    core.save(record(instance_id=fake_vast.add_instance(1, kept), rents=[],
+                     rent={"label": kept}, ssh=None, last_seen=None))  # fmt: skip
+    orphan = fake_vast.add_instance(1, lost)  # (a rent Vast did not confirm)
     for argv in (["list"], ["list", "--json"]):
         rc, out, err = run(capsys, *argv)
         warned = [line for line in err.splitlines() if line.startswith("warning:")]
-        assert rc == 0 and len(warned) == 1 and str(orphan) in warned[0] and "bbbb0000" in warned[0]
+        assert rc == 0 and len(warned) == 1 and str(orphan) in warned[0] and lost in warned[0]
     assert [r["name"] for r in json.loads(out)] == ["job1"] and orphan in fake_vast.instances
 
 

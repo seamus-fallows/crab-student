@@ -91,9 +91,7 @@ def orphans(insts: list[dict], recs: list[dict]) -> list[dict]:
     return [
         i
         for i in insts
-        if str(i.get("label") or "").startswith(launch.own_label_prefix())
-        and i.get("label") not in labels
-        and i["id"] not in ids
+        if launch.own_label(str(i.get("label") or "")) and i.get("label") not in labels and i["id"] not in ids
     ]
 
 

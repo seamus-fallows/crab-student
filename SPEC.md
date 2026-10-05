@@ -93,7 +93,8 @@ after a stop); `stopped_since`; `last_seen` (the last machine status, for displa
 `idle_minutes`, `notify_url` (copied at launch).
 
 Names: 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
-rent label `crab-student-<install id>-<name>-<8 hex>` (new per rent request); deploy key title
+rent label `<owner>-<name>-<install id>-<4 hex>` (owner: the `owner` setting, else `crab-student`; new
+per rent request, unlike the record's rents in flight); deploy key title
 `crab-student <created>`; tmux session `agent` on the machine.
 
 ## 4. The launch (`launch.py`)
@@ -173,7 +174,7 @@ NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 failed; unknown (Vast or ssh did not answer); stopped (why, how long ago, the disk's cost per day);
 needs you; done; working; interactive (Claude in VS Code: active, or idle for how long). A `status`
 reporting another mode (after a hand-off) updates the record; a stopped machine seen running again moves
-`last_start`. `list` warns on stderr about orphans: instances labelled `crab-student-<install id>-...`
+`last_start`. `list` warns on stderr about orphans: instances whose label ends in `-<install id>-<4 hex>`
 that are no record's machine or rent.
 
 **5.2 stop** (a machine that received its files): `cs.py save --reason user --final` if it runs (best

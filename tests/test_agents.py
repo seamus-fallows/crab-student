@@ -336,17 +336,17 @@ def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_
 def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):
     core.home().mkdir(parents=True, exist_ok=True)
     (core.home() / "install_id").write_text("abc123")  # (this computer's id in its rents' labels)
-    kept = fake_vast.add_instance(1, "crab-student-abc123-job1-aaaa0000")
-    fake_vast.add_instance(1, "crab-student-abc123-job2-bbbb0000")  # (a rent of a launch at work)
-    orphan = fake_vast.add_instance(1, "crab-student-abc123-job3-cccc0000")
-    fake_vast.add_instance(1, "crab-student-def456-job3-cccc0000")  # (a teammate's, on a shared Vast account)
-    fake_vast.add_instance(1, "my-own-machine")  # (not rented by crab-student)
-    core.save(record(instance_id=kept, rent=rent("crab-student-abc123-job1-aaaa0000", kept)))
-    core.save(
-        record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-abc123-job2-bbbb0000")])
-    )
+    kept = fake_vast.add_instance(1, "SFALLOWS-job1-abc123-aaaa")
+    fake_vast.add_instance(1, "crab-student-job2-abc123-bbbb")  # (a rent of a launch at work)
+    orphans = [
+        fake_vast.add_instance(1, label) for label in ("SFALLOWS-job3-abc123-cccc", "x-job4-abc123-dddd")
+    ]
+    fake_vast.add_instance(1, "SFALLOWS-job3-def456-cccc")  # (a teammate's, on a shared Vast account)
+    fake_vast.add_instance(1, "SFALLOWS")  # (not rented by crab-student)
+    core.save(record(instance_id=kept, rent=rent("SFALLOWS-job1-abc123-aaaa", kept)))
+    core.save(record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-job2-abc123-bbbb")]))
     found = agents.orphans(list(fake_vast.instances.values()), core.all_records())
-    assert [i["id"] for i in found] == [orphan] and len(fake_vast.instances) == 5  # (nothing destroyed)
+    assert [i["id"] for i in found] == orphans and len(fake_vast.instances) == 6  # (nothing destroyed)
 
 
 # ---- delete a stopped agent: from its stop note, without starting it ----------------------------

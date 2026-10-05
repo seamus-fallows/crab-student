@@ -22,7 +22,6 @@ SSH_TIMEOUT = 3 * 60  # and one whose ssh does not answer this long after it run
 RACERS = 2  # new machines rented at once for one launch
 POLL = 5.0
 LABEL_WAIT = 120.0
-LABEL_PREFIX = "crab-student-"  # (every rent's label: crab-student-<install id>-NAME-<8 hex>)
 
 # Vast runs this as root at every container start. It saves the container's own Vast key (only this
 # machine can use it), starts the dead-man switch (stop the machine once neither this start nor the
@@ -563,7 +562,7 @@ class Race:
 
     def rent(self, offer: dict) -> None:
         rec = self.rec
-        r = {"label": f"{own_label_prefix()}{rec['name']}-{secrets.token_hex(4)}", "offer_id": offer["id"],
+        r = {"label": rent_label(rec), "offer_id": offer["id"],
              "at": time.time(), "instance_id": None, "running_at": None}  # fmt: skip
         rec["rents"].append(r)
         core.save(rec)  # (the label is saved before the request)
@@ -731,9 +730,20 @@ def unconfirmed(rent: dict) -> str:
     )
 
 
-def own_label_prefix() -> str:
-    """How the labels of this computer's rents start (teammates sharing the Vast account have their own)."""
-    return f"{LABEL_PREFIX}{core.install_id()}-"
+def rent_label(rec: dict) -> str:
+    """A new rent's label, OWNER-NAME-<install id>-<4 hex> (OWNER: the `owner` setting, else crab-student), unlike
+    the labels of the rents in flight (two sharing a label could be taken for one machine)."""
+    owner = core.load_config()["owner"] or "crab-student"
+    taken = {r["label"] for r in rec["rents"]}
+    while (label := f"{owner}-{rec['name']}-{core.install_id()}-{secrets.token_hex(2)}") in taken:
+        pass
+    return label
+
+
+def own_label(label: str) -> bool:
+    """Whether a label is one of this computer's rents, whatever the owner was (teammates sharing the Vast account
+    have another install id)."""
+    return bool(re.search(rf"-{core.install_id()}-[0-9a-f]{{4}}$", label))
 
 
 def find_by_label(label: str) -> int | None:

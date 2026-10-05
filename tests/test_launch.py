@@ -124,7 +124,7 @@ def test_a_launch_races_two_machines_keeps_the_first_ready_and_sets_it_up(
     assert rec["phase"] == "ready" and res["instance_id"] == rec["instance_id"]
     assert [r[1] for r in rents(fake_vast)] == ["/api/v0/asks/1/", "/api/v0/asks/2/"]  # (both at once)
     assert all(label in saved for label, saved in recorded) and len(recorded) == 2
-    assert all(label.startswith(launch.own_label_prefix()) for label, _ in recorded)  # (this computer's id)
+    assert all(launch.own_label(label) and label.startswith("crab-student-job1-") for label, _ in recorded)
     # the first machine ready (offer 1) is kept; the other was destroyed before anything reached it
     assert fake_vast.instances[rec["instance_id"]]["offer_id"] == 1 and list(fake_vast.instances) == [
         rec["instance_id"]
@@ -238,6 +238,15 @@ def test_the_rent_asks_for_the_disk_given(fake_vast):
     assert "NVIDIA_DISABLE_REQUIRE" not in sent[2]["env"]  # (every offer has a driver for the image's CUDA)
     (search,) = fake_vast.calls("POST", "/api/v0/bundles/")
     assert search[2]["allocated_storage"] == 120  # (the price the launch checks includes that disk)
+
+
+def test_the_owner_setting_starts_the_rent_labels(fake_vast):
+    core.set_config("owner", "SFALLOWS")
+    go(args(offer_ids=[1, 2]))
+    labels = [sent[2]["label"] for sent in rents(fake_vast)]
+    assert all(re.fullmatch(rf"SFALLOWS-job1-{core.install_id()}-[0-9a-f]{{4}}", x) for x in labels)
+    assert len(set(labels)) == 2 and all(launch.own_label(x) for x in labels)
+    fails(2, core.set_config, "owner", "S FALLOWS")
 
 
 def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github, machines, monkeypatch):

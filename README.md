@@ -334,6 +334,7 @@ default.
 | `min_download_mbps` | 200 | Only hosts that download at least this fast |
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
 | `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): the launcher weighs how far a host is from you |
+| `owner` | (none) | How your machines' labels on Vast start, e.g. `SFALLOWS` (`SFALLOWS-train-lr-a1b2c3-1f2e`); empty: `crab-student` |
 | `workspace_repo` | `crab-student-work` | The repo for `--no-repo` tasks |
 | `notify_url` | (none) | Where notifications go |
 | `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |

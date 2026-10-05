@@ -125,6 +125,7 @@ DEFAULTS: dict[str, object] = {
     "min_download_mbps": 200.0,
     "regions": [],
     "home": "",
+    "owner": "",
     "mode": "colleague",
     "model": "",
     "effort": "",
@@ -159,6 +160,10 @@ RULES = {
         lambda v: v == "" or bool(re.fullmatch(r"[A-Za-z]{2}", v)),
         "your country code (CA, US, DE, ...), so that the launcher weighs how far a host is from you; empty: "
         "not set",
+    ),
+    "owner": (
+        lambda v: bool(re.fullmatch(r"[A-Za-z0-9]*", v)),
+        "letters and digits, e.g. SFALLOWS: how your machines' labels on Vast start (empty: crab-student)",
     ),
     "mode": (lambda v: v in MODES, "autonomous, colleague or interactive"),
     "model": (lambda v: True, "a Claude model such as opus or sonnet (empty: as your own Claude Code)"),

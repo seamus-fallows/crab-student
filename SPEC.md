@@ -116,9 +116,9 @@ per rent request); agent repo `<login>/<repo>-agents`; deploy key title `crab-st
    fails, naming the label. Vast out of reach meanwhile is waited out (the timeouts decide). Every
    offer failed: exit 4. While the machine boots, the agent repo, its deploy key (4.2) and the branch go
    on GitHub; a failure there destroys the machine and fails the launch.
-4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's failure, or the call
-   ending without setup's result other than with ssh's exit 255, destroys the machine and fails the
-   launch (exit 5); ssh's exit 255 (a lost connection) or the call's timeout (1 hour) leaves `setup`.
+4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Without setup's result, ssh's
+   exit 255 (a lost connection) or the call's 1-hour timeout leaves `setup`; any other failure, setup's
+   own or its command's, destroys the machine and fails the launch (exit 5).
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
    and setup, which resumes. Any other (`renting`, `failed`) is tried again, its machine destroyed first
    if it has one (by id, or found by its label; nothing was uploaded to it). Trying again takes the
@@ -301,8 +301,8 @@ with]`, or asks in words. The command has Claude commit and push, run `agent-han
 turn. `agent-handoff` refuses once handed off; the conversation is the `--session=` one, else
 `CLAUDE_CODE_SESSION_ID` (the first that names a saved transcript; neither: refused). It writes the
 mode's rules, removes `/handoff`, picks a new session id, writes `handoff.json` `{mode, from, to (the
-new id), prompt, at}` (the machine's mode is now that mode), starts the tmux session and waits up to 90
-s for Claude. In tmux, `claude --resume <from> --fork-session --session-id <to> "<hand-off prompt>"`
+new id), prompt, at}` (the machine's mode is now that mode), starts the tmux session and waits up to
+90 s for Claude. In tmux, `claude --resume <from> --fork-session --session-id <to> "<hand-off prompt>"`
 continues the whole conversation under the new id. The fork is made only into `to`: when it, or later
 a resume of the conversation it made, fails at once, a new conversation (a new id) starts from the
 brief with what the user asked for, and the VS Code conversation is never forked again. `status` then

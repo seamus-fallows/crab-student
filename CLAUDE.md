@@ -1,7 +1,7 @@
 # crab-student
 
-Rents Vast.ai machines and puts Claude Code agents on them. `README.md` is for the user; `SPEC.md` is the
-protocol reference (records, machine files, ssh commands, modes, hand-off, stops, safety invariants).
+Rents Vast.ai machines and puts Claude Code agents on them. `README.md` is for its users; `SPEC.md` holds the
+safety invariants, the contracts between the parts, and the flows that spend money, keep work and carry secrets.
 
 ## Commands
 
@@ -9,11 +9,12 @@ protocol reference (records, machine files, ssh commands, modes, hand-off, stops
 uv run pytest -q                      # all tests (the integration test needs Linux and tmux: CI runs it)
 uv run pytest -q tests/test_launch.py # one file
 uv run ruff check src tests && uv run ruff format --check src tests
+npx --yes markdownlint-cli2 "**/*.md" "#node_modules" "#.venv"   # the Markdown (.markdownlint.json)
 ```
 
 ## Design principle
 
-A single-user tool its owner wants simple and fast.
+A tool for its owner and one or two collaborators, who want it simple and fast.
 
 - Prefer the simplest thing that works. Handle a rare failure with a clear error that says what to do, not
   with new state or a recovery path across commands.
@@ -34,8 +35,8 @@ A single-user tool its owner wants simple and fast.
 
 ## Conventions
 
-- Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no machine fits
-  or the named offers are gone, 5 setup failed. Raise `core.CrabError(message, code)`; the message says what
+- Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval or would lose work, 4 no machine fits or the offers
+  given are gone or all failed, 5 setup failed. Raise `core.CrabError(message, code)`; the message says what
   to do, with the exact command.
 - Terminal output is ASCII (`core.say`). `--json` prints exactly one JSON value on stdout; progress and
   `error: ...` go to stderr.

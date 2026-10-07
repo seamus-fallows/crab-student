@@ -419,7 +419,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         if not (git.get("dirty") or git.get("unpushed"))
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
-    say(f"  repo      {v.repo}, branch {v.branch}{pushed}")
+    on = f" on {rec['repo']['slug']}" if rec["repo"]["source"] else ""
+    say(f"  repo      {v.repo}, branch {v.branch}{on}{pushed}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
         say(
@@ -579,7 +580,9 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("report", cmd_report, "show an agent's REPORT.md").add_argument("name")
     c = cmd("pull", cmd_pull, "fetch an agent's branch into your repo (your checkout is not touched)")
     c.add_argument("name")
-    c.add_argument("--repo", metavar="PATH")
+    c.add_argument(
+        "--repo", metavar="PATH", help="your clone to fetch into (default: the one it was launched from)"
+    )
     cmd("stop", cmd_stop, "save the agent's work, then stop its machine", json_flag=True).add_argument("name")
     c = cmd(
         "delete",

@@ -240,28 +240,28 @@ def priced(chosen: list[dict], cap: float) -> tuple[list[dict], str | None]:
 
 
 def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[str]]:
-    """Where the agent's branch starts. Nothing is written anywhere yet (the starting commit is a local,
-    unreferenced object)."""
+    """Where the agent's branch starts, and its agent repo (`slug`; `source` is the user's repo). Nothing is written
+    anywhere yet (the starting commit is a local, unreferenced object; a new agent repo is made after the rent)."""
     if a.no_repo:
-        slug = f"{github.login()}/{cfg['workspace_repo']}"
-        github.check_workspace(slug, branch)  # (a repo that does not exist yet is created after the rent)
+        slug = github.agent_repo(None, cfg["workspace_repo"])
+        new = "" if github.check_agent_repo(slug, None, branch) else ", new"
         repo = {
             "slug": slug,
-            "workspace": True,
+            "source": None,
             "branch": branch,
             "start_sha": None,
-            "deploy_key": None,
             "branch_created": False,
             "dir": f"/root/work/{cfg['workspace_repo']}",
         }
-        return repo, f"{slug} (your workspace repo) - {branch}", []
+        return repo, f"{slug} (your workspace repo{new}) - {branch}", []
     r = github.local_repo(a.repo_path or Path.cwd())
-    github.check_repo(r.slug, branch)
+    slug = github.agent_repo(r.slug, cfg["workspace_repo"])
+    new = "" if github.check_agent_repo(slug, r.slug, branch) else " (new, private)"
     sha, carried, untracked, local = github.snapshot(r, commit=not a.dry_run)
     base = (
         github.git(r.top, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "a detached HEAD"
     )
-    line = f"{r.slug} - {branch} starts from {r.head[:7]} (your HEAD on {base})"
+    line = f"{r.slug} - {branch} on {slug}{new} starts from {r.head[:7]} (your HEAD on {base})"
     if local:
         line += f" + {local} local commit{'s' if local > 1 else ''} not on GitHub"
     if carried:
@@ -274,14 +274,13 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
             f"the agent needs {it}."
         )
     repo = {
-        "slug": r.slug,
-        "workspace": False,
+        "slug": slug,
+        "source": r.slug,
         "branch": branch,
         "start_sha": sha,
         "local_dir": str(r.top),
         "carried": carried,
         "untracked": untracked,
-        "deploy_key": None,
         "branch_created": False,
         "dir": f"/root/work/{r.slug.split('/')[1]}",
     }
@@ -809,18 +808,16 @@ def drop_unuploaded(rec: dict) -> list[str]:
 
 
 def prepare_repo(rec: dict, out: Progress) -> None:
-    """The agent's deploy key (usually shared, see github.claim_deploy_key) and its branch on GitHub (once;
-    the record says what is done)."""
+    """The agent repo and its deploy key (see github.prepare_agent_repo), and the agent's branch there (once; the
+    record says what is done)."""
     repo, name = rec["repo"], rec["name"]
     if repo["branch_created"]:
         return
     try:
-        if repo["workspace"] and not repo["start_sha"]:
-            github.ensure_workspace(*repo["slug"].split("/"))
+        key = github.prepare_agent_repo(repo["slug"], repo["source"])
+        if not repo["start_sha"]:  # (the workspace: the branch starts from its default branch)
             repo["start_sha"] = github.default_head(repo["slug"])
-        if not repo["deploy_key"]:
-            github.claim_deploy_key(rec)
-        github.create_branch(repo, github.key_file(repo["deploy_key"]))
+        github.create_branch(repo, key)
     except core.CrabError as e:
         warnings = drop_unuploaded(rec)
         rec.update(phase="failed", error=e.message)
@@ -869,10 +866,7 @@ def generated_files(rec: dict) -> dict[str, tuple[bytes, int]]:
         "BRIEF.md": (brief_file(rec["name"]).read_bytes(), 0o644),
         "claude.env": (claude_env.encode(), 0o600),
         "secrets.env": ("".join(f"export {k}={shlex.quote(v)}\n" for k, v in values.items()).encode(), 0o600),
-        "deploy_key": (
-            github.key_file(rec["repo"]["deploy_key"]).read_bytes().replace(b"\r\n", b"\n"),
-            0o600,
-        ),
+        "deploy_key": (github.key_file(rec["repo"]["slug"]).read_bytes().replace(b"\r\n", b"\n"), 0o600),
         "github_known_hosts": ((github.HOST_KEY + "\n").encode(), 0o644),
     }
 
@@ -922,8 +916,8 @@ def approve(name: str, out: Progress) -> dict:
         if not pending:
             raise core.CrabError(f"{name} is not waiting for approval.")
         repo = rec["repo"]
-        if not repo["workspace"] and not repo["branch_created"]:  # (a new launch: are the checks still true?)
-            github.check_repo(repo["slug"], repo["branch"])
+        if not repo["branch_created"]:  # (a new launch: are the checks still true?)
+            github.check_agent_repo(repo["slug"], repo["source"], repo["branch"])
         chosen = available([o["id"] for o in rec["offers"]], rec["disk_gb"], core.load_config(), out)
         if not chosen:
             raise core.CrabError(
@@ -1034,7 +1028,7 @@ def result(rec: dict, state: str, warnings: list[str], reason: str | None = None
         "machine": rec.get("machine") or o.get("summary"),
         "dph": dph,
         "mode": mode,
-        "repo": rec["repo"]["slug"],
+        "repo": rec["repo"]["source"] or rec["repo"]["slug"],
         "branch": branch,
         "exit_code": 3 if state == "approval" else 0,
     }

@@ -202,7 +202,7 @@ def _view(rec: dict, inst: dict | None, st: dict | None, state: str, message: st
         machine=rec.get("machine") or "",
         dph=dph,
         branch=rec["repo"]["branch"],
-        repo=rec["repo"]["slug"],
+        repo=rec["repo"]["source"] or rec["repo"]["slug"],
         git=st.get("git") if st else last.get("git"),
         vast_status=inst.get("actual_status") if inst else None,
         pending=rec.get("pending"),
@@ -371,29 +371,12 @@ def _stop_note(rec: dict) -> dict | None:
 
 
 def _cleanup(rec: dict) -> list[str]:
-    """Remove what the agent had on GitHub and locally: its deploy key unless another agent shares it, and
-    its branch unless somebody worked on it."""
-    repo, notes, key = rec["repo"], [], rec["repo"].get("deploy_key")
-    try:
-        github.release_deploy_key(rec)
-    except core.CrabError as e:
-        notes.append(
-            f"Warning: could not remove the deploy key '{github.key_title(key)}' from {repo['slug']} "
-            f"({e.message}). Remove it by hand: the repo's Settings > Deploy keys."
-        )
-    try:
-        if repo.get("branch_created") and github.delete_branch_if_at(
-            repo["slug"], repo["branch"], repo["start_sha"]
-        ):
-            notes.append(f"Branch {repo['branch']} was removed (nothing had been done on it).")
-        elif repo.get("branch_created"):
-            notes.append(f"Branch {repo['branch']} stays on {repo['slug']}.")
-    except core.CrabError as e:
-        notes.append(f"Warning: could not check {repo['branch']} on GitHub ({e.message}); it stays there.")
+    """Forget the agent on this computer. Its branch stays on its agent repo, which keeps the agents' work."""
+    repo = rec["repo"]
     machine.forget_host_key(rec["name"])
     core.remove(rec["name"])
     machine.write_ssh_config()
-    return notes
+    return [f"Branch {repo['branch']} stays on {repo['slug']}."] if repo["branch_created"] else []
 
 
 def send(name: str, text: str) -> dict:

@@ -136,7 +136,7 @@ def test_a_launch_rents_its_pick_and_sets_it_up(fake_vast, machines, monkeypatch
     config = json.loads(machines.uploads["job1"]["config.json"][0])
     assert (config["branch"], config["mode"], config["claude_settings"]) == ("agent/job1", "colleague", {})
     assert config["session_id"] == rec["session_id"] and not {"limit_hours", "model"} & config.keys()
-    assert fake_vast.ssh_keys[rec["instance_id"]] == ["ssh-ed25519 AAAA test"]
+    assert fake_vast.ssh_keys[rec["instance_id"]] == ["ssh-ed25519 AAAA"]  # (the key without its comment)
     assert f"Host {machine.alias('job1')}" in machine.config_file().read_text()
 
 

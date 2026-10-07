@@ -217,12 +217,13 @@ def destroy(instance_id: int) -> None:
 
 
 def add_ssh_key(instance_id: int, public_key: str) -> None:
+    """The key's type and body only: its comment would show in the machine's authorized_keys."""
     try:
         request(
             "POST",
             f"/api/v0/instances/{int(instance_id)}/ssh/",
             f"add the SSH key to machine {instance_id}",
-            {"ssh_key": public_key.strip()},
+            {"ssh_key": " ".join(public_key.split()[:2])},
         )
     except VastError as e:
         if "already" not in e.message.lower():

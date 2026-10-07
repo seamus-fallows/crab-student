@@ -6,10 +6,12 @@ description: Rent a machine on Vast.ai (GPU or CPU) and put a Claude Code agent 
 # crab-student
 
 Agents are Claude Code sessions on rented Vast.ai machines, one per task, each on its own git branch
-`agent/<name>`, writing its report to `agent-runs/<name>/REPORT.md` on that branch. There is no time
-limit: a machine stops itself (saving first) after `idle_minutes` with no CPU or GPU work and no
-conversation activity, and `list` shows what is running and what it costs. The user's setting
-`approve_above_usd_per_hour` decides which machines need their approval.
+`agent/<name>`, writing its report to `agent-runs/<name>/REPORT.md` on that branch. The branches live in
+a private agent repo on the user's GitHub (`<repo>-agents`), not in the user's repo; `pull` fetches one
+into the user's clone. There is no time limit: a machine stops itself (saving first) after
+`idle_minutes` with no CPU or GPU work and no conversation activity, and `list` shows what is running
+and what it costs. The user's setting `approve_above_usd_per_hour` decides which machines need their
+approval.
 
 ## Modes
 

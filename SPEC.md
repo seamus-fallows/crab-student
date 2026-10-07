@@ -39,6 +39,10 @@ the code does it is in the modules named here.
 9. **Modes.** Branch-only pushes, the hooks, the save before every stop, the idle stop and the dead-man
    switch hold in every mode, and every mode runs Claude Code without permission prompts. A hand-off
    never leaves two Claude sessions on one conversation (6.6).
+10. **GitHub.** Agents can write only to their agent repo (4.1): its deploy key is the only GitHub access
+    a machine gets. crab-student never writes to the user's repo (it reads the user's clone and pushes
+    from it to the agent repo; `pull` writes only to the clone). Within the agent repo, the hooks keep
+    each agent on its own branch (best effort: the key itself can push any branch there).
 
 ## 2. Local files
 
@@ -51,8 +55,8 @@ the code does it is in the modules named here.
   agents/<name>.json     the record (3); agents/<name>.lock its OS lock
   agents/<name>.brief.md the brief
   agents/<name>.log      the launch's progress lines with the local time ("~ " marks a status line)
-  agents/_keys-<owner>--<repo>.lock   the repo's deploy key lock (4.2)
-  keys/<owner>--<repo>-<8 hex>(.pub)  the repo's deploy key (4.2)
+  agents/_repo-<owner>--<repo>.lock   an agent repo's lock, held while making it and its key (4.2)
+  keys/<owner>--<repo>(.pub)          an agent repo's deploy key (4.2)
   ssh/id_ed25519(.pub)   the key added to machines
   ssh/config             generated Host entries (crab-student-<name>), included from ~/.ssh/config
   ssh/known_hosts        machines' host keys, under HostKeyAlias crab-student-<name>
@@ -84,9 +88,9 @@ One JSON file per agent, written only by the command holding the agent's lock. `
 Other fields: `disk_gb`;
 `mode` (follows the machine after a hand-off); `claude_settings`; `max_dph` (the most it may rent at
 without asking again); `fake_claude`; `setup` (a command, `none`, or null to detect); `secrets` (names);
-`session_id`; `repo` (slug, workspace, branch, start_sha, local_dir, carried, untracked, deploy_key
-`{id, file, created}`, branch_created, dir on the machine); `offers` (the launcher's pick and up to four
-backups, in order: id, machine_id, dph_total, storage_cost, summary, short);
+`session_id`; `repo` (slug: the agent repo; source: the user's repo, null for `--no-repo`; branch,
+start_sha, local_dir, carried, untracked, branch_created, dir on the machine); `offers` (the launcher's
+pick and up to four backups, in order: id, machine_id, dph_total, storage_cost, summary, short);
 `failed_offers`; `rents` (while racing: `{label, offer_id, at, instance_id (null while unconfirmed),
 running_at}`); `rent`, `instance_id`, `dph`, `disk_usd_day`, `machine`, `short`, `ssh`; `uploaded`;
 `pending` (`{reason, max_dph}`); `warnings`; `last_start` (last rented or started, or seen running again
@@ -95,8 +99,8 @@ after a stop); `stopped_since`; `last_seen` (the last machine status, for displa
 
 Names: 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `<owner>-<name>-<install id>-<4 hex>` (owner: the `owner` setting, else `crab-student`; new
-per rent request, unlike the record's rents in flight); deploy key title
-`crab-student <created>`; tmux session `agent` on the machine.
+per rent request, unlike the record's rents in flight); agent repo `<login>/<repo>-agents`; deploy key
+title `crab-student`; tmux session `agent` on the machine.
 
 ## 4. The launch (`launch.py`)
 
@@ -108,8 +112,9 @@ per rent request, unlike the record's rents in flight); deploy key title
    is kept (`booting`), the others destroyed first; a machine that fails or does not start in time is
    destroyed and the next offer rented in its place. An unconfirmed rent keeps its slot while it is
    looked for by label: one not found when another machine wins becomes a warning, and when only such
-   rents are left for 2 minutes the launch fails. Every offer failed: exit 4. Meanwhile the deploy key
-   (4.2) and branch go on GitHub; a failure there destroys the launch's machines and fails it.
+   rents are left for 2 minutes the launch fails. Every offer failed: exit 4. Meanwhile the agent repo,
+   its deploy key (4.2) and the branch go on GitHub; a failure there destroys the launch's machines and
+   fails it.
 4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's own failure destroys
    the machine and fails the launch (exit 5); a lost connection leaves `setup`.
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
@@ -127,17 +132,26 @@ per rent request, unlike the record's rents in flight); deploy key title
 Several agents are several `launch` processes, each with its own record, lock and race. The launcher
 runs `launch`, `start` and `approve` as background Bash calls (setup can outlast 10 minutes).
 
-**4.1 The repo.** Default: the current repo's GitHub remote, with admin rights (for the deploy key) and
-no branch `agent/<name>` yet. The starting commit is HEAD plus, as one extra commit, what
-`git commit -a` would commit, built from a copy of the index (the user's checkout is untouched);
-untracked files are not carried (a warning names them). It is pushed from the user's computer with the agent's deploy key.
-`--no-repo`: the private `<login>/<workspace_repo>` (created if missing), the branch made through the
-API.
+**4.1 The repo.** An agent's branch `agent/<name>` lives in its agent repo (`slug`), never in the user's
+repo (`source`): `<login>/<repo>-agents` for the current repo's GitHub remote (`<login>`: the `gh`
+login; two repos with one name share it), or the workspace `<login>/<workspace_repo>` for `--no-repo`
+(`source` null). The branch must not exist there yet. The starting commit is HEAD plus, as one extra
+commit, what `git commit -a` would commit, built from a copy of the index (the user's checkout is
+untouched); untracked files are not carried (a warning names them), nor are Git LFS objects or
+relative-URL submodules. It is pushed from the user's computer with the agent repo's deploy key and
+`push.negotiate` (the agent repo's branch tips are agents' commits the clone never saw): only the first
+push sends the history. In the workspace the branch is made through the API, from its default branch.
+`pull` fetches the branch into the clone the agent started from (or `--repo PATH`), which gets the agent
+repo as the remote `agents` the first time, in the transport of its GitHub remote (https or ssh); the
+workspace has its own clone, `~/<workspace_repo>`.
 
-**4.2 Deploy keys.** GitHub emails a repo's admins about every deploy key added, so a repo's agents
-share one: a new agent takes the key another agent on the repo holds, else a new ed25519 key is added
-read-write. It is removed from GitHub and `keys/` when the last agent holding it is deleted. Taking and
-releasing happen under the repo's key lock, with the record saved inside it.
+**4.2 Agent repos and deploy keys.** An agent repo is made the first time, private, with a first commit
+and the description `crab-student agent branches for <source>` (or `... for tasks without a repo`).
+An existing repo of that name is used only if its description starts with `crab-student agent
+branches` and it is private; else the launch fails before renting. Each agent repo has one read-write
+deploy key, made the first time and kept in `keys/`; a launch adds it to GitHub again when GitHub no
+longer has it. Making the repo and its key happens under the agent repo's lock, so parallel launches
+wait for the first. Nothing is ever removed: the agent repo keeps every agent's branch.
 
 **4.3 Offers** (`offers.py`). The launcher picks the machine (`data/launch.md` section 5, which
 `guide launch` fills with the `home` country); the CLI only applies rules. Every offer, browsed or
@@ -187,8 +201,8 @@ never destroys. The boot starts the watchdog, which resumes the conversation.
 5 minutes after `last_start`. No such note, GitHub unreachable, or a failed check: refused (exit 3)
 without `--force`. Refused too (exit 3, with the list and a copy command) for unpushed commits,
 uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. Then: destroy
-the machine and any racing rents' machines, release the deploy key, delete the branch only if it still
-points at `start_sha`, forget the host key and the record.
+the machine and any racing rents' machines, forget the host key and the record. GitHub is left alone:
+the branch and the agent repo's deploy key stay.
 
 **5.4 open.** On an agent that is not ready, `open NAME` first follows the launch log until the phase is
 ready, failed or pending, or nobody holds the lock (cut off). Frontend `tmux`: `agent-attach` over `ssh

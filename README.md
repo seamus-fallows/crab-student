@@ -109,13 +109,10 @@ you approve it (see Money and safety). `crab-student offers --gpus 1 --gpu-ram 2
 on offer, grouped by kind of GPU (`--help` lists the filters), without renting anything. There is no
 cost estimate and no time limit: you decide when a machine has done its job (see Money and safety).
 
-**Two machines at once.** How long a new machine takes to start varies a lot (a host that must first
-download the Docker image can take several minutes; one that has it cached, one or two). So a launch
-rents the launcher's pick and its first backup (which the launcher makes nearly as good) at the same
-time, keeps whichever is ready first (running and answering ssh), and
-destroys the other at once, before anything is uploaded to it. A machine that has not started within 5
-minutes, does not answer ssh within 3 minutes of starting, or fails is destroyed too and the next
-backup rented in its place, so at most two are ever in flight for one launch.
+**If the pick does not start.** A launch rents one machine at a time: one that fails, has not started
+within 15 minutes (a host may first have to download the Docker image) or does not answer ssh within 3
+minutes of starting is destroyed, before anything is uploaded to it, and the next backup is rented in
+its place.
 
 **Modes.** `crab-student launch --mode ...`, or the `mode` setting (default `colleague`), or just say
 it in your request:
@@ -290,17 +287,16 @@ branch stays in the agent repo (`pull` it first if you want it in your clone: `p
   never offered (`crab-student offers --hours H`, for a longer job, asks for twice H), so the machine is
   not taken away in the middle of a job.
 - **Your machines only.** crab-student acts only on machines it rented and recorded, and never repeats
-  a rent request whose outcome is unknown (so you never pay twice). Renting two machines for a launch is
-  deliberate and bounded: at most two are in flight, both within the price you allow, and the one not
-  kept is destroyed before anything is uploaded to it. If Vast never confirms a rent, the launch says
-  so (with a warning, or by failing when nothing else came up), and if that machine shows up later,
-  `crab-student list` points it out for you to destroy on Vast's website. Teammates who share your Vast
-  account and use crab-student are safe: every machine's label carries an id of the computer that
-  rented it, so `list` never points out theirs, and nothing acts on a machine that is not in your
-  records.
+  a rent request whose outcome is unknown (so you never pay twice). A launch has one machine at a time,
+  and rents a backup only once the machine before it is destroyed. If Vast never confirms a rent and
+  no machine with its label shows up within 2 minutes, the launch fails and says so, and if that
+  machine shows up later, `crab-student list` points it out for you to destroy on Vast's website.
+  Teammates who share your Vast account and use crab-student are safe: every machine's label carries
+  an id of the computer that rented it, so `list` never points out theirs, and nothing acts on a
+  machine that is not in your records.
 - **Nothing is destroyed automatically** once an agent has run on it: crab-student destroys a machine
-  by itself only before anything was uploaded to it (it lost its launch's race, failed to start, or its
-  launch was cut off and is being started again) or when its setup failed.
+  by itself only before anything was uploaded to it (it failed to start, its launch failed on GitHub, or
+  its launch was cut off and is being started again) or when its setup failed.
 - **GitHub access.** Agents never get access to your repo, and crab-student never writes to it. An
   agent works in its agent repo (`<repo>-agents`, private, on your account), with that repo's deploy key:
   one per agent repo, added the first time and kept (GitHub emails you when it is added). Within the
@@ -370,9 +366,10 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
 
 - **A launch was cut off** (Ctrl-C, a closed terminal; `list` says `interrupted`, and its window says
   it stopped): `crab-student start NAME` continues it. Cut off during setup, it carries on with the
-  same machine; earlier, it destroys the machines (they hold nothing) and tries again with the offers
-  that have not failed. If those are gone, the error says so: `crab-student start NAME --offers ID,ID`
-  tries others (`crab-student offers` shows them).
+  same machine; earlier, it destroys the machine (it holds nothing) and tries again with the offers
+  that have not failed, looked up and priced again (a pick that now costs more than you allowed waits
+  for `approve`). If those are gone, the error says so: `crab-student start NAME --offers ID,ID` tries
+  others (`crab-student offers` shows them).
   Closing the window that follows a launch does not stop the launch.
 - **"Vast did not confirm the rent"**: crab-student never sends a rent request twice. If the launch
   failed for it, `crab-student start NAME` tries again. If `list` later warns about a

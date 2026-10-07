@@ -39,11 +39,11 @@ _STOP_CALL = (
 )
 ONSTART = "\n".join(
     [
-        "D=/root/crab-student; mkdir -p $D/logs; cd $D; umask 077;",
+        f"D={machine.REMOTE_DIR}; mkdir -p $D/logs; cd $D; umask 077;",
         "env | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY|CS_VAST_URL)=' | sed 's/^/export /' > vast.env;",
         "printf 'Authorization: Bearer %s\\n' \"$CONTAINER_API_KEY\" > vast.header;",
         "date +%s > booted;",
-        "nohup bash -c 'cd /root/crab-student; while sleep 60; do t=$(cat booted); "
+        "nohup bash -c 'while sleep 60; do t=$(cat booted); "  # (in D: it starts where onstart is)
         'h=$(stat -c %Y heartbeat 2>/dev/null || echo 0); [ "$h" -gt "$t" ] && t=$h; '
         f"if [ $(( $(date +%s) - t )) -gt 2700 ]; then . ./vast.env; {_STOP_CALL}; fi; done' "
         "> logs/deadman.log 2>&1 &",

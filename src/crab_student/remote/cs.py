@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
-D = ROOT / "crab-student"
+D = ROOT / ".machine"  # (machine.REMOTE_DIR on the local side)
 OUTPUTS = ROOT / "outputs"
 BIN = Path(os.environ.get("CS_BIN", "/usr/local/bin"))
 PROFILE_D = Path(os.environ.get("CS_PROFILE_D", "/etc/profile.d"))

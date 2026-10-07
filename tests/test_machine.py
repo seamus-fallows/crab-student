@@ -247,7 +247,7 @@ def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_a
     if Path("/venv/main/bin/python").exists():
         pytest.skip("this computer has the image's /venv/main")
     python3 = fake_python(tmp_path / "bin" / "python3", version)
-    d = tmp_path / "crab-student"
+    d = tmp_path / ".machine"
     d.mkdir()
     env = {"PATH": f"{python3.parent}{os.pathsep}/usr/bin{os.pathsep}/bin"}
     p = subprocess.run(

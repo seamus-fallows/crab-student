@@ -28,9 +28,9 @@ A single-user tool its owner wants simple and fast.
   print as they go, and `launch.Progress` prints progress. `vast.py` is the only code that calls Vast.
 - Which machine to rent is the launcher's choice (`data/launch.md`, served by `crab-student guide launch`), not
   code. `offers.py` only applies fixed rules and filters.
-- `src/crab_student/remote/`: the machine side, uploaded flat to `/root/crab-student/` (the onstart command and
-  dead-man switch name that path). Standard library only, Python 3.11+ like the rest, LF line endings. The
-  watchdog never dies of an exception.
+- `src/crab_student/remote/`: the machine side, uploaded flat to `/root/.machine/` (`machine.REMOTE_DIR`, which
+  the onstart command uses; `D` in cs.py). Standard library only, Python 3.11+ like the rest, LF line endings.
+  The watchdog never dies of an exception.
 
 ## Conventions
 

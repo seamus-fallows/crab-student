@@ -1,4 +1,4 @@
-"""The machine side end to end, on Linux: the real cs.py, copied flat into <root>/crab-student as the upload
+"""The machine side end to end, on Linux: the real cs.py, copied flat into <root>/.machine as the upload
 leaves it, runs setup (with the dependency install), the watchdog, the fake Claude in tmux, status, send and the
 idle stop, and an interactive agent's hand-off from VS Code to tmux. "GitHub" is a local bare repo and Vast a
 local HTTP server; tmux runs a server of its own (TMUX_TMPDIR). It needs tmux, git, bash and pgrep (Linux CI
@@ -69,7 +69,7 @@ def machine(tmp_path, vast):
     environment. At the end the watchdog's process group, the tmux server and anything else still running from
     D are killed."""
     root, bin_dir, bare = tmp_path / "root", tmp_path / "bin", github(tmp_path)
-    d, repo = root / "crab-student", root / "work" / "proj"
+    d, repo = root / ".machine", root / "work" / "proj"
     d.mkdir(parents=True)
     for path in REMOTE.iterdir():  # (the machine code, as the bundle carries it)
         if path.suffix in (".py", ".md"):

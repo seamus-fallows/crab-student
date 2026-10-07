@@ -637,6 +637,21 @@ def test_nothing_the_agent_reads_names_the_tool(cs):
         assert message.startswith("Automated message from the machine:")
 
 
+def test_nothing_setup_leaves_where_the_agent_looks_names_the_tool(cs, bare, monkeypatch):
+    """The login profile, the agent's commands, the git hooks and git's settings name the machine's folder."""
+    monkeypatch.setattr(
+        cs, "PY", "/usr/bin/python3"
+    )  # (this test's own Python may live under the tool's name)
+    monkeypatch.setattr(cs.shutil, "which", lambda name: "/usr/bin/" + name)  # (tmux is there)
+    c = set_config(cs, mode="interactive", fake_claude=True)
+    cs.setup_environment(c, {})
+    cs.setup_repository(c, {})
+    written = [cs.PROFILE_D / "agent.sh", cs.ROOT / ".bashrc", cs.ROOT / ".tmux.conf", *cs.BIN.iterdir(),
+               *(cs.D / "hooks").iterdir()]  # fmt: skip
+    texts = [path.read_text() for path in written] + [git(c["repo_dir"], "config", "--list")]
+    assert not any("crab" in text.lower() for text in texts)
+
+
 # ---- notifications and the watchdog's stop -------------------------------------------------------
 
 

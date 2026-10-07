@@ -21,7 +21,7 @@ from pathlib import Path
 
 from crab_student import core
 
-REMOTE_DIR = "/root/crab-student"
+REMOTE_DIR = "/root/.machine"  # (hidden, and not named after the tool: the agent never hears its name)
 MIN_PYTHON = (3, 11)  # (the local side's too: the tests run the machine code on it)
 # The machine code runs on the first Python new enough among the image's python3 and /venv/main's. Setup links
 # it as D/python, and everything after runs that link (the commands over ssh, the watchdog Vast's onstart

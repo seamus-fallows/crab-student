@@ -219,7 +219,7 @@ brief over 5,000 characters becomes a pointer to `/root/BRIEF.md`).
 
 ## 6. The machine (`remote/cs.py`)
 
-`D=/root/crab-student` (the onstart command names it); the repo at `/root/work/<repo>`; big outputs in
+`D=/root/.machine` (the onstart command names it); the repo at `/root/work/<repo>`; big outputs in
 `/root/outputs`; the brief at `/root/BRIEF.md` (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command, `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&

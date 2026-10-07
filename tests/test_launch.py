@@ -105,14 +105,12 @@ def user_state(repo: Path) -> list[str]:
 # ---- the happy path and the repo -----------------------------------------------------------------
 
 
-def test_a_launch_races_two_machines_keeps_the_first_ready_and_sets_it_up(
-    fake_vast, fake_github, user_repo, machines, monkeypatch, capsys
-):
-    recorded = []  # (the label sent, the record's rent labels at the moment Vast gets the rent request)
+def test_a_launch_rents_its_pick_and_sets_it_up(fake_vast, machines, monkeypatch, capsys):
+    recorded = []  # (the label sent, and the record's label at the moment Vast gets the rent request)
     real_rent = fake_vast._rent
 
     def rent(offer_id, body):
-        recorded.append((body["label"], [r["label"] for r in core.load("job1")["rents"]]))
+        recorded.append((body["label"], core.load("job1")["label"]))
         return real_rent(offer_id, body)
 
     monkeypatch.setattr(fake_vast, "_rent", rent)
@@ -123,16 +121,18 @@ def test_a_launch_races_two_machines_keeps_the_first_ready_and_sets_it_up(
     res, rec = json.loads(captured.out), core.load("job1")
     assert res["state"] == "working" and res["branch"] == "agent/job1" and res.keys() >= RESULT_KEYS
     assert rec["phase"] == "ready" and res["instance_id"] == rec["instance_id"]
-    assert [r[1] for r in rents(fake_vast)] == ["/api/v0/asks/1/", "/api/v0/asks/2/"]  # (both at once)
-    assert all(label in saved for label, saved in recorded) and len(recorded) == 2
-    assert all(launch.own_label(label) and label.startswith("crab-student-job1-") for label, _ in recorded)
-    # the first machine ready (offer 1) is kept; the other was destroyed before anything reached it
-    assert fake_vast.instances[rec["instance_id"]]["offer_id"] == 1 and list(fake_vast.instances) == [
-        rec["instance_id"]
-    ]
-    assert len(fake_vast.calls("DELETE", "/")) == 1 and set(machines.uploads) == {"job1"}
-    assert rec["rent"]["label"] == recorded[0][0] and rec["rents"] == [] == rec["failed_offers"]
-    assert rec["last_start"] and rec["disk_gb"] == 64 and "limit_hours" not in rec
+    ((label, saved),) = recorded  # (only the pick was rented: the backup was not needed)
+    assert (
+        label == saved == rec["label"] and launch.own_label(label) and label.startswith("crab-student-job1-")
+    )
+    assert (
+        kept_offer(fake_vast) == 1
+        and not fake_vast.calls("DELETE", "/")
+        and set(machines.uploads) == {"job1"}
+    )
+    assert (
+        rec["failed_offers"] == [] and rec["last_start"] and rec["disk_gb"] == 64 and "limit_hours" not in rec
+    )
     config = json.loads(machines.uploads["job1"]["config.json"][0])
     assert (config["branch"], config["mode"], config["claude_settings"]) == ("agent/job1", "colleague", {})
     assert config["session_id"] == rec["session_id"] and not {"limit_hours", "model"} & config.keys()
@@ -200,6 +200,7 @@ def test_an_interactive_agent_is_opened_in_vs_code(machines):
 
 def test_a_launch_rents_the_offers_it_is_given_in_their_order(fake_vast):
     three_offers(fake_vast)
+    fake_vast.boot[3] = "exits"
     go(args(offer_ids=[3, 1]))
     assert [r[1] for r in rents(fake_vast)] == ["/api/v0/asks/3/", "/api/v0/asks/1/"]
     assert [o["id"] for o in core.load("job1")["offers"]] == [3, 1]
@@ -238,6 +239,7 @@ def test_the_rent_asks_for_the_disk_given(fake_vast):
 
 def test_the_owner_setting_starts_the_rent_labels(fake_vast):
     core.set_config("owner", "SFALLOWS")
+    fake_vast.boot[1] = "exits"
     go(args(offer_ids=[1, 2]))
     labels = [sent[2]["label"] for sent in rents(fake_vast)]
     assert all(re.fullmatch(rf"SFALLOWS-job1-{core.install_id()}-[0-9a-f]{{4}}", x) for x in labels)
@@ -377,7 +379,7 @@ def test_decline_forgets_a_pending_launch(fake_vast):
     assert not fake_vast.calls("PUT", "/")
 
 
-# ---- the race ------------------------------------------------------------------------------------
+# ---- one machine at a time -----------------------------------------------------------------------
 
 
 def three_offers(fake_vast) -> None:
@@ -385,75 +387,55 @@ def three_offers(fake_vast) -> None:
 
 
 def kept_offer(fake_vast) -> int:
+    """The offer of the agent's machine, the only machine left on Vast."""
     rec = core.load("job1")
-    assert rec["phase"] == "ready" and list(fake_vast.instances) == [
-        rec["instance_id"]
-    ]  # (nothing else left)
+    assert rec["phase"] == "ready" and list(fake_vast.instances) == [rec["instance_id"]]
     return fake_vast.instances[rec["instance_id"]]["offer_id"]
 
 
-def test_the_machine_ready_first_wins_the_race_even_if_it_is_the_backup(fake_vast):
-    fake_vast.boot[1] = 6  # (polls until it runs: offer 2 runs at once)
-    go(args())
-    assert kept_offer(fake_vast) == 2 and len(rents(fake_vast)) == 2
-    assert core.load("job1")["failed_offers"] == []  # (offer 1 lost the race: it did not fail)
-
-
-def test_a_taken_offer_moves_on_to_the_next(fake_vast):
-    fake_vast.rent_outcome[1] = "taken"
-    go(args())
-    assert kept_offer(fake_vast) == 2 and [f["id"] for f in core.load("job1")["failed_offers"]] == [1]
-    assert len(rents(fake_vast)) == 2
-
-
-@pytest.mark.parametrize("boot", ["boot_error", "exits"])
-def test_a_machine_that_fails_to_start_is_destroyed_and_the_next_offer_rented_in_its_place(boot, fake_vast):
-    three_offers(fake_vast)
-    fake_vast.boot[1], fake_vast.boot[2] = boot, "never"
-    go(args(offer_ids=[1, 2, 3]))
-    assert kept_offer(fake_vast) == 3 and [r[1] for r in rents(fake_vast)][-1] == "/api/v0/asks/3/"
-    assert [f["id"] for f in core.load("job1")["failed_offers"]] == [1]  # (offer 2 lost the race to 3)
-    assert len(fake_vast.calls("DELETE", "/")) == 2
-
-
-def test_machines_not_started_within_the_start_time_are_given_up(fake_vast, monkeypatch):
-    monkeypatch.setattr(launch, "START_TIMEOUT", 0.3)  # (5 minutes for real)
-    three_offers(fake_vast)
-    fake_vast.boot[1] = fake_vast.boot[2] = "never"
-    go(args(offer_ids=[1, 2, 3]))
-    assert kept_offer(fake_vast) == 3 and len(rents(fake_vast)) == 3
-    assert sorted(f["id"] for f in core.load("job1")["failed_offers"]) == [1, 2]
-
-
-def test_a_running_machine_whose_ssh_does_not_answer_in_time_is_given_up(fake_vast, monkeypatch):
-    monkeypatch.setattr(launch, "SSH_TIMEOUT", 0.3)
-    three_offers(fake_vast)
-    fake_vast.boot[1], fake_vast.boot[2] = "no_ssh", "never"
-    go(args(offer_ids=[1, 2, 3]))
-    assert kept_offer(fake_vast) == 3 and [f["id"] for f in core.load("job1")["failed_offers"]] == [1]
-
-
-def test_never_more_than_two_machines_are_in_flight(fake_vast, monkeypatch):
-    monkeypatch.setattr(launch, "START_TIMEOUT", 0.3)
-    three_offers(fake_vast)
-    fake_vast.boot.update({1: "never", 2: "never"})
-    most, real_rent = [], fake_vast._rent
+def machines_held(fake_vast, monkeypatch) -> list[int]:
+    """For each rent request from now on, how many machines the agent already had on Vast."""
+    held, real_rent = [], fake_vast._rent
 
     def rent(offer_id, body):
-        most.append(len(fake_vast.instances) + 1)
+        mine = body["label"][:-4]  # (an agent's rent labels differ only in their last 4 hex digits)
+        held.append(sum(str(i["label"]).startswith(mine) for i in fake_vast.instances.values()))
         return real_rent(offer_id, body)
 
     monkeypatch.setattr(fake_vast, "_rent", rent)
+    return held
+
+
+@pytest.mark.parametrize("trouble", ["taken", "boot_error", "exits", "never", "no_ssh"])
+def test_a_pick_that_does_not_come_up_is_destroyed_before_the_next_offer_is_rented(
+    trouble, fake_vast, monkeypatch
+):
+    monkeypatch.setattr(launch, "START_TIMEOUT", 0.3)  # ("never": not running in time)
+    monkeypatch.setattr(launch, "SSH_TIMEOUT", 0.3)  # ("no_ssh": running, but ssh does not answer in time)
+    three_offers(fake_vast)
+    if trouble == "taken":
+        fake_vast.rent_outcome[1] = "taken"
+    else:
+        fake_vast.boot[1] = trouble
+    held = machines_held(fake_vast, monkeypatch)
     go(args(offer_ids=[1, 2, 3]))
-    assert max(most) <= launch.RACERS and core.load("job1")["phase"] == "ready"
+    assert kept_offer(fake_vast) == 2 and [f["id"] for f in core.load("job1")["failed_offers"]] == [1]
+    assert held == [0, 0]  # (never two machines at once)
+    assert len(fake_vast.calls("DELETE", "/")) == (trouble != "taken")
 
 
 def test_a_running_machine_with_an_old_error_in_its_status_is_kept(fake_vast, monkeypatch):
-    fake_vast.offers = [offer(1)]
     fake_vast.boot[1] = "stale_error"
     answers = iter([False, False])  # (ssh answers from the third poll)
-    monkeypatch.setattr(machine, "reachable", lambda name, addr=None: next(answers, True))
-    go(args(offer_ids=[1]))
+    monkeypatch.setattr(machine, "reachable", lambda name: next(answers, True))
+    go(args())
+    assert kept_offer(fake_vast) == 1 and len(rents(fake_vast)) == 1 and not fake_vast.calls("DELETE", "/")
+
+
+def test_vast_out_of_reach_while_the_machine_boots_does_not_end_the_launch(fake_vast):
+    fake_vast.boot[1] = 3
+    fake_vast.lookup_failures = 6  # (two lookups, each through all its retries)
+    go(args())
     assert kept_offer(fake_vast) == 1 and len(rents(fake_vast)) == 1 and not fake_vast.calls("DELETE", "/")
 
 
@@ -462,7 +444,7 @@ def test_when_every_offer_fails_the_launch_fails_with_exit_4(fake_vast):
     fake_vast.boot[2] = "exits"
     fails(4, go, args())
     rec = core.load("job1")
-    assert rec["phase"] == "failed" and rec["error"] and rec["instance_id"] is None and rec["rents"] == []
+    assert rec["phase"] == "failed" and rec["error"] and rec["instance_id"] is None and rec["label"] is None
     assert not fake_vast.instances  # (the one that did not start was destroyed)
 
 
@@ -477,56 +459,47 @@ def test_after_every_offer_failed_start_needs_other_offers(fake_vast, machines):
 
 
 @pytest.mark.parametrize("outcome", ["error_created", "slow_created"])
-def test_a_rent_vast_did_not_confirm_is_found_by_its_label(outcome, fake_vast, monkeypatch):
+def test_a_rent_vast_did_not_confirm_is_found_by_its_label_and_kept(outcome, fake_vast, monkeypatch):
     monkeypatch.setattr(vast, "RENT_TIMEOUT", 0.5)
     monkeypatch.setattr(launch, "LABEL_WAIT", 5.0)  # (the search stops as soon as the label shows)
-    fake_vast.offers = [offer(1)]
     fake_vast.slow_seconds = 1.5
     fake_vast.rent_outcome[1] = outcome
-    go(args(offer_ids=[1]))
+    go(args())
     rec = core.load("job1")
     assert kept_offer(fake_vast) == 1 and len(rents(fake_vast)) == 1
-    assert fake_vast.instances[rec["instance_id"]]["label"] == rec["rent"]["label"]
+    assert fake_vast.instances[rec["instance_id"]]["label"] == rec["label"] == rents(fake_vast)[0][2]["label"]
 
 
-def test_a_race_left_with_only_an_unconfirmed_rent_fails_and_start_plans_afresh(fake_vast):
-    fake_vast.offers = [offer(1)]
-    fake_vast.rent_outcome[1] = "error_none"
-    error = fails(1, go, args(offer_ids=[1]))
-    rec, (sent,) = core.load("job1"), rents(fake_vast)
-    assert rec["phase"] == "failed" and rec["error"] and rec["rents"] == []
-    assert sent[2]["label"] in error.message  # (the machine to look out for)
-    fake_vast.rent_outcome[1] = "ok"
-    assert launch.start("job1", out())["state"] == "working"
-    first, again = rents(fake_vast)
-    assert core.load("job1")["phase"] == "ready" and again[2]["label"] != first[2]["label"]  # (a new rent)
-
-
-def test_an_unconfirmed_rent_the_winner_left_behind_is_a_warning_and_list_points_out_its_machine(
+def test_a_rent_whose_machine_never_shows_up_fails_the_launch_and_nothing_else_is_rented(
     fake_vast, machines, capsys
 ):
     fake_vast.rent_outcome[1] = "error_none"  # (Vast did not answer: it may yet show a machine)
-    res = go(args())
-    label = rents(fake_vast)[0][2]["label"]
-    assert kept_offer(fake_vast) == 2 and res["exit_code"] == 0 and any(label in w for w in res["warnings"])
+    error = fails(1, go, args())
+    rec, (sent,) = core.load("job1"), rents(fake_vast)  # (the backup was not rented)
+    label = sent[2]["label"]
+    assert (
+        rec["phase"] == "failed" and rec["label"] is None and label in error.message and label in rec["error"]
+    )
     late = fake_vast.add_instance(1, label, status="loading")  # (it did rent, after all)
     assert cli.main(["list", "--json"]) == 0
     shown, err = capsys.readouterr()
     assert [v["name"] for v in json.loads(shown)] == ["job1"] and label in err and str(late) in err
-    assert (
-        late in fake_vast.instances and len(rents(fake_vast)) == 2
-    )  # (never destroyed by list, never sent again)
+    assert late in fake_vast.instances  # (never destroyed by list)
+    fake_vast.rent_outcome[1] = "ok"
+    assert launch.start("job1", out())["state"] == "working"
+    _, again = rents(fake_vast)
+    assert again[2]["label"] != label  # (a new rent: the first request is never sent again)
 
 
-def test_a_github_step_that_fails_during_the_race_destroys_both_machines(fake_vast, monkeypatch):
+def test_a_github_step_that_fails_while_the_machine_boots_destroys_it(fake_vast, monkeypatch):
     def refused(*a):
         raise core.CrabError("GitHub refused the branch")
 
     monkeypatch.setattr(github, "create_branch", refused)
     fails(1, go, args())
     rec = core.load("job1")
-    assert rec["phase"] == "failed" and rec["rents"] == [] and len(rents(fake_vast)) == 2
-    assert not fake_vast.instances  # (neither held anything)
+    assert rec["phase"] == "failed" and rec["label"] is None and len(rents(fake_vast)) == 1
+    assert not fake_vast.instances  # (it held nothing)
 
 
 def test_no_credit_fails_the_launch_without_trying_other_offers(fake_vast):
@@ -549,20 +522,53 @@ def interrupt_once(monkeypatch, owner, name: str) -> None:
     monkeypatch.setattr(owner, name, interrupted)
 
 
-@pytest.mark.parametrize("where,phase", [("race", "renting"), ("kept", "booting")])
-def test_a_launch_cut_off_before_its_upload_is_destroyed_and_planned_afresh_by_start(
-    where, phase, fake_vast, machines, monkeypatch
+def cut_off_after(monkeypatch, owner, name: str) -> None:
+    """The next call of owner.name goes through, then the command is cut off before it hears the answer."""
+    real = getattr(owner, name)
+
+    def interrupted(*a, **kw):
+        monkeypatch.setattr(owner, name, real)
+        real(*a, **kw)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(owner, name, interrupted)
+
+
+@pytest.mark.parametrize("where", ["planned", "renting", "booting", "booted"])
+def test_start_on_a_launch_cut_off_before_its_upload_destroys_its_machine_and_plans_afresh(
+    where, fake_vast, machines, monkeypatch
 ):
-    interrupt_once(monkeypatch, *((machine, "reachable") if where == "race" else (launch, "setup_machine")))
+    """Cut off before its rent was saved, after Vast made the machine but before its id was saved, while the
+    machine boots, or before the upload: start destroys the machine (it holds nothing), looks the offers up again
+    and checks the price again."""
+    if where == "renting":
+        cut_off_after(monkeypatch, vast, "rent")
+    else:
+        cut = {
+            "planned": (launch, "rent_label"),
+            "booting": (machine, "reachable"),
+            "booted": (launch, "setup_machine"),
+        }
+        interrupt_once(monkeypatch, *cut[where])
     with pytest.raises(KeyboardInterrupt):
         go(args())
-    rec, rented = core.load("job1"), set(fake_vast.instances)
-    assert rec["phase"] == phase and len(rec["rents"]) == (2 if where == "race" else 0) and rented
-    assert launch.start("job1", out())["state"] == "working"
-    rec = core.load("job1")
-    assert rec["phase"] == "ready" and len(rents(fake_vast)) == 4  # (two fresh rents)
-    assert list(fake_vast.instances) == [rec["instance_id"]] and not rented & set(fake_vast.instances)
-    assert "job1" in machines.uploads
+    rec, made, known = core.load("job1"), where != "planned", where in ("booting", "booted")
+    assert rec["phase"] == "renting" and not rec["uploaded"] and len(fake_vast.instances) == made
+    assert (rec["label"] is not None) is made and (rec["instance_id"] is not None) is known
+    fake_vast.offers = [offer(2, dph_total=6.0)]  # (offer 1 is gone, and offer 2 now costs more than $5/hr)
+    res, rec = launch.start("job1", out()), core.load("job1")
+    assert res["exit_code"] == 3 and rec["phase"] == "pending" and rec["pending"]["max_dph"] == 6.0
+    assert not fake_vast.instances and len(rents(fake_vast)) == made  # (destroyed, and nothing rented)
+    launch.approve("job1", out())
+    assert kept_offer(fake_vast) == 2 and "job1" in machines.uploads
+
+
+def test_start_on_a_launch_cut_off_before_its_upload_takes_other_offers(fake_vast, machines, monkeypatch):
+    interrupt_once(monkeypatch, machine, "reachable")
+    with pytest.raises(KeyboardInterrupt):
+        go(args())
+    three_offers(fake_vast)
+    assert launch.start("job1", out(), [3])["state"] == "working" and kept_offer(fake_vast) == 3
 
 
 def test_a_launch_cut_off_during_its_upload_is_continued_by_start(fake_vast, machines):
@@ -572,7 +578,7 @@ def test_a_launch_cut_off_during_its_upload_is_continued_by_start(fake_vast, mac
     rec = core.load("job1")
     assert rec["phase"] == "setup" and rec["instance_id"] in fake_vast.instances
     assert launch.start("job1", out())["state"] == "working"
-    assert core.load("job1")["phase"] == "ready" and len(rents(fake_vast)) == 2  # (nothing rented again)
+    assert core.load("job1")["phase"] == "ready" and len(rents(fake_vast)) == 1  # (nothing rented again)
     assert list(fake_vast.instances) == [rec["instance_id"]] and "job1" in machines.uploads
 
 
@@ -596,12 +602,7 @@ def test_a_failed_setup_destroys_the_machine_and_start_tries_its_offers_again(fa
     assert rec["phase"] == "failed" and rec["instance_id"] is None and not fake_vast.instances
     machines.setup_result = None
     assert launch.start("job1", out())["state"] == "working"
-    rec = core.load("job1")
-    assert (
-        rec["phase"] == "ready"
-        and len(rents(fake_vast)) == 4
-        and list(fake_vast.instances) == [rec["instance_id"]]
-    )
+    assert kept_offer(fake_vast) == 1 and len(rents(fake_vast)) == 2
 
 
 # ---- what a launch refuses, dry runs, the rent body ----------------------------------------------
@@ -669,13 +670,9 @@ def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(f
     rec["last_seen"] = {"used_hours": 0.5, "stop_reason": "user"}
     core.save(rec)
     fake_vast.start_polls = 3  # (it reads "exited", with an error, until its host has room)
-    destroyed = len(fake_vast.calls("DELETE", "/"))  # (the machine that lost the launch's race)
     assert launch.start("job1", out())["state"] == "working" and machine_runs(fake_vast)
     assert core.load("job1")["last_seen"]["stop_reason"] is None
-    assert (
-        len(fake_vast.calls("DELETE", "/")) == destroyed
-        and core.load("job1")["instance_id"] in fake_vast.instances
-    )
+    assert not fake_vast.calls("DELETE", "/") and core.load("job1")["instance_id"] in fake_vast.instances
 
 
 def test_a_failed_launch_tried_again_on_a_pricier_machine_asks_first(fake_vast, machines):
@@ -684,7 +681,8 @@ def test_a_failed_launch_tried_again_on_a_pricier_machine_asks_first(fake_vast, 
     machines.setup_result = None
     fake_vast.offers.append(offer(9, dph_total=7.50))  # (over the default $5/hr)
     res = launch.start("job1", out(), [9])
-    assert res["exit_code"] == 3 and core.load("job1")["phase"] == "pending" and not machine_runs(fake_vast)
+    assert res["exit_code"] == 3 and core.load("job1")["phase"] == "pending" and res["dph"] == 7.5
+    assert not fake_vast.instances  # (the machine whose setup failed was destroyed)
     launch.approve("job1", out())
     assert core.load("job1")["phase"] == "ready" and core.load("job1")["max_dph"] == 7.5
 

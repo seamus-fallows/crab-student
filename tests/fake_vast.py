@@ -5,7 +5,8 @@ Tests set its behaviour: `offers` (what searches return, filtered like Vast woul
 slow_created), `boot[offer_id]` (polls until running, or "never", "boot_error", "exits", "stale_error":
 runs at once, an old error still in its status message; "no_ssh": runs at once, with no ssh address),
 `start_polls` (polls a machine started again still reads "exited", with an error, while its host makes
-room), and read `requests` (every call) and `instances`.
+room), `lookup_failures` (machine lookups answered 503 from now on, as when Vast is down), and read
+`requests` (every call) and `instances`.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ class FakeVast:
         self.ssh_keys: dict[int, list[str]] = {}
         self.slow_seconds = 1.0
         self.start_polls = 0
+        self.lookup_failures = 0
         self._next = 5000
         self.lock = threading.Lock()
 
@@ -96,6 +98,9 @@ class FakeVast:
             if inst is None:
                 return 404, {"success": False, "msg": "no such instance"}
             if method == "GET":
+                if self.lookup_failures:
+                    self.lookup_failures -= 1
+                    return 503, {"success": False, "msg": "service unavailable"}
                 self._advance(inst)
                 return 200, {"instances": {k: v for k, v in inst.items() if k != "polls"}}
             if method == "PUT":

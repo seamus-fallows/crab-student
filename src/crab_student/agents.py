@@ -83,10 +83,10 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
 
 
 def orphans(insts: list[dict], recs: list[dict]) -> list[dict]:
-    """The instances labelled as rented by crab-student on this computer that are no agent's (its machine, or one
-    of its rents): most likely a rent Vast did not confirm that went through after all. Teammates' machines on a
-    shared Vast account carry another install id, so they never show. Never destroyed from here."""
-    labels = {r["label"] for rec in recs for r in [rec.get("rent"), *(rec.get("rents") or [])] if r}
+    """The instances labelled as rented by crab-student on this computer that belong to no agent (no record has
+    their id or their label): most likely a rent Vast did not confirm that went through after all. Teammates'
+    machines on a shared Vast account carry another install id, so they never show. Never destroyed from here."""
+    labels = {rec.get("label") for rec in recs}
     ids = {rec.get("instance_id") for rec in recs}
     return [
         i
@@ -134,11 +134,9 @@ def display_state(
     name, phase, last = rec["name"], rec["phase"], rec.get("last_seen") or {}
     if phase == "pending":
         return "approval", f"waiting for your approval: {rec['pending']['reason']}"
-    if phase in ("renting", "booting", "setup"):
+    if phase in ("renting", "setup"):
         if busy:
-            return "starting", {"renting": "renting a machine", "booting": "booting", "setup": "setting up"}[
-                phase
-            ]
+            return "starting", "renting a machine" if phase == "renting" else "setting up"
         return "interrupted", f"launch interrupted: crab-student start {name} tries again"
     if phase == "failed":
         return "failed", rec.get("error") or ""
@@ -303,7 +301,9 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                 "name": name,
                 "result_line": f"Deleted {name} (it was waiting for approval; nothing was rented).",
             }
-        inst = vast.instance(rec["instance_id"]) if rec.get("instance_id") else None
+        # (a launch cut off before Vast confirmed its rent: its machine has only the rent's label)
+        iid = rec.get("instance_id") or (rec.get("label") and launch.find_by_label(rec["label"]))
+        inst = vast.instance(iid) if iid else None
         if inst and rec.get("uploaded") and not force:  # (a machine that received its files may hold work)
             running = vast.running(inst)
             if running:
@@ -340,15 +340,10 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     ),
                     3,
                 )
-        ids, lost = [inst["id"]] if inst else [], []
-        for r in rec["rents"]:  # (a race cut off: its machines never received anything)
-            if iid := r["instance_id"] or launch.find_by_label(r["label"]):
-                ids.append(iid)
-            else:
-                lost.append(f"Warning: {launch.unconfirmed(r)}")
-        for iid in ids:
+        if inst:
             vast.destroy(iid)
             out.line(f"Destroyed machine {iid}.")
+        lost = [f"Warning: {launch.unconfirmed(rec['label'])}"] if rec.get("label") and not iid else []
         lines = [f"Deleted {name}.", *_cleanup(rec), *lost]
     return {"name": name, "result_line": "\n".join(lines)}
 

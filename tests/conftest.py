@@ -146,7 +146,7 @@ def machines(monkeypatch) -> FakeMachines:
     fake = FakeMachines()
     monkeypatch.setattr(machine, "remote", fake.remote)
     monkeypatch.setattr(machine, "upload_and_setup", fake.upload_and_setup)
-    monkeypatch.setattr(machine, "reachable", lambda name, addr=None: fake.reachable)
+    monkeypatch.setattr(machine, "reachable", lambda name: fake.reachable)
     monkeypatch.setattr(machine, "forget_host_key", lambda name: None)
     return fake
 

@@ -26,8 +26,7 @@ def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     """An agent record with the fields agents read."""
     repo = {"slug": AGENTS, "source": "ada/proj", "branch": f"agent/{name}", "start_sha": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
-    return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
-            "rents": [],
+    return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "label": None,
             "instance_id": None, "dph": 0.40, "disk_usd_day": None, "mode": "colleague", "claude_settings": {},
             "machine": "1x RTX 4090",
             "ssh": None, "last_seen": None, "last_start": None, "stopped_since": None,
@@ -108,7 +107,7 @@ def push_to_branch(fake_github, tmp_path, path: str, text: str) -> None:
 DISPLAY = [  # (record fields, Vast's instance, ctl.py status, lock held) -> STATE, and a part of MESSAGE
     ({"phase": "pending", "pending": {"reason": "it would cost $6.00/hr", "max_dph": 6.0}}, None, None, False,
      "approval", "$6.00/hr"),
-    ({"phase": "booting"}, None, None, True, "starting", ""),  # (a launch at work)
+    ({"phase": "renting"}, None, None, True, "starting", ""),  # (a launch at work)
     ({"phase": "renting"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "setup"}, None, None, False, "interrupted", "start job1"),
     ({"phase": "failed", "error": "every offer failed"}, None, None, False, "failed", "every offer failed"),
@@ -309,35 +308,40 @@ def test_a_clean_check_destroys_the_machine_and_keeps_the_branch_and_the_deploy_
     assert not [c for c in fake_github.calls if c[:2] == ("api", "-X") and c[2] != "GET"]  # (nothing written)
 
 
-def rent(label: str, instance_id: int | None = None) -> dict:
-    """A rent of the launch's race, as the record keeps it."""
-    return {"label": label, "offer_id": 1, "at": 0, "instance_id": instance_id, "running_at": None}
-
-
-def test_delete_destroys_the_machines_of_a_race_cut_off_even_those_vast_did_not_confirm(fake_vast):
-    racing = fake_vast.add_instance(1, "cs:job1:aaaa1111", status="loading")
-    unconfirmed = fake_vast.add_instance(1, "cs:job1:abcd1234", status="loading")
-    other = fake_vast.add_instance(1, "cs:job1:00000000", status="loading")  # (not this launch's label)
-    rents = [rent("cs:job1:aaaa1111", racing), rent("cs:job1:abcd1234"), rent("cs:job1:ffff0000")]
-    core.save(record(phase="renting", uploaded=False, rents=rents))
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_delete_destroys_the_machine_of_a_launch_cut_off_before_its_upload(confirmed, fake_vast):
+    """Its id is in the record, or only its rent's label (Vast did not confirm the rent)."""
+    booting = fake_vast.add_instance(1, "cs-job1-abc123-aaaa", status="loading")
+    other = fake_vast.add_instance(1, "cs-job1-abc123-bbbb", status="loading")  # (not this launch's label)
+    iid = booting if confirmed else None
+    core.save(record(phase="renting", uploaded=False, label="cs-job1-abc123-aaaa", instance_id=iid))
     res = agents.delete("job1", False, out())
-    assert list(fake_vast.instances) == [other] and racing not in fake_vast.instances
-    assert unconfirmed not in fake_vast.instances and not core.record_path("job1").exists()
-    assert "cs:job1:ffff0000" in res["result_line"]  # (the rent whose machine was not found is named)
+    assert list(fake_vast.instances) == [other] and not core.record_path("job1").exists()
+    assert "cs-job1-abc123-aaaa" not in res["result_line"]  # (no machine to look out for)
+
+
+def test_delete_of_a_launch_whose_unconfirmed_rent_left_no_machine_names_its_label(fake_vast):
+    other = fake_vast.add_instance(1, "cs-job1-abc123-bbbb", status="loading")
+    core.save(record(phase="renting", uploaded=False, label="cs-job1-abc123-aaaa"))
+    res = agents.delete("job1", False, out())
+    assert list(fake_vast.instances) == [other] and not core.record_path("job1").exists()
+    assert "cs-job1-abc123-aaaa" in res["result_line"]  # (the machine to look out for)
 
 
 def test_orphans_are_machines_labelled_as_ours_that_no_agent_has(fake_vast):
     core.home().mkdir(parents=True, exist_ok=True)
     (core.home() / "install_id").write_text("abc123")  # (this computer's id in its rents' labels)
     kept = fake_vast.add_instance(1, "SFALLOWS-job1-abc123-aaaa")
-    fake_vast.add_instance(1, "crab-student-job2-abc123-bbbb")  # (a rent of a launch at work)
+    fake_vast.add_instance(
+        1, "crab-student-job2-abc123-bbbb"
+    )  # (the rent of a launch at work, not confirmed yet)
     orphans = [
         fake_vast.add_instance(1, label) for label in ("SFALLOWS-job3-abc123-cccc", "x-job4-abc123-dddd")
     ]
     fake_vast.add_instance(1, "SFALLOWS-job3-def456-cccc")  # (a teammate's, on a shared Vast account)
     fake_vast.add_instance(1, "SFALLOWS")  # (not rented by crab-student)
-    core.save(record(instance_id=kept, rent=rent("SFALLOWS-job1-abc123-aaaa", kept)))
-    core.save(record("job2", phase="renting", uploaded=False, rents=[rent("crab-student-job2-abc123-bbbb")]))
+    core.save(record(instance_id=kept, label="SFALLOWS-job1-abc123-aaaa"))
+    core.save(record("job2", phase="renting", uploaded=False, label="crab-student-job2-abc123-bbbb"))
     found = agents.orphans(list(fake_vast.instances.values()), core.all_records())
     assert [i["id"] for i in found] == orphans and len(fake_vast.instances) == 6  # (nothing destroyed)
 

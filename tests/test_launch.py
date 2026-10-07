@@ -310,13 +310,13 @@ def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_githu
 def test_no_repo_works_in_a_private_workspace_repo(fake_github, machines, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # (no repo needed)
     go(args(no_repo=True))
-    rec, slug = core.load("job1"), "ada/crab-student-work"
+    rec, slug = core.load("job1"), "ada/agent-workspace"
     main = git(fake_github.bare(slug), "rev-parse", "main").strip()
     assert rec["phase"] == "ready" and (rec["repo"]["slug"], rec["repo"]["source"]) == (slug, None)
     assert fake_github.branch_sha(slug, "agent/job1") == rec["repo"]["start_sha"] == main
     assert fake_github.private[slug] and len(fake_github.keys[slug]) == 1
     config = json.loads(machines.uploads["job1"]["config.json"][0])
-    assert (config["repo_url"], config["repo_dir"]) == (github.git_url(slug), "/root/work/crab-student-work")
+    assert (config["repo_url"], config["repo_dir"]) == (github.git_url(slug), "/root/work/agent-workspace")
     go(args("job2", no_repo=True))  # (the workspace and its key are made once)
     assert sum(c[3] == "user/repos" for c in gh_writes(fake_github)) == 1 and len(fake_github.keys[slug]) == 1
 

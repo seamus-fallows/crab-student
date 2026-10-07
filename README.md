@@ -145,7 +145,7 @@ your own GitHub account (the first launch makes it and sends it your repo's hist
 little). Agents never get access to your repo, and crab-student never writes to it: `crab-student pull
 NAME` brings an agent's branch into your clone, and merging it, or pushing it to your repo for a pull
 request, is up to you. A task that has nothing to do with a repo (`--no-repo`) goes to a private
-`crab-student-work` repo on your GitHub.
+`agent-workspace` repo on your GitHub.
 
 **Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
 with CUDA, Python and pip in `/venv/main`). Setup adds what the machine needs to host an agent (tmux,
@@ -231,7 +231,7 @@ effort and fast mode the agent got.
 
 `pull` fetches into the clone the agent was launched from (`--repo PATH` for another). The first time,
 it adds the agent repo to that clone as the remote `agents`, reached the way the clone reaches GitHub
-(https or ssh), so your own credentials work. For a `--no-repo` agent it uses `~/crab-student-work`,
+(https or ssh), so your own credentials work. For a `--no-repo` agent it uses `~/agent-workspace`,
 cloning it the first time.
 
 An autonomous or colleague agent writes `agent-runs/<name>/REPORT.md` on its branch: a summary,
@@ -344,7 +344,7 @@ default.
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
 | `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): the launcher weighs how far a host is from you |
 | `owner` | (none) | How your machines' labels on Vast start, e.g. `SFALLOWS` (`SFALLOWS-train-lr-a1b2c3-1f2e`); empty: `crab-student` |
-| `workspace_repo` | `crab-student-work` | The private repo on your GitHub for `--no-repo` tasks (made the first time) |
+| `workspace_repo` | `agent-workspace` | The private repo on your GitHub for `--no-repo` tasks (made the first time) |
 | `notify_url` | (none) | Where notifications go |
 | `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |
 

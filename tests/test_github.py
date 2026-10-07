@@ -34,7 +34,7 @@ def commit(repo: Path, files: dict[str, str], message: str = "work") -> str:
 
 
 AGENTS = "ada/proj-agents"  # (ada/proj's agent repo)
-WORKSPACE = "ada/crab-student-work"
+WORKSPACE = "ada/agent-workspace"
 MARKED = f"{github.MARK} for ada/proj"  # (the description crab-student gives the agent repo it makes)
 
 
@@ -137,8 +137,8 @@ def test_local_repo_refuses_what_it_cannot_use(tmp_path, monkeypatch):
 
 
 def test_the_agent_repo_is_named_after_the_users_repo_on_the_users_own_account(fake_github):
-    assert github.agent_repo("acme/model", "crab-student-work") == "ada/model-agents"  # (ada: the gh login)
-    assert github.agent_repo(None, "crab-student-work") == WORKSPACE
+    assert github.agent_repo("acme/model", "agent-workspace") == "ada/model-agents"  # (ada: the gh login)
+    assert github.agent_repo(None, "agent-workspace") == WORKSPACE
 
 
 def test_an_existing_agent_repo_must_be_one_crab_student_made_and_private(fake_github):
@@ -344,7 +344,7 @@ def test_a_workspace_pull_clones_it_first(fake_github, isolated):
     git(bare, "branch", "agent/w1", "main")
     for _ in range(2):
         github.pull(record(None), None)
-    clone = isolated / "crab-student-work"
+    clone = isolated / "agent-workspace"
     assert ref(clone, "refs/heads/agent/w1") == fake_github.branch_sha(WORKSPACE, "agent/w1")
     assert sum(call[:2] == ("repo", "clone") for call in fake_github.calls) == 1
     assert git(clone, "remote").split() == ["origin"]  # (its own remote is the workspace)

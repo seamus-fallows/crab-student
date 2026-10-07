@@ -66,13 +66,17 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
     for rec in recs:
         inst = insts.get(rec.get("instance_id")) if insts else None
         st = statuses.get(rec["name"])
+        refused = ""
         if st and (st.get("stop_sent_for") or 0) > STOP_STUCK:
-            vast.set_state(rec["instance_id"], "stopped")  # (Vast did not take the machine's own stop call)
+            try:  # (Vast did not take the machine's own stop call)
+                vast.set_state(rec["instance_id"], "stopped")
+            except vast.VastError as e:  # (said in its line: it must not fail the whole list)
+                refused = f" - {e.message}"
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
         state, message = display_state(rec, inst, st, busy, insts is None)
-        result.append(_view(rec, inst, st, state, message))
+        result.append(_view(rec, inst, st, state, message + refused))
     if moved:
         machine.write_ssh_config()
     # (records read again: a launch running alongside may have saved a rent since the first read)

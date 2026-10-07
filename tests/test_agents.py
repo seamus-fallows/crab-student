@@ -186,6 +186,23 @@ def test_views_stop_a_machine_whose_own_stop_call_vast_did_not_take(sent_for, st
     assert len(fake_vast.calls("PUT", "/")) == stopped
 
 
+def test_a_stop_call_vast_does_not_take_from_here_either_is_shown_in_the_agents_line(
+    fake_vast, machines, monkeypatch
+):
+    stuck = agent(fake_vast, "a")
+    agent(fake_vast, "b")
+    machines.replies[("a", "status")] = status("done", stopping="done", stop_sent_for=400)
+    machines.replies[("b", "status")] = status("working", "epoch 3/10")
+    answer = fake_vast.handle  # (Vast answers, but cannot stop machines just now)
+    down = (503, {"success": False, "msg": "service unavailable"})
+    monkeypatch.setattr(
+        fake_vast, "handle", lambda method, *a: down if method == "PUT" else answer(method, *a)
+    )
+    views = {v.name: v for v in agents.views()}
+    assert views["a"].state == "stopped" and "service unavailable" in views["a"].message
+    assert views["b"].state == "working" and vast.running(fake_vast.instances[stuck])
+
+
 def test_views_carry_mode_frontend_and_settings(fake_vast, machines):
     settings = {"model": "opus", "effortLevel": "high"}
     iid = agent(fake_vast, claude_settings=settings, mode="interactive")

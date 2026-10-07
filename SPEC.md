@@ -215,7 +215,7 @@ when `stopped_at` is at least 5 minutes after the record's `last_start`.
 
 ### 3.1 Launch
 
-1. **Plan** (`launch.launch`), writing nothing but the starting commit (`--dry-run` stops before that).
+1. **Plan** (`launch.launch`), writing nothing but the starting commit (`--dry-run` skips it, and stops here).
    The agent repo is checked: it must not have the branch. The starting commit is HEAD plus one commit of
    what `git commit -a` would commit, built from a copy of the index; untracked files, Git LFS objects
    and relative-URL submodules are not carried. The offers given with `--offers` (1 to 5, the pick first)

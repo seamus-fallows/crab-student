@@ -110,7 +110,7 @@ on offer, grouped by kind of GPU (`--help` lists the filters), without renting a
 cost estimate and no time limit: you decide when a machine has done its job (see Money and safety).
 
 **If the pick does not start.** A launch rents one machine at a time: one that fails, has not started
-within 15 minutes (a host may first have to download the Docker image) or does not answer ssh within 3
+within 10 minutes (a host may first have to download the Docker image) or does not answer ssh within 3
 minutes of starting is destroyed, before anything is uploaded to it, and the next backup is rented in
 its place.
 

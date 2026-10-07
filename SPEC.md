@@ -110,7 +110,7 @@ per rent request); agent repo `<login>/<repo>-agents`; deploy key title `crab-st
 2. **Record**, under the agent's lock (held until the launch ends): `pending` (exit 3) when the pick
    costs more than the price, else `renting` (backups over the price dropped).
 3. **The machine** (`rent_machine`): the offers are rented one at a time, in order, until a machine runs
-   and answers ssh; one that fails, is not running 15 minutes after its rent, or does not answer ssh 3
+   and answers ssh; one that fails, is not running 10 minutes after its rent, or does not answer ssh 3
    minutes after it runs is destroyed before the next offer is rented. A rent whose outcome is unknown
    is looked for by its label for 2 minutes: found, it is the launch's machine; not found, the launch
    fails, naming the label. Vast out of reach meanwhile is waited out (the timeouts decide). Every

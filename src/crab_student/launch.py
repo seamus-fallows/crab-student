@@ -18,9 +18,8 @@ from pathlib import Path
 from crab_student import core, github, machine, offers, vast
 
 BOOT_TIMEOUT = 15 * 60  # (a stopped machine started again: Vast may wait for its host to have room)
-# A new machine Vast does not report running this long after its rent is given up: time for a host at the
-# min_download_mbps floor to pull a big image (20 GB at 200 Mbps: 13 minutes), since a pull given up is lost.
-START_TIMEOUT = 15 * 60
+# (most image pulls finish within 10 minutes, and a host that hangs silently must not hold up the next offer longer)
+START_TIMEOUT = 10 * 60  # a new machine Vast does not report running this long after its rent is given up
 SSH_TIMEOUT = 3 * 60  # and one whose ssh does not answer this long after it runs
 POLL = 5.0
 LABEL_WAIT = 120.0

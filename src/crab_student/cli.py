@@ -474,14 +474,15 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # (no abbreviated flags: Claude Code's permission rules ask before `delete --force`, which `--fo` would dodge)
     p = argparse.ArgumentParser(
-        prog="crab-student", description="Claude Code agents on rented Vast.ai machines."
+        prog="crab-student", description="Claude Code agents on rented Vast.ai machines.", allow_abbrev=False
     )
     p.add_argument("--version", action="version", version=f"crab-student {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     def cmd(name: str, func, help: str, json_flag: bool = False) -> argparse.ArgumentParser:
-        c = sub.add_parser(name, help=help, description=help)
+        c = sub.add_parser(name, help=help, description=help, allow_abbrev=False)
         c.set_defaults(func=func)
         if json_flag:
             c.add_argument("--json", action="store_true", help="print the result as JSON")

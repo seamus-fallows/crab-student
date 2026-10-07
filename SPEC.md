@@ -296,11 +296,13 @@ with]`, or asks in words. The command has Claude commit and push, run `agent-han
 --session=${CLAUDE_SESSION_ID} <mode> "<what to continue with>"` (default `colleague`), and end its
 turn. `agent-handoff` refuses once handed off; the conversation is the `--session=` one, else
 `CLAUDE_CODE_SESSION_ID` (the first that names a saved transcript; neither: refused). It writes the
-mode's rules, removes `/handoff`, picks a new session id, writes `handoff.json` `{mode, from, prompt,
-at}` (the machine's mode is now that mode), starts the tmux session and waits up to 90 s for Claude. In
-tmux, `claude --resume <from> --fork-session --session-id <new id> "<hand-off prompt>"` continues the
-whole conversation under the new id; if that fails at once, a new conversation starts from the brief
-with what the user asked for. `status` then reports the new mode and `tmux`.
+mode's rules, removes `/handoff`, picks a new session id, writes `handoff.json` `{mode, from, to (the
+new id), prompt, at}` (the machine's mode is now that mode), starts the tmux session and waits up to 90
+s for Claude. In tmux, `claude --resume <from> --fork-session --session-id <to> "<hand-off prompt>"`
+continues the whole conversation under the new id. The fork is made only into `to`: when it, or later
+a resume of the conversation it made, fails at once, a new conversation (a new id) starts from the
+brief with what the user asked for, and the VS Code conversation is never forked again. `status` then
+reports the new mode and `tmux`.
 
 **6.7 Save before stopping.** On the agent's branch and not mid-merge or rebase: stage tracked changes
 and untracked files up to 10 MB each (100 MB in all), commit `Autosave (<reason>)` unless the

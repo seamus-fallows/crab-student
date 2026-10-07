@@ -241,8 +241,8 @@ def report_path(c: dict) -> str:
 
 
 def read_handoff() -> dict:
-    """The hand-off from VS Code, once there was one: mode, from (the conversation forked), prompt, at;
-    fork_failed once that conversation could not be forked."""
+    """The hand-off from VS Code, once there was one: mode, from (the conversation forked), to (the session id
+    it is forked into), prompt, at."""
     return read_json(D / "handoff.json", {})
 
 
@@ -623,9 +623,10 @@ def session_id(c: dict) -> str:
     return path.read_text().strip() if path.exists() else c["session_id"]
 
 
-def fork_from(h: dict):
-    """The VS Code conversation to fork into tmux: after a hand-off, until a fork of it failed."""
-    return h["from"] if h.get("from") and not h.get("fork_failed") and transcript(h["from"]) else None
+def fork_from(h: dict, sid: str):
+    """The VS Code conversation to fork into tmux as `sid`: only as the session id the hand-off chose, so once
+    that id is given up for a new one, never again."""
+    return h["from"] if h.get("to") == sid and transcript(h["from"]) else None
 
 
 def session_running() -> bool:
@@ -648,7 +649,7 @@ def agent_started(c: dict, seconds: float) -> bool:
 
 
 def first_prompt(lost: bool) -> str:
-    """A new conversation's prompt (after a hand-off whose fork failed, with what the user asked for then)."""
+    """A new conversation's prompt (after a hand-off, with what the user asked for then)."""
     asked = read_handoff().get("prompt")
     words = " When they handed the task over, the user asked you to continue with: " + asked if asked else ""
     return FIRST_PROMPT + (LOST if lost else "") + words
@@ -662,7 +663,7 @@ def claude_argv(c: dict, sid: str, first: bool, lost: bool) -> list:
     if transcript(sid):
         return [*argv, "--resume", sid, *([RESTART_NOTE] if first else [])]
     h = read_handoff()
-    if fork_from(h):
+    if fork_from(h, sid):
         prompt = HANDOFF_PROMPT.format(how=HOW[h["mode"]], prompt=h["prompt"])
         return [*argv, "--resume", h["from"], "--fork-session", "--session-id", sid, prompt]
     return [*argv, "--session-id", sid, first_prompt(lost)]
@@ -672,15 +673,13 @@ def cmd_claude() -> int:
     """Runs in the tmux pane: starts, resumes or forks the agent's conversation, and again after it exits."""
     c, first, lost = cfg(), True, False
     while True:
-        sid, h = session_id(c), read_handoff()
+        sid = session_id(c)
         resuming = transcript(sid)
-        forking = not resuming and bool(fork_from(h))
+        forking = not resuming and bool(fork_from(read_handoff(), sid))
         started = time.time()
         rc = subprocess.call(claude_argv(c, sid, first, lost), cwd=c["repo_dir"], env=agent_env(c))
         if (resuming or forking) and rc and time.time() - started < 20:  # it could not be resumed or forked
-            if forking:  # (the VS Code conversation cannot be forked: a new one starts from the brief)
-                save_handoff(dict(h, fork_failed=True))
-            write(D / "session_id", str(uuid.uuid4()), 0o600)
+            write(D / "session_id", str(uuid.uuid4()), 0o600)  # (a new conversation starts from the brief)
             lost = True
             continue
         first = False
@@ -1281,8 +1280,9 @@ def cmd_handoff(args: list) -> int:
         return 1
     write_rules(c, mode)
     (ROOT / ".claude" / "commands" / "handoff.md").unlink(missing_ok=True)
-    write(D / "session_id", str(uuid.uuid4()), 0o600)
-    save_handoff({"mode": mode, "from": sid, "prompt": prompt, "at": int(time.time())})
+    new = str(uuid.uuid4())
+    write(D / "session_id", new, 0o600)
+    save_handoff({"mode": mode, "from": sid, "to": new, "prompt": prompt, "at": int(time.time())})
     drop_inherited()  # (this runs under the Claude Code in VS Code: its variables must not reach the agent)
     spawn_watchdog()
     ensure_agent_session(c)

@@ -153,10 +153,12 @@ def make_transcript(cs, sid: str, folder: str = "-root-work-proj") -> Path:
 
 
 def handed_off(cs, **fields) -> dict:
-    """handoff.json as agent-handoff leaves it (from: a new VS Code conversation, unless given), with changes."""
-    h = dict({"mode": "colleague", "prompt": "finish the tests", "at": 0}, **fields)
+    """handoff.json and session_id as agent-handoff leaves them (from: a new VS Code conversation, to: a new
+    session id, unless given), with changes."""
+    h = dict({"mode": "colleague", "to": str(uuid.uuid4()), "prompt": "finish the tests", "at": 0}, **fields)
     if "from" not in h:
         h["from"] = make_transcript(cs, str(uuid.uuid4())).stem
+    (cs.D / "session_id").write_text(h["to"])
     (cs.D / "handoff.json").write_text(json.dumps(h))
     return h
 
@@ -769,7 +771,8 @@ def test_claude_argv_for_a_new_a_resumed_and_a_restarted_conversation(cs):
 
 def test_claude_argv_after_a_hand_off_forks_the_vs_code_conversation(cs):
     c = set_config(cs, mode="interactive")
-    sid, h = c["session_id"], handed_off(cs, mode="autonomous", prompt="finish the tests")
+    h = handed_off(cs, mode="autonomous", prompt="finish the tests")
+    sid = cs.session_id(c)
     fork = cs.claude_argv(c, sid, first=True, lost=False)
     assert fork[-6:-1] == ["--resume", h["from"], "--fork-session", "--session-id", sid]
     assert fork[-1].startswith("Automated message from the machine:") and fork[-1].endswith(
@@ -825,7 +828,6 @@ def test_claude_starts_a_new_conversation_when_the_saved_one_cannot_be_resumed(c
 def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, monkeypatch):
     c = set_config(cs, mode="interactive")
     h = handed_off(cs)
-    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000001")  # (what agent-handoff chose)
 
     def claude(argv):
         if "--fork-session" in argv:
@@ -834,15 +836,14 @@ def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, mo
 
     calls = run_claude(cs, monkeypatch, claude, presses=1)
     new = cs.session_id(c)
-    assert new == "f0f0f0f0-0000-4000-8000-000000000001" and cs.transcript(new)
-    assert calls[0][-6:-2] == ["--resume", h["from"], "--fork-session", "--session-id"]
+    assert new == h["to"] and cs.transcript(new)  # (the id agent-handoff chose)
+    assert calls[0][-6:-1] == ["--resume", h["from"], "--fork-session", "--session-id", new]
     assert calls[1][-2:] == ["--resume", new]
 
 
 def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_asked(cs, monkeypatch):
     c = set_config(cs, mode="interactive")
-    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000002")  # (what agent-handoff chose)
-    handed_off(cs, prompt="finish the tests")
+    h = handed_off(cs, prompt="finish the tests")
 
     def claude(argv):
         if "--fork-session" in argv:
@@ -854,10 +855,29 @@ def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_ask
     calls = run_claude(cs, monkeypatch, claude, presses=1)
     assert [("--fork-session" in argv) for argv in calls] == [True, False, False]
     new = cs.session_id(c)
-    assert new not in ("f0f0f0f0-0000-4000-8000-000000000002", cs.read_handoff()["from"])
+    assert new not in (h["to"], h["from"])
     assert calls[1][-3:-1] == ["--session-id", new] and calls[1][-1].startswith(cs.FIRST_PROMPT + cs.LOST)
-    assert calls[1][-1].endswith("finish the tests") and cs.read_handoff()["fork_failed"]
+    assert calls[1][-1].endswith("finish the tests")
     assert calls[2][-2:] == ["--resume", new]  # (the new conversation from then on, never a fork again)
+
+
+def test_a_hand_off_is_forked_once_even_when_its_conversation_is_given_up_later(cs, monkeypatch):
+    """The forked conversation cannot be resumed later: a new one starts from the brief, told so. Forking the
+    VS Code conversation again would silently drop everything done in tmux since."""
+    c = set_config(cs, mode="interactive")
+    h = handed_off(cs, prompt="finish the tests")
+
+    def claude(argv):
+        if "--session-id" in argv:  # (the fork, or a new conversation: saved as soon as it starts)
+            make_transcript(cs, argv[argv.index("--session-id") + 1])
+            return 0
+        return 1  # (resuming the forked conversation fails at once)
+
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
+    new = cs.session_id(c)
+    assert [("--fork-session" in argv) for argv in calls] == [True, False, False]
+    assert calls[1][-2:] == ["--resume", h["to"]] and new != h["to"]
+    assert calls[2][-3:-1] == ["--session-id", new] and calls[2][-1].startswith(cs.FIRST_PROMPT + cs.LOST)
 
 
 # ---- the hand-off --------------------------------------------------------------------------------
@@ -897,7 +917,7 @@ def test_handoff_switches_the_mode_writes_the_rules_and_starts_the_agent_in_tmux
     assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux") and c["mode"] == "interactive"
     assert "## Work on your own" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
     assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
-    assert cs.session_id(c) not in (c["session_id"], interactive.sid)
+    assert cs.session_id(c) == h["to"] and h["to"] not in (c["session_id"], interactive.sid)  # (forked into)
     assert interactive.started == [[]]  # (once, with none of the VS Code Claude's variables)
     assert cs.cmd_handoff(["colleague"]) == 1 and cs.read_handoff() == h  # (once only)
 

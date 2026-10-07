@@ -24,7 +24,8 @@ A single-user tool its owner wants simple and fast.
 ## Layout
 
 - `src/crab_student/`: the local side (Python 3.11+, Windows first). No background service: each command runs
-  and exits. `cli.py` owns all terminal output; `vast.py` is the only code that calls Vast.
+  and exits. `cli.py` prints the commands' results; the interactive flows (`init`, `open`, following a launch)
+  print as they go, and `launch.Progress` prints progress. `vast.py` is the only code that calls Vast.
 - Which machine to rent is the launcher's choice (`data/launch.md`, served by `crab-student guide launch`), not
   code. `offers.py` only applies fixed rules and filters.
 - `src/crab_student/remote/`: the machine side, uploaded flat to `/root/crab-student/` (the onstart command and
@@ -36,8 +37,8 @@ A single-user tool its owner wants simple and fast.
 - Exit codes: 0 ok, 1 error, 2 usage, 3 needs approval / refused by a limit / would lose work, 4 no machine fits
   or the named offers are gone, 5 setup failed. Raise `core.CrabError(message, code)`; the message says what
   to do, with the exact command.
-- Terminal output is ASCII. `--json` prints exactly one JSON value on stdout; progress and `error: ...` go to
-  stderr.
+- Terminal output is ASCII (`core.say`). `--json` prints exactly one JSON value on stdout; progress and
+  `error: ...` go to stderr.
 - Comments only for why; docstrings only where the name does not say it all; no speculative options.
 - Paths are computed at call time from `Path.home()` (tests swap the home).
 - Take an agent's lock (`core.locked(name)`) once per command: a second lock on the same name in one process

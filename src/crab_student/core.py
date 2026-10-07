@@ -503,3 +503,8 @@ def ascii_text(text: str) -> str:
 def interactive() -> bool:
     """Someone is at this terminal (stdin and stdout are both one)."""
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def say(text: str = "", err: bool = False) -> None:
+    """A line on the terminal (stderr with `err`), in ASCII."""
+    print(ascii_text(text), file=sys.stderr if err else sys.stdout, flush=True)

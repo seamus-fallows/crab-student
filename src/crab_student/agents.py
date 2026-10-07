@@ -426,7 +426,7 @@ def open_all(names: list[str]) -> int:
     skipped = [v.name for v in shown if v.frontend == "vscode"]
     rest = [v.name for v in shown if v.frontend != "vscode"]
     if skipped:
-        print(f"Skipped {', '.join(skipped)}: interactive, in VS Code (crab-student open NAME --vscode).")
+        core.say(f"Skipped {', '.join(skipped)}: interactive, in VS Code (crab-student open NAME --vscode).")
     if not rest:
         raise core.CrabError(
             "every running agent is interactive and in VS Code: crab-student open NAME --vscode"
@@ -437,21 +437,21 @@ def open_all(names: list[str]) -> int:
 def follow_launch(name: str) -> bool:
     """Show an agent's launch as it happens: its log so far, then each new line, until it ends. True once the agent
     is ready; else False, after saying what happened and what to do."""
-    print(
+    core.say(
         f"Launching {name}. Closing this window does not stop the launch (see it again: crab-student open {name})."
     )
     shown, quiet = _LogView(name), 0
     while True:
         shown.update()
         if not core.record_path(name).exists():
-            print(f"{name} was deleted.")
+            core.say(f"{name} was deleted.")
             return False
         busy = core.is_locked(name)
         quiet = 0 if busy else quiet + 1
         rec = core.load(name)
         if not busy and (rec["phase"] in ("ready", "failed", "pending") or quiet >= QUIET_ENDS):
             shown.update()
-            print(core.ascii_text(_launch_outcome(rec)), flush=True)
+            core.say(_launch_outcome(rec))
             return rec["phase"] == "ready"
         time.sleep(FOLLOW_POLL)
 
@@ -490,4 +490,4 @@ class _LogView:
         self.pos += len(complete)
         for line in complete.decode("utf-8", "replace").splitlines():
             clock, _, text = line.partition(" ")
-            print(core.ascii_text(f"{clock} {text.removeprefix('~ ')}"), flush=True)
+            core.say(f"{clock} {text.removeprefix('~ ')}")

@@ -361,6 +361,19 @@ def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(vscode):
     assert "/root/BRIEF.md" in panel_prompt(vscode["urls"][0])
 
 
+def test_what_open_vscode_prints_is_ascii(vscode, monkeypatch, tmp_path, capsys):
+    settings = (
+        tmp_path / "Zoë" / "settings.json"
+    )  # (VS Code's settings under a home folder named outside ASCII)
+    settings.parent.mkdir()
+    settings.write_text("{\n    // a comment\n}\n", encoding="utf-8")
+    monkeypatch.setattr(core, "vscode_settings_file", lambda: settings)
+    rec = {"name": "job1", "mode": "interactive", "repo": {"dir": "/root/work/café"}}
+    assert machine.open_vscode(rec, panel=False) == 0
+    out = capsys.readouterr().out
+    assert out.isascii() and out.count("\n") == 2  # (the platform it will ask about, and what opens)
+
+
 def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vscode):
     monkeypatch.setattr(core, "tool", lambda name: None)
     assert "'code' command" in fails(1, machine.open_vscode, agent_record(), True).message

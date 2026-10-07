@@ -18,15 +18,11 @@ from pathlib import Path
 from crab_student import __version__, agents, core, github, launch, machine, offers, setup, vast
 
 
-def say(text: str = "", err: bool = False) -> None:
-    print(core.ascii_text(text), file=sys.stderr if err else sys.stdout, flush=True)
-
-
 def emit(result: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps(result))
     else:
-        say(result["result_line"])
+        core.say(result["result_line"])
 
 
 # ---- argument types ------------------------------------------------------------------------------
@@ -83,17 +79,17 @@ def cmd_config(args: argparse.Namespace) -> int:
     cfg = core.load_config()
     if args.key and (args.reset or args.value is not None):
         value = core.set_config(args.key, None if args.reset else args.value)
-        say(json.dumps(value) if args.json else f"{args.key} = {_show(value)}")
+        core.say(json.dumps(value) if args.json else f"{args.key} = {_show(value)}")
     elif args.key:
         if args.key not in core.DEFAULTS:
             core.parse_value(args.key, "")  # (raises: unknown setting)
-        say(json.dumps(cfg[args.key]) if args.json else _show(cfg[args.key]))
+        core.say(json.dumps(cfg[args.key]) if args.json else _show(cfg[args.key]))
     elif args.json:
         print(json.dumps(cfg))
     else:
         width = max(map(len, cfg)) + 2
         for key, value in cfg.items():
-            say(f"{key:<{width}}{_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
+            core.say(f"{key:<{width}}{_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
     return 0
 
 
@@ -134,13 +130,15 @@ def cmd_offers(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"kinds": kinds} if kinds else {"count": len(found), "offers": found[: args.limit]}))
         return 0
-    say("\n".join(kinds_table(kinds, f.cpu_task) if kinds else map(offer_line, found[: args.limit])))
+    core.say("\n".join(kinds_table(kinds, f.cpu_task) if kinds else map(offer_line, found[: args.limit])))
     floor = (
         f" (no GPU used: at least {offers.CPU_TASK_CPUS} vCPUs and {offers.CPU_TASK_RAM_GB} GB of RAM)"
         if f.cpu_task
         else ""
     )
-    say(f"\n{len(found)} offers fit{floor}. Prices include {f.disk_gb:g} GB of disk. Nothing was rented.")
+    core.say(
+        f"\n{len(found)} offers fit{floor}. Prices include {f.disk_gb:g} GB of disk. Nothing was rented."
+    )
     return 0
 
 
@@ -283,7 +281,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_decline(args: argparse.Namespace) -> int:
-    say(launch.decline(args.name))
+    core.say(launch.decline(args.name))
     return 0
 
 
@@ -305,7 +303,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     text = " ".join(args.text) if args.text else ("" if sys.stdin.isatty() else sys.stdin.read())
-    say(agents.send(args.name, text)["result_line"])
+    core.say(agents.send(args.name, text)["result_line"])
     return 0
 
 
@@ -317,19 +315,19 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    say(github.pull(core.load(args.name), Path(args.repo) if args.repo else None))
+    core.say(github.pull(core.load(args.name), Path(args.repo) if args.repo else None))
     return 0
 
 
 def cmd_guide(args: argparse.Namespace) -> int:
-    say(setup.guide(args.topic))
+    core.say(setup.guide(args.topic))
     return 0
 
 
 def cmd_secret(args: argparse.Namespace) -> int:
     names = core.secret_names()
     if args.action == "list":
-        print(json.dumps(names)) if args.json else say("\n".join(names) or "No secrets stored.")
+        print(json.dumps(names)) if args.json else core.say("\n".join(names) or "No secrets stored.")
         return 0
     if not args.name or not core.SECRET_NAME_RE.fullmatch(args.name):
         raise core.CrabError(
@@ -382,9 +380,9 @@ def cmd_list(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps([asdict(v) for v in views]))
     else:
-        say("\n".join(table(views)))
+        core.say("\n".join(table(views)))
     for inst in orphans:
-        say(
+        core.say(
             f"warning: machine {inst['id']} ({inst['label']}) belongs to no agent - Vast may not have confirmed "
             "its rent. Destroy it at https://cloud.vast.ai/instances/",
             err=True,
@@ -404,13 +402,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             line = launch.result(rec, v.state, [], (rec.get("pending") or {}).get("reason"))["result_line"]
         print(json.dumps({**asdict(v), "result_line": line}))
         return 0
-    say(headline)
+    core.say(headline)
     if v.machine:
-        say(
+        core.say(
             f"  machine   {v.machine} - ${v.dph:.2f}/hr (instance {rec['instance_id']}, {v.vast_status or 'unknown'})"
         )
     where = {"tmux": ", in tmux", "vscode": ", in VS Code"}.get(v.frontend or "", "")
-    say(f"  agent     {v.mode}{where} - Claude Code: {launch.settings_text(v.settings)}")
+    core.say(f"  agent     {v.mode}{where} - Claude Code: {launch.settings_text(v.settings)}")
     git = v.git or {}
     pushed = (
         ""
@@ -420,27 +418,27 @@ def cmd_status(args: argparse.Namespace) -> int:
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
     on = f" on {rec['repo']['slug']}" if rec["repo"]["source"] else ""
-    say(f"  repo      {v.repo}, branch {v.branch}{on}{pushed}")
+    core.say(f"  repo      {v.repo}, branch {v.branch}{on}{pushed}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
-        say(
+        core.say(
             f"  time      {core.fmt_hours(v.used_h)} of machine time{idle}; it stops after "
             f"{rec['idle_minutes']} min without activity"
         )
-        say(f"  money     ~{core.usd(v.spent)} so far at ${v.dph:.2f}/hr" if v.dph else "  money     -")
+        core.say(f"  money     ~{core.usd(v.spent)} so far at ${v.dph:.2f}/hr" if v.dph else "  money     -")
     if v.stopped_h is not None:
         disk = (
             f"; its disk costs about ${v.disk_usd_day:.2f}/day until you delete it" if v.disk_usd_day else ""
         )
-        say(f"  stopped   {core.fmt_hours(v.stopped_h)} ago{disk}")
+        core.say(f"  stopped   {core.fmt_hours(v.stopped_h)} ago{disk}")
     if rec["phase"] == "ready":
         if v.frontend == "vscode" or (v.frontend is None and v.mode == "interactive"):
-            say(
+            core.say(
                 f"  open      crab-student open {v.name} --vscode    (/handoff in its chat: it carries on alone)"
             )
         else:
-            say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
-        say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
+            core.say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
+        core.say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
     return 0
 
 
@@ -611,13 +609,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args) or 0
     except core.CrabError as e:
-        say(f"error: {e.message}", err=True)
+        core.say(f"error: {e.message}", err=True)
         return e.code
     except KeyboardInterrupt:
-        say("interrupted", err=True)
+        core.say("interrupted", err=True)
         return 1
     except Exception as e:
         if os.environ.get("CRAB_STUDENT_DEBUG"):
             raise
-        say(f"error: unexpected {type(e).__name__}: {e} (please report this)", err=True)
+        core.say(f"error: unexpected {type(e).__name__}: {e} (please report this)", err=True)
         return 1

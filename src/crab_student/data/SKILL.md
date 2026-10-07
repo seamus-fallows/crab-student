@@ -74,7 +74,7 @@ The machine installs the project's dependencies during setup, before the agent s
 ## Managing agents
 
 | The user wants | Run |
-|---|---|
+| --- | --- |
 | an overview | `crab-student list --json` |
 | how one is doing | `crab-student status NAME --json` |
 | its report | `crab-student report NAME` |

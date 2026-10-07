@@ -5,7 +5,7 @@ protocol reference (records, machine files, ssh commands, modes, hand-off, stops
 
 ## Commands
 
-```
+```bash
 uv run pytest -q                      # all tests (the integration test needs Linux and tmux: CI runs it)
 uv run pytest -q tests/test_launch.py # one file
 uv run ruff check src tests && uv run ruff format --check src tests

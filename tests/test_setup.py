@@ -87,6 +87,13 @@ def test_a_saved_vast_key_that_does_not_work_fails_init_without_asking(terminal,
     assert core.vast_key_file().read_text() == "revoked-key\n"
 
 
+def test_init_checks_a_saved_vast_key_with_its_2fa_session(terminal, ready, fake_vast):
+    core.write_private(core.vast_key_file(), "key-that-needs-2fa\n")
+    core.write_private(core.vast_session_file(), fake_vast.key + "\n")
+    assert setup.init() == 0
+    assert core.vast_key_file().read_text() == "key-that-needs-2fa\n"
+
+
 def test_init_fails_after_three_bad_tokens(terminal):
     answers, _ = terminal
     answers += ["sk-ant-oat01-short", "sk-ant-api03-" + "a" * 90, "not a token"]

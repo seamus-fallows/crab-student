@@ -54,6 +54,8 @@ missing):
 
 - **Vast key.** It uses the key file the `vastai` CLI keeps (`~/.config/vastai/vast_api_key`), so
   switching accounts there switches crab-student too. If there is none, it asks for one and saves it.
+  If your key requires 2FA, log in with `vastai tfa login --method-type totp -c <code>` (about once a
+  week); crab-student uses that session too and says when it needs a new one.
 - **GitHub.** It uses your `gh` login.
 - **SSH key.** It makes a key just for crab-student's machines and adds one `Include` line to
   `~/.ssh/config`, so `ssh crab-student-<name>` and VS Code can reach your agents' machines.

@@ -42,6 +42,36 @@ def test_without_a_key_nothing_is_sent(fake_vast):
     assert fake_vast.requests == []
 
 
+def test_the_2fa_session_key_is_sent_while_there_is_one(fake_vast):
+    core.write_private(core.vast_key_file(), "long-lived-key\n")
+    core.write_private(core.vast_session_file(), fake_vast.key + "\n")
+    assert vast.current_user()["id"] == 1
+    core.vast_session_file().unlink()
+    with pytest.raises(vast.VastError) as e:
+        vast.current_user()
+    assert e.value.status == 401
+
+
+def test_a_missing_or_expired_2fa_login_says_to_log_in_and_never_reads_as_gone(fake_vast):
+    iid = fake_vast.add_instance(1, LABEL)
+    needs_2fa = (
+        "Authorization Error. Your key lacks proper privileges to perform this action as it requires you to "
+        "have logged in using Two Factor Authentication"
+    )
+    answer_next(fake_vast, 1, 401, {"success": False, "msg": needs_2fa})
+    with pytest.raises(vast.VastError) as e:
+        vast.rent(7, {"label": LABEL})
+    assert e.value.status == 401 and "vastai tfa login" in e.value.message
+    answer_next(fake_vast, 2, 404, {"success": False, "msg": vast.SESSION_EXPIRED})
+    with pytest.raises(vast.VastError) as e:
+        vast.instance(iid)  # (not None: the machine is still there)
+    assert e.value.status == 401
+    with pytest.raises(vast.VastError):
+        vast.destroy(iid)  # (not "already gone")
+    assert list(fake_vast.instances) == [iid]
+    assert len(fake_vast.calls("PUT", "/api/v0/asks/")) == 1  # (a refused rent is not retried)
+
+
 def test_vast_url_overrides_the_address(fake_vast, monkeypatch):
     monkeypatch.setenv("VAST_URL", os.environ["VAST_URL"] + "/")
     assert vast.current_user()["id"] == 1

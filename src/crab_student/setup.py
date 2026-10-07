@@ -95,7 +95,7 @@ def _vast_step() -> bool:
         )
     key = saved or _ask_secret("              Paste it here (it will not be shown): ")
     try:
-        user = vast.current_user(key=key)
+        user = vast.current_user(key=None if saved else key)  # (a saved key is sent with its 2FA session)
     except core.CrabError as e:
         _say("Vast", f"that key does not work: {e.message}")
         _say("", f"To paste another, delete {path}, then run init again." if saved else "Run init again.")

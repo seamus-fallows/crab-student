@@ -305,9 +305,7 @@ def test_a_clean_check_destroys_the_machine_and_keeps_the_branch_and_the_deploy_
     assert [call[1] for call in machines.calls] == [["check"]]
     assert not fake_vast.instances and not core.record_path("job1").exists()
     assert fake_github.branch_sha(AGENTS, "agent/job1") == branch  # (the agent repo keeps the agents' work)
-    assert (
-        list(fake_github.keys[AGENTS]) == [101] and github.key_file(AGENTS).exists()
-    )  # (for the next agent)
+    assert list(fake_github.keys[AGENTS]) == [101] and github.key_file(AGENTS).exists()  # (for the next one)
     assert not [c for c in fake_github.calls if c[:2] == ("api", "-X") and c[2] != "GET"]  # (nothing written)
 
 

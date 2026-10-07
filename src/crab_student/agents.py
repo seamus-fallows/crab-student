@@ -322,7 +322,7 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     3,
                 )
             if problems := _problems(res):
-                cfg = str(machine.config_file()).replace("\\", "/")
+                cfg = machine.config_file().as_posix()
                 start = [] if running else [f"  crab-student start {name}"]
                 raise core.CrabError(
                     "\n".join(

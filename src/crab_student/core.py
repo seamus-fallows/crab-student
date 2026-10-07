@@ -43,7 +43,7 @@ def ssh_path(path: Path) -> str:
     try:
         return "~/" + path.relative_to(Path.home()).as_posix()
     except ValueError:
-        return '"' + str(path).replace("\\", "/") + '"'
+        return f'"{path.as_posix()}"'
 
 
 def agents_dir() -> Path:

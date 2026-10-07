@@ -118,8 +118,8 @@ def last_json(capsys) -> dict:
     return json.loads(capsys.readouterr().out.splitlines()[-1])
 
 
-def set_agent(cs, state: str, message: str = "") -> None:
-    (cs.D / "agent.json").write_text(json.dumps({"state": state, "message": message, "at": 0}))
+def set_agent(cs, state: str, message: str = "", at: int = 0) -> None:
+    (cs.D / "agent.json").write_text(json.dumps({"state": state, "message": message, "at": at}))
 
 
 def secret_files(cs, secrets: dict, token: str = TOKEN) -> None:
@@ -250,10 +250,10 @@ def test_a_running_job_keeps_a_finished_agents_machine_up(cs):
     assert first_stop(seen) == ("stop:done", 160)
 
 
-@pytest.mark.parametrize("mode, state, nudges", [("colleague", "needs-you", [30, 70]), ("colleague", "working", []),
+@pytest.mark.parametrize("mode, state, nudges", [("colleague", "needs-you", [30]), ("colleague", "working", []),
                                                  ("colleague", "done", []), ("autonomous", "needs-you", []),
                                                  ("interactive", "needs-you", [])])  # fmt: skip
-def test_only_a_colleague_that_asked_is_nudged_once_per_quiet_stretch(cs, mode, state, nudges):
+def test_only_a_colleague_that_asked_is_nudged(cs, mode, state, nudges):
     st, probe, c = watchdog(cs, idle_minutes=60, mode=mode)
     set_agent(cs, state)
 
@@ -279,6 +279,29 @@ def test_a_check_in_comes_once_per_silent_stretch_to_an_agent_in_tmux(cs, mode, 
 
     seen = run_minutes(cs, st, probe, c, range(1, 80), busy_and_a_word_at_40)
     assert minutes_with(seen, "check-in") == check_ins
+
+
+@pytest.mark.parametrize("state, reminder", [("needs-you", "nudge"), ("working", "check-in")])
+@pytest.mark.parametrize("event", [None, "status update", "cpu", "gpu"])
+def test_an_agent_that_cannot_answer_gets_one_reminder_and_its_machine_stops_on_schedule(
+    cs, state, reminder, event
+):
+    """A reminder grows the conversation itself (an activity): only the agent's own doing at minute 45 (a
+    status update, CPU or GPU work) brings another."""
+    st, probe, c = watchdog(cs, idle_minutes=60, mode="colleague")
+    set_agent(cs, state)
+    seen = {}
+    for m in range(1, 200):
+        if m == 45 and event == "status update":
+            set_agent(cs, state, at=45)
+        probe.cpu += 60.0 if m == 45 and event == "cpu" else 0.0
+        probe.gpu = m == 45 and event == "gpu"
+        seen[m] = cs.tick(st, c, T0 + 60 * m, probe)
+        if reminder in seen[m]:
+            probe.work(m)  # (typed into the conversation, as if by the agent's user)
+    reminders = minutes_with(seen, reminder)
+    assert len(reminders) == (2 if event else 1) and reminders[-1] >= (45 if event else 0)
+    assert first_stop(seen) == ("stop:idle", reminders[-1] + 61)  # (idle_minutes after the last one)
 
 
 def test_after_a_hand_off_the_watchdog_treats_the_agent_by_its_new_mode(cs):

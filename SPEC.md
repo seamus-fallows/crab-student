@@ -262,8 +262,10 @@ if it is not running). Every minute: touch `heartbeat`; while the frontend is `t
 session `agent` (running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files
 under `~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy.
 Colleague: a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a
-check-in after a long silence while it says `working`. Typed messages start with `Automated message
-from the machine:`. **Stop** after `idle_minutes` idle, done or not: set `stopping`, notify, final save
+check-in after 20 minutes without the conversation growing while it says `working`. Each comes again
+only once the agent itself did something: a status update (`agent.json`'s `at`), CPU or GPU work. (A
+reminder grows the conversation, an activity: an agent that cannot answer gets one, and its machine
+stops `idle_minutes` later.) Typed messages start with `Automated message from the machine:`. **Stop** after `idle_minutes` idle, done or not: set `stopping`, notify, final save
 (6.7), record `stop_sent_at`, call Vast stop with the container's key, retried every tick; `stop_reason`
 is `idle` or `done`. A new container start resets the clocks. Notifications go to `notify_url`.
 

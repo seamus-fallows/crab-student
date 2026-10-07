@@ -764,16 +764,22 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
     dt = min(max(now - st["last_tick"], 0), 2 * TICK)
     st["last_tick"] = now
     st["used_seconds"] += dt
-    size, cpu = probe.transcript_bytes(), probe.cpu_seconds()
+    size, cpu, agent = probe.transcript_bytes(), probe.cpu_seconds(), read_agent()
     cpu_busy = (
         cpu is not None and st["cpu_seconds"] is not None and cpu - st["cpu_seconds"] >= CPU_BUSY_CORES * dt
     )
+    work = cpu_busy or probe.gpu_busy()
     if size != st["transcript_bytes"]:
-        st["last_talk"], st["talk_nudged"] = now, False
-    if size != st["transcript_bytes"] or cpu_busy or probe.gpu_busy():
-        st["last_activity"], st["nudged_at"] = now, None
-    st["transcript_bytes"], st["cpu_seconds"] = size, cpu
-    mode, state = machine_mode(c), read_agent().get("state")
+        st["last_talk"] = now
+    if size != st["transcript_bytes"] or work:
+        st["last_activity"] = now
+    # The reminders come again only once the agent itself did something (work, or a status update): they
+    # grow the conversation too, so an agent that cannot answer (a usage limit, a revoked token) would
+    # otherwise be reminded, and its machine kept up, forever.
+    if work or agent.get("at") != st["agent_at"]:
+        st["nudged_at"], st["talk_nudged"] = None, False
+    st["transcript_bytes"], st["cpu_seconds"], st["agent_at"] = size, cpu, agent.get("at")
+    mode, state = machine_mode(c), agent.get("state")
     if state != st["notified_state"] and state in ("needs-you", "done", "failed"):
         actions.append("notify:" + state)
     st["notified_state"] = state
@@ -783,11 +789,11 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
         actions.append("nudge")
         st["nudged_at"] = now
     # An agent that says "working" but has not said a word for a while has likely ended its turn with a
-    # job still running (and nothing prompts an interactive session): remind it once per quiet stretch.
+    # job still running (and nothing prompts an interactive session): remind it.
     quiet = now - st["last_talk"] >= QUIET_MINUTES * 60
     if mode != "interactive" and state == "working" and quiet and not st["talk_nudged"]:
         actions.append("check-in")
-        st["talk_nudged"] = True
+        st["last_talk"], st["talk_nudged"] = now, True  # (the check-in is talk: a new quiet stretch begins)
     if idle >= c["idle_minutes"] * 60:
         actions.append("stop:done" if state == "done" else "stop:idle")
     return actions
@@ -807,6 +813,7 @@ def load_state() -> dict:
         "nudged_at": None,
         "last_talk": 0.0,
         "talk_nudged": False,
+        "agent_at": None,
         "stop_sent_at": None,
     }
     return dict(defaults, **read_json(D / "state.json", {}))

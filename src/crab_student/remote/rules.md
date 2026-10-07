@@ -31,7 +31,6 @@ machine, not from the user.
 - Run long jobs in the background, `nohup <command> > agent-runs/{{name}}/logs/<job>.log 2>&1 &`, note
   the PID, and keep checking on it until it ends.
 - Save checkpoints, so a restart can resume instead of starting over.
-- `nvidia-smi` shows the GPUs.
 
 ## Environment
 

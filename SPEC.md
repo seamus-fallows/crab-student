@@ -256,7 +256,8 @@ waits for a long step. The steps:
    wait for the conversation file. Last, a wait for VS Code's server, whose failure is only a warning.
 
 **6.2 onstart** (run by Vast as root at every container start; each command ends in `;` or `&`): write
-`CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` (0600) and the start time to `booted`;
+`CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` and the stop call's header to `vast.header`
+(both 0600: curl reads the key from that file) and the start time to `booted`;
 start the dead-man loop; start the watchdog (`./python cs.py watch`) if `setup-done` exists. **Dead-man
 loop:** every 60 s, if the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast
 stop with the container's key.

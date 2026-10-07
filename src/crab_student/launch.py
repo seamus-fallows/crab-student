@@ -28,17 +28,20 @@ NO_MACHINE = {"label": None, "instance_id": None, "ssh": None, "uploaded": False
               "machine": None, "short": None}  # fmt: skip
 
 # Vast runs this as root at every container start. It saves the container's own Vast key (only this
-# machine can use it), starts the dead-man switch (stop the machine once neither this start nor the
-# watchdog's heartbeat is newer than 45 minutes) and starts the watchdog once setup has been done.
-# Every command ends in ";" or "&", so it works whether Vast keeps the line breaks or not.
+# machine can use it), and the stop call's header with it, starts the dead-man switch (stop the machine
+# once neither this start nor the watchdog's heartbeat is newer than 45 minutes) and starts the watchdog
+# once setup has been done. The key stays off every command line: printf is the shell's own, and curl
+# reads the header from its file. Every command ends in ";" or "&", so it works whether Vast keeps the
+# line breaks or not.
 _STOP_CALL = (
-    'curl -s -m 30 -X PUT -H "Authorization: Bearer $CONTAINER_API_KEY" -H "Content-Type: application/json" '
+    'curl -s -m 30 -X PUT -H @vast.header -H "Content-Type: application/json" '
     '-d "{\\"state\\":\\"stopped\\"}" "${CS_VAST_URL:-https://console.vast.ai}/api/v0/instances/$CONTAINER_ID/"'
 )
 ONSTART = "\n".join(
     [
         "D=/root/crab-student; mkdir -p $D/logs; cd $D; umask 077;",
         "env | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY|CS_VAST_URL)=' | sed 's/^/export /' > vast.env;",
+        "printf 'Authorization: Bearer %s\\n' \"$CONTAINER_API_KEY\" > vast.header;",
         "date +%s > booted;",
         "nohup bash -c 'cd /root/crab-student; while sleep 60; do t=$(cat booted); "
         'h=$(stat -c %Y heartbeat 2>/dev/null || echo 0); [ "$h" -gt "$t" ] && t=$h; '

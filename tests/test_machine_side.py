@@ -741,6 +741,34 @@ def test_a_watchdog_stop_pushes_the_stop_note_with_its_reason(cs, repo, bare, si
     assert [r["method"] for r in sink] == ["PUT"]  # (then Vast is asked to stop the machine)
 
 
+@posix_only
+def test_the_dead_man_switch_stops_the_machine_with_its_key_on_no_command_line(tmp_path):
+    """Vast's onstart, run with stand-ins: the loop goes round once, 50 minutes after the start with no
+    heartbeat, and curl notes its arguments and the headers it reads from files."""
+    from crab_student import launch, machine
+
+    d, tools = tmp_path / "machine", tmp_path / "tools"
+    tools.mkdir()
+    fakes = {
+        "sleep": "[ -e slept ] && exit 1; touch slept",
+        "date": "n=$(cat dates 2>/dev/null || echo 0); echo $((n + 1)) > dates; echo $((1000 + 3000 * n))",
+        "curl": 'printf "%s\\n" "$@" > curl.args; for a in "$@"; do case $a in @*) cat "${a#@}";; esac; done'
+        " > curl.headers",
+    }
+    for name, script in fakes.items():
+        (tools / name).write_text(f"#!/bin/sh\n{script}\n")
+        (tools / name).chmod(0o755)
+    env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", CONTAINER_ID="42",
+               CONTAINER_API_KEY="key-42", CS_VAST_URL="http://vast.invalid")  # fmt: skip
+    onstart = launch.ONSTART.replace(machine.REMOTE_DIR, str(d))
+    subprocess.run(["bash", "-c", onstart], env=env, check=True, timeout=30)
+    assert wait_for(lambda: (d / "curl.headers").exists() and (d / "curl.headers").read_text(), 30)
+    args = (d / "curl.args").read_text().splitlines()
+    assert "http://vast.invalid/api/v0/instances/42/" in args and not any("key-42" in a for a in args)
+    assert "Authorization: Bearer key-42" in (d / "curl.headers").read_text().splitlines()
+    assert (d / "vast.header").stat().st_mode & 0o777 == 0o600
+
+
 # ---- Claude Code's environment and command line --------------------------------------------------
 
 

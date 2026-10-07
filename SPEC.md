@@ -25,9 +25,9 @@ the code does it is in the modules named here.
    and is tried again by `start`) or right after its setup failed. `start` on a stopped agent never
    destroys. `delete` checks for unsaved work first (5.3).
 5. **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
-   activity, done or not, always saving first. The dead-man switch stops it if the watchdog never runs
-   or dies; setup refuses a machine with no key to stop itself; `list`/`status` stop a machine whose own
-   stop call Vast has not taken after 5 minutes. Nothing on the machine destroys it.
+   activity, done or not, always saving first. The dead-man switch stops it if the watchdog never runs,
+   dies or keeps failing; setup refuses a machine with no key to stop itself; `list`/`status` stop a
+   machine whose own stop call Vast has not taken after 5 minutes. Nothing on the machine destroys it.
 6. **Secrets** (the Claude token, deploy keys, task secrets) never appear on command lines, in logs, the
    brief, records or git. They reach the machine only inside the upload stream, as 0600 files (and in
    its 0600 `~/.claude/settings.json`).
@@ -258,16 +258,18 @@ the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast 
 container's key.
 
 **6.3 The watchdog** (`cs.py watch`, one per container by flock; `status` and `agent-attach` start it
-if it is not running). Every minute: touch `heartbeat`; while the frontend is `tmux`, keep the tmux
-session `agent` (running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files
-under `~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy.
-Colleague: a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a
-check-in after 20 minutes without the conversation growing while it says `working`. Each comes again
-only once the agent itself did something: a status update (`agent.json`'s `at`), CPU or GPU work. (A
-reminder grows the conversation, an activity: an agent that cannot answer gets one, and its machine
-stops `idle_minutes` later.) Typed messages start with `Automated message from the machine:`. **Stop** after `idle_minutes` idle, done or not: set `stopping`, notify, final save
-(6.7), record `stop_sent_at`, call Vast stop with the container's key, retried every tick; `stop_reason`
-is `idle` or `done`. A new container start resets the clocks. Notifications go to `notify_url`.
+if it is not running). Every minute: while the frontend is `tmux`, keep the tmux session `agent`
+(running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files under
+`~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy. Colleague:
+a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a check-in
+after 20 minutes without the conversation growing while it says `working`. Each comes again only once
+the agent itself did something: a status update (`agent.json`'s `at`), CPU or GPU work. (A reminder
+grows the conversation, an activity: an agent that cannot answer gets one, and its machine stops
+`idle_minutes` later.) Typed messages start with `Automated message from the machine:`. **Stop** after
+`idle_minutes` idle, done or not: set `stopping`, notify, final save (6.7), record `stop_sent_at`, call
+Vast stop with the container's key, retried every tick; `stop_reason` is `idle` or `done`. A tick that
+did all this touches `heartbeat` last: one that fails leaves it, so the dead-man switch (6.2) stops a
+watchdog that keeps failing. A new container start resets the clocks. Notifications go to `notify_url`.
 
 **6.4 Modes.** The machine's mode starts as the launch's and changes only by hand-off (6.6).
 

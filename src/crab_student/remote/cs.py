@@ -920,7 +920,6 @@ def cmd_watch() -> int:
     while True:
         try:
             c = cfg()
-            write(D / "heartbeat", str(int(time.time())), 0o600)
             if st["stopping"]:
                 vast_stop(vast_env)
             else:
@@ -929,6 +928,8 @@ def cmd_watch() -> int:
                 for action in tick(st, c, time.time(), probe):
                     perform(action, st, c, vast_env)
             save_state(st)
+            # (only a tick that did its work: one failing every minute leaves the dead-man switch to stop it)
+            write(D / "heartbeat", str(int(time.time())), 0o600)
         except Exception as e:  # the watchdog never dies of a bug (the dead-man switch is the net)
             log("tick failed: %r" % (e,))
         time.sleep(TICK)

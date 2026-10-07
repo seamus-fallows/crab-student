@@ -1185,6 +1185,26 @@ def test_fake_claude_works_a_tiny_task_through_to_done_and_forks_like_claude(cs,
     assert fork.read_text().startswith(transcript.read_text().splitlines()[0])
 
 
+@pytest.mark.parametrize("tick_fails", [False, True])
+def test_the_heartbeat_says_a_watchdog_tick_was_done(cs, monkeypatch, tick_fails):
+    """A tick that fails every minute must not keep the dead-man switch satisfied."""
+
+    class OneTick(Clock):
+        def sleep(self, seconds: float) -> None:
+            raise EndOfTest
+
+    monkeypatch.setattr(cs, "time", OneTick())
+    monkeypatch.setattr(cs, "_lock", lambda path, wait=False: path)  # (flock: one watchdog per container)
+    monkeypatch.setattr(os, "environ", os.environ.copy())  # (the watchdog edits its own environment)
+    monkeypatch.setattr(cs, "Probe", FakeProbe)
+    monkeypatch.setattr(cs, "ensure_agent_session", lambda c: None)
+    if tick_fails:
+        monkeypatch.setattr(cs, "tick", lambda *a: 1 / 0)
+    with pytest.raises(EndOfTest):
+        cs.cmd_watch()
+    assert (cs.D / "heartbeat").exists() is not tick_fails
+
+
 @posix_only
 def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_start(cs, tmp_path):
     tmux = tmp_path / "tools" / "tmux"
@@ -1197,7 +1217,7 @@ def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_star
     watch = [sys.executable, str(CS_PY), "watch"]
     first = subprocess.Popen(watch, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        assert wait_for(lambda: cs.load_state()["boot"] == 2000.0, 30)
+        assert wait_for(lambda: cs.load_state()["boot"] == 2000.0 and (cs.D / "heartbeat").exists(), 30)
         assert subprocess.run(watch, env=env, capture_output=True, timeout=30).returncode == 0  # left at once
         st = cs.load_state()
         assert 0 <= st["used_seconds"] < 20 and st["stopping"] is None and (cs.D / "heartbeat").exists()

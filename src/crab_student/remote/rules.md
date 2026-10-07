@@ -21,7 +21,8 @@ machine, not from the user.
   the machine stops.
 - Push only `{{branch}}`. Never force-push, change remotes or hooks, or use `--no-verify`.
 - Keep big files (over 50 MB), datasets, checkpoints, caches and virtualenvs out of git with
-  `.gitignore`. Put big outputs in `/root/outputs/` and list them in your report.
+  `.gitignore`. Put big outputs where the brief says, else in `/root/outputs/`, and list them in your
+  report.
 - Keep your notes, report and small results (tables, plots, JSON under 5 MB) in `agent-runs/{{name}}/`.
 - The machine writes `agent-runs/{{name}}/stopped.json` when it stops. Leave that file alone.
 

@@ -261,6 +261,10 @@ files outside git) without starting it again, and refuses, listing them, unless 
 it cannot tell what is on the machine, it asks you to `start` it first (or to use `--force`). The
 branch stays in the agent repo (`pull` it first if you want it in your clone: `pull` needs the agent).
 
+While a machine is stopped, Vast can rent its GPUs to someone else, and `start` then waits until they
+are free: until then nothing in `/root/outputs` can be reached, so for big outputs you need sooner, say
+where they should go (a Hugging Face repo, for example) when you ask for the task.
+
 ## Money and safety
 
 - **You are responsible for your machines.** There is no time limit: a machine runs until it goes

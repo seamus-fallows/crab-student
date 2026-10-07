@@ -83,12 +83,13 @@ def test_calls_are_retried_on_server_errors_but_not_on_refusals(fake_vast):
     answer_next(fake_vast, 2, 503)
     assert vast.current_user()["id"] == 1
     answer_next(fake_vast, 3, 500)
-    with pytest.raises(vast.VastError):
+    with pytest.raises(vast.VastDown):  # (it may answer again soon)
         vast.current_user()
     assert len(fake_vast.calls("GET", "/api/v0/users/current")) == 6
     answer_next(fake_vast, 1, 200, {"success": False, "msg": "account suspended"})
-    with pytest.raises(vast.VastError, match="account suspended"):
+    with pytest.raises(vast.VastError, match="account suspended") as e:
         vast.current_user()
+    assert not isinstance(e.value, vast.VastDown)
     assert len(fake_vast.calls("GET", "/api/v0/users/current")) == 7
 
 
@@ -163,7 +164,7 @@ def test_an_instance_is_none_once_gone_but_an_odd_reply_is_an_error(fake_vast):
     assert vast.instance(iid)["label"] == LABEL
     assert vast.instance(iid + 1) is None
     answer_next(fake_vast, 1, 200, {"success": True})
-    with pytest.raises(vast.VastError):
+    with pytest.raises(vast.VastDown):
         vast.instance(iid)  # (a glitch must not look like "gone")
 
 

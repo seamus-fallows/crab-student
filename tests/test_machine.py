@@ -242,7 +242,7 @@ def fake_python(path: Path, version: tuple[int, int]) -> Path:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell")
-@pytest.mark.parametrize("version, runs", [((3, 12), True), ((3, 13), True), ((3, 11), False)])
+@pytest.mark.parametrize("version, runs", [((3, 11), True), ((3, 13), True), ((3, 10), False)])
 def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_after(tmp_path, version, runs):
     if Path("/venv/main/bin/python").exists():
         pytest.skip("this computer has the image's /venv/main")

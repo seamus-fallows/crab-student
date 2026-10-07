@@ -227,9 +227,9 @@ brief over 5,000 characters becomes a pointer to `/root/BRIEF.md`).
 `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude, session_id,
 idle_minutes, notify_url, secret_names, setup, vscode_commit), `BRIEF.md`, `claude.env` and
 `secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600), `github_known_hosts`. The command
-links the first Python 3.12 or newer (`machine.MIN_PYTHON`) among `python3` and `/venv/main/bin/python`
+links the first Python 3.11 or newer (`machine.MIN_PYTHON`) among `python3` and `/venv/main/bin/python`
 as `D/python` and runs `./python cs.py setup`; with none, it exits 1, saying the image needs Python
-3.12 or newer (a failed setup: exit 5). Everything after runs `D/python`: the commands over ssh (6.8),
+3.11 or newer (a failed setup: exit 5). Everything after runs `D/python`: the commands over ssh (6.8),
 the watchdog (6.2) and the scripts setup writes. Setup prints `step i/6 <label>` lines, then
 `{"ok": true, "warnings": [...]}` or `{"ok": false, "step", "label", "error"}`; once `setup-done`
 exists it only restarts the watchdog (`{"ok": true, "resumed": true}`). A setup run again (after a lost

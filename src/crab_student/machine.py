@@ -22,7 +22,7 @@ from pathlib import Path
 from crab_student import core
 
 REMOTE_DIR = "/root/crab-student"
-MIN_PYTHON = (3, 12)  # (the default image's python3 and /venv/main are 3.12)
+MIN_PYTHON = (3, 11)  # (the local side's too: the tests run the machine code on it)
 # The machine code runs on the first Python new enough among the image's python3 and /venv/main's. Setup links
 # it as D/python, and everything after runs that link (the commands over ssh, the watchdog Vast's onstart
 # starts, the scripts setup writes): an ssh command's PATH and the onstart command's may differ.

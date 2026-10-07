@@ -22,8 +22,6 @@ dev = ["pytest>=8", "ruff>=0.6"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
-# The machine side runs on the machine's Python (machine.MIN_PYTHON).
-per-file-target-version = { "src/crab_student/remote/*" = "py312" }
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

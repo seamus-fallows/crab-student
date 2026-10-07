@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """crab-student on the machine: setup, the watchdog, Claude Code in tmux, the hand-off from VS Code, and the
-commands the local side runs over ssh (each prints one JSON object on its last line). Python 3.12+ (the one
+commands the local side runs over ssh (each prints one JSON object on its last line). Python 3.11+ (the one
 setup links as D/python), standard library only. What the agent reads never names crab-student: it has no
 context for the name."""
 

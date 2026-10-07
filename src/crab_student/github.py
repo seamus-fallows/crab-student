@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import tempfile
 import time
@@ -69,13 +70,15 @@ def known_hosts_file() -> Path:
 
 
 def ssh_command(key_path: Path) -> str:
-    """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key."""
+    """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key. git runs it with sh, so every
+    argument is quoted for sh; ssh splits an option's value on spaces itself, so the known-hosts path is one ssh
+    reads whole (core.ssh_path)."""
     ssh = (core.tool("ssh") or "ssh").replace("\\", "/")
-    key, hosts = str(key_path).replace("\\", "/"), str(known_hosts_file()).replace("\\", "/")
-    return (
-        f'"{ssh}" -i "{key}" -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile="{hosts}" '
-        f"-o StrictHostKeyChecking=yes"
-    )
+    hosts = f"UserKnownHostsFile={core.ssh_path(known_hosts_file())}"
+    return shlex.join(
+        [ssh, "-i", str(key_path).replace("\\", "/"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+         "-o", hosts, "-o", "StrictHostKeyChecking=yes"]
+    )  # fmt: skip
 
 
 def git(

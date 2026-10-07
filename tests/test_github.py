@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -78,6 +79,17 @@ def record(branch: str = "agent/w1", slug: str = "ada/proj", workspace: bool = F
 )  # fmt: skip
 def test_parse_remote(url, slug):
     assert github.parse_remote(url) == slug
+
+
+def test_the_ssh_command_for_git_survives_a_space_in_the_home_path(tmp_path, monkeypatch):
+    home = tmp_path / "Ada Lovelace"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    key = core.keys_dir() / "ada--proj"
+    argv = shlex.split(github.ssh_command(key))  # (git runs it with sh, which splits it like this)
+    assert Path(argv[argv.index("-i") + 1]) == key
+    hosts = next(a.split("=", 1)[1] for a in argv if a.startswith("UserKnownHostsFile="))
+    (path,) = shlex.split(hosts)  # (ssh splits an option's value on spaces itself, minding quotes)
+    assert Path(path.replace("~", str(home), 1)) == github.known_hosts_file()
 
 
 def test_local_repo_finds_the_github_remote(user_repo):

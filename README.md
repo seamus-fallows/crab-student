@@ -333,7 +333,7 @@ default.
 | `model` | (yours) | The Claude model agents use; empty: your own `~/.claude/settings.json` `model`, else Claude Code's default |
 | `effort` | (yours) | `low`, `medium`, `high` or `xhigh`; empty: the effort your own Claude Code uses |
 | `fast_mode` | (yours) | `on` or `off`; empty: your `fastMode` |
-| `image` | `vastai/base-image:cuda-12.8.1-auto` | Docker image (Ubuntu, CUDA, Python) |
+| `image` | `vastai/base-image:cuda-12.8.1-auto` | Docker image (Ubuntu, CUDA, Python 3.12 or newer) |
 | `disk_gb` | 64 | Disk when the launch does not say (the launcher usually does: 1.5x its estimate, at least 64 GB) |
 | `min_reliability` | 0.98 | Only hosts at least this reliable |
 | `min_download_mbps` | 200 | Only hosts that download at least this fast |

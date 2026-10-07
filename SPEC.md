@@ -223,14 +223,18 @@ brief over 5,000 characters becomes a pointer to `/root/BRIEF.md`).
 `/root/outputs`; the brief at `/root/BRIEF.md` (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command, `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&
-<python> cs.py setup`, with a tar.gz on stdin: the `remote/` files (`fake_claude.py` only for
-`--fake-claude`), `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings,
-fake_claude, session_id, idle_minutes, notify_url, secret_names, setup, vscode_commit), `BRIEF.md`,
-`claude.env` and `secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600),
-`github_known_hosts`. Setup prints `step i/6 <label>` lines, then `{"ok": true, "warnings": [...]}` or
-`{"ok": false, "step", "label", "error"}`; once `setup-done` exists it only restarts the watchdog
-(`{"ok": true, "resumed": true}`). A setup run again (after a lost connection) waits on `setup.lock` for
-the first; each step touches `heartbeat`, so the dead-man switch waits for a long step. The steps:
+...`, with a tar.gz on stdin: the `remote/` files (`fake_claude.py` only for `--fake-claude`),
+`config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude, session_id,
+idle_minutes, notify_url, secret_names, setup, vscode_commit), `BRIEF.md`, `claude.env` and
+`secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600), `github_known_hosts`. The command
+links the first Python 3.12 or newer (`machine.MIN_PYTHON`) among `python3` and `/venv/main/bin/python`
+as `D/python` and runs `./python cs.py setup`; with none, it exits 1, saying the image needs Python
+3.12 or newer (a failed setup: exit 5). Everything after runs `D/python`: the commands over ssh (6.8),
+the watchdog (6.2) and the scripts setup writes. Setup prints `step i/6 <label>` lines, then
+`{"ok": true, "warnings": [...]}` or `{"ok": false, "step", "label", "error"}`; once `setup-done`
+exists it only restarts the watchdog (`{"ok": true, "resumed": true}`). A setup run again (after a lost
+connection) waits on `setup.lock` for the first; each step touches `heartbeat`, so the dead-man switch
+waits for a long step. The steps:
 
 1. `environment`: the login profile `/etc/profile.d/agent.sh`, also run from `~/.bashrc` (PATH with the
    repo's `.venv`, `~/.local/bin`, `/venv/main`; the token and secrets; shells start in the repo); the
@@ -253,9 +257,9 @@ the first; each step touches `heartbeat`, so the dead-man switch waits for a lon
 
 **6.2 onstart** (run by Vast as root at every container start; each command ends in `;` or `&`): write
 `CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` (0600) and the start time to `booted`;
-start the dead-man loop; start the watchdog if `setup-done` exists. **Dead-man loop:** every 60 s, if
-the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast stop with the
-container's key.
+start the dead-man loop; start the watchdog (`./python cs.py watch`) if `setup-done` exists. **Dead-man
+loop:** every 60 s, if the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast
+stop with the container's key.
 
 **6.3 The watchdog** (`cs.py watch`, one per container by flock; `status` and `agent-attach` start it
 if it is not running). Every minute: while the frontend is `tmux`, keep the tmux session `agent`
@@ -312,7 +316,7 @@ reason, outputs {files, bytes, sample}, large_files [{path, bytes}], not_committ
 not_committed_count}`. A refused commit leaves no note. The note on the branch is the only record of a
 stop; `delete` reads it.
 
-**6.8 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
+**6.8 Commands over ssh** (`cd D && ./python cs.py ...`; each prints one JSON object last; a failure
 prints `{"error": ...}` and exits 1):
 
 - `status`: name, mode, frontend, agent `{state, message, at}` (`{}` until set), idle_seconds,

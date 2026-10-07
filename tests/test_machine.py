@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
 import threading
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -229,6 +231,34 @@ def test_the_upload_outcome(last, returncode, hang, outcome, monkeypatch):
     except core.CrabError as e:
         got = e.code
     assert got == outcome
+
+
+def fake_python(path: Path, version: tuple[int, int]) -> Path:
+    """A stand-in Python of `version`: it answers setup's version check, else says how it was run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'#!/bin/sh\n[ "$1" = -c ] && exit {int(version < machine.MIN_PYTHON)}\necho "$0 $*"\n')
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell")
+@pytest.mark.parametrize("version, runs", [((3, 12), True), ((3, 13), True), ((3, 11), False)])
+def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_after(tmp_path, version, runs):
+    if Path("/venv/main/bin/python").exists():
+        pytest.skip("this computer has the image's /venv/main")
+    python3 = fake_python(tmp_path / "bin" / "python3", version)
+    d = tmp_path / "crab-student"
+    d.mkdir()
+    env = {"PATH": f"{python3.parent}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+    p = subprocess.run(
+        ["sh", "-c", machine.SETUP], cwd=d, env=env, capture_output=True, text=True, timeout=30
+    )
+    if runs:
+        program, *args = p.stdout.split()
+        assert p.returncode == 0 and Path(program).name == "python" and args == ["cs.py", "setup"]
+        assert (d / "python").resolve() == python3.resolve()
+    else:  # (no Python new enough: a failed setup, exit 5 once it reaches the local side)
+        assert p.returncode == 1 and not (d / "python").exists() and p.stderr
 
 
 # ---- terminals -----------------------------------------------------------------------------------

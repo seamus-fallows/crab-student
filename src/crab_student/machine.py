@@ -22,7 +22,16 @@ from pathlib import Path
 from crab_student import core
 
 REMOTE_DIR = "/root/crab-student"
-PY = 'exec "$(command -v python3 || echo /venv/main/bin/python)"'
+MIN_PYTHON = (3, 12)  # (the default image's python3 and /venv/main are 3.12)
+# The machine code runs on the first Python new enough among the image's python3 and /venv/main's. Setup links
+# it as D/python, and everything after runs that link (the commands over ssh, the watchdog Vast's onstart
+# starts, the scripts setup writes): an ssh command's PATH and the onstart command's may differ.
+SETUP = (
+    'for p in "$(command -v python3)" /venv/main/bin/python; do '
+    f'"$p" -c "import sys; sys.exit(sys.version_info < {MIN_PYTHON})" 2>/dev/null && ln -sf "$p" python && '
+    "exec ./python cs.py setup; done; "
+    f"echo 'the image needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer' >&2; exit 1"
+)
 REMOTE_SRC = Path(__file__).parent / "remote"
 ALIAS_PREFIX = "crab-student-"  # (agents' ssh host names)
 REMOTE_PLATFORM = "remote.SSH.remotePlatform"  # (VS Code: which hosts run Linux)
@@ -112,7 +121,7 @@ def ssh_cmd(name: str, *, tty: bool = False) -> list[str]:
 
 
 def _remote_command(args: list[str]) -> str:
-    return f"cd {REMOTE_DIR} && {PY} cs.py {' '.join(shlex.quote(a) for a in args)}"
+    return f"cd {REMOTE_DIR} && exec ./python cs.py {' '.join(shlex.quote(a) for a in args)}"
 
 
 def remote(name: str, args: list[str], *, input: bytes | None = None, timeout: float = 60) -> dict:
@@ -185,7 +194,7 @@ def upload_and_setup(
         *ssh_cmd(name),
         "-o",
         "ConnectTimeout=15",
-        f"mkdir -p {REMOTE_DIR} && tar -xzf - -C {REMOTE_DIR} --no-same-owner && {_remote_command(['setup'])}",
+        f"mkdir -p {REMOTE_DIR} && tar -xzf - -C {REMOTE_DIR} --no-same-owner && cd {REMOTE_DIR} && {{ {SETUP}; }}",
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err: list[bytes] = []

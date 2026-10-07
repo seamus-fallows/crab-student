@@ -44,8 +44,7 @@ ONSTART = "\n".join(
         'h=$(stat -c %Y heartbeat 2>/dev/null || echo 0); [ "$h" -gt "$t" ] && t=$h; '
         f"if [ $(( $(date +%s) - t )) -gt 2700 ]; then . ./vast.env; {_STOP_CALL}; fi; done' "
         "> logs/deadman.log 2>&1 &",
-        '[ -f setup-done ] && nohup "$(command -v python3 || echo /venv/main/bin/python)" cs.py watch '
-        ">> logs/watch.log 2>&1 &",
+        "[ -f setup-done ] && nohup ./python cs.py watch >> logs/watch.log 2>&1 &",  # (the Python setup chose)
     ]
 )
 

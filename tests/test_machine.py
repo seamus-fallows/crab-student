@@ -265,7 +265,7 @@ def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_a
 
 
 def test_open_without_a_terminal_asks_for_one(monkeypatch):
-    monkeypatch.setattr(machine, "interactive", lambda: False)
+    monkeypatch.setattr(core, "interactive", lambda: False)
     fails(2, machine.open_one, "job1")
 
 
@@ -330,46 +330,41 @@ def panel_prompt(url: str) -> str:
     return urllib.parse.parse_qs(query)["prompt"][0]
 
 
-def test_open_vscode_types_an_interactive_agents_task_into_the_claude_panel(machines, vscode):
+def test_open_vscode_types_an_interactive_agents_task_into_the_claude_panel(vscode):
     brief = "Fix the flaky test in tests/test_io.py & get CI to 100% green.\n\nUse pytest -x + the logs."
-    machines.replies[("job1", "status")] = {"frontend": "vscode"}
-    assert machine.open_vscode(agent_record(brief=brief)) == 0
+    assert machine.open_vscode(agent_record(brief=brief), panel=True) == 0
     assert vscode["code"] == [
         ["/usr/bin/code", "--remote", "ssh-remote+crab-student-job1", "/root/work/proj"]
     ]
     [url] = vscode["urls"]
     assert panel_prompt(url) == brief.strip()
+    assert machine.open_vscode(agent_record("colleague", brief=brief), panel=False) == 0
+    assert len(vscode["code"]) == 2 and len(vscode["urls"]) == 1  # (Claude works in tmux: no panel)
 
 
-@pytest.mark.parametrize("mode, status, panel", [
+@pytest.mark.parametrize("mode, status, works_there", [
+    ("interactive", {"frontend": "vscode"}, True),
     ("interactive", {"frontend": "tmux"}, False),  # (handed off since the record was written)
     ("colleague", {"frontend": "tmux"}, False),
     ("interactive", machine.Unreachable("no answer"), True),  # (the machine cannot say: the record does)
     ("colleague", machine.Unreachable("no answer"), False),
 ])  # fmt: skip
-def test_open_vscode_opens_the_claude_panel_only_while_claude_works_there(
-    machines, vscode, mode, status, panel
+def test_claude_works_in_vs_code_as_the_machine_says_else_as_the_record_says(
+    machines, mode, status, works_there
 ):
     machines.replies[("job1", "status")] = status
-    assert machine.open_vscode(agent_record(mode, brief="Train the model.")) == 0
-    assert len(vscode["code"]) == 1 and bool(vscode["urls"]) == panel
+    assert machine.in_vscode(agent_record(mode)) is works_there
 
 
-def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(machines, vscode):
-    machines.replies[("job1", "status")] = {"frontend": "vscode"}
-    machine.open_vscode(agent_record(brief="Train the model. " * 400))
+def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(vscode):
+    machine.open_vscode(agent_record(brief="Train the model. " * 400), panel=True)
     assert "/root/BRIEF.md" in panel_prompt(vscode["urls"][0])
 
 
 def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vscode):
     monkeypatch.setattr(core, "tool", lambda name: None)
-    assert "'code' command" in fails(1, machine.open_vscode, agent_record()).message
+    assert "'code' command" in fails(1, machine.open_vscode, agent_record(), True).message
     assert vscode == {"code": [], "urls": []}
-
-
-def test_open_vscode_on_an_agent_whose_status_is_known_does_not_ask_the_machine_again(machines, vscode):
-    machine.open_vscode(agent_record(brief="Train the model."), {"frontend": "vscode"})
-    assert machines.calls == [] and vscode["urls"]
 
 
 def test_the_users_vs_code_commit_goes_to_the_machine(monkeypatch):

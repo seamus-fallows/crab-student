@@ -249,13 +249,9 @@ def upload_and_setup(
 # ---- terminals -----------------------------------------------------------------------------------
 
 
-def interactive() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def open_one(name: str) -> int:
     argv = [*ssh_cmd(name, tty=True), "agent-attach"]
-    if interactive():
+    if core.interactive():
         print(f"Attaching to {name} (detach: Ctrl-b d - the agent keeps running).", flush=True)
         return subprocess.call(argv)
     if os.name == "nt" and (wt := core.tool("wt")):
@@ -343,7 +339,7 @@ def _tmux_all(names: list[str]) -> int:
             "open --all needs tmux on this computer (e.g. brew install tmux, or apt install tmux). "
             "Or open agents one at a time: crab-student open NAME"
         )
-    if not interactive():
+    if not core.interactive():
         raise core.CrabError(
             'open --all needs a terminal: run "crab-student open --all" in your terminal.', 2
         )
@@ -385,9 +381,9 @@ def local_vscode() -> str | None:
     return commit if re.fullmatch(r"[0-9a-f]{40}", commit) else None
 
 
-def open_vscode(rec: dict, status: dict | None = None) -> int:
-    """The machine in VS Code (Remote-SSH, the repo folder). For an interactive agent not handed off yet, also
-    the Claude panel, with the task typed in but not sent, once VS Code is connected."""
+def open_vscode(rec: dict, panel: bool) -> int:
+    """The machine in VS Code (Remote-SSH, the repo folder). With `panel` (Claude works in VS Code), also the
+    Claude panel, with the task typed in but not sent, once VS Code is connected."""
     code = core.tool("code")
     if not code:
         raise core.CrabError(
@@ -397,8 +393,7 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
     name, folder = rec["name"], rec["repo"]["dir"]
     remember_linux_host(name)
     subprocess.Popen([code, "--remote", f"ssh-remote+{alias(name)}", folder])
-    status = status or agent_status(rec)
-    if status.get("frontend") != "vscode":
+    if not panel:
         print(f"Opening {name} in VS Code ({folder}). Its terminal shows the agent (tmux).")
         return 0
     print(
@@ -461,17 +456,19 @@ def remember_linux_host(name: str) -> None:
         core.write_vscode_settings(path, {**settings, REMOTE_PLATFORM: wanted})
 
 
-def agent_status(rec: dict) -> dict:
-    """The machine's status; `frontend` (where the agent's Claude works now: a hand-off moves it to tmux) comes
-    from the record when the machine cannot be asked."""
+def agent_status(name: str) -> dict | None:
+    """The machine's status (`cs.py status`), or None when it cannot be asked."""
     try:
-        st = remote(rec["name"], ["status"], timeout=20)
+        return remote(name, ["status"], timeout=20)
     except core.CrabError:
-        st = {}
-    return {
-        **st,
-        "frontend": st.get("frontend") or ("vscode" if rec.get("mode") == "interactive" else "tmux"),
-    }
+        return None
+
+
+def in_vscode(rec: dict) -> bool:
+    """Whether the agent's Claude works in VS Code (an interactive agent not handed off yet): as its machine says
+    (a hand-off moves it to tmux), or as its record's mode says when the machine cannot be asked."""
+    status = agent_status(rec["name"])
+    return status["frontend"] == "vscode" if status else rec["mode"] == "interactive"
 
 
 def _task_prompt(name: str) -> str:

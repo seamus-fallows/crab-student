@@ -520,8 +520,9 @@ def test_open_one_of_an_interactive_agent_opens_vs_code_and_attaches_after_its_h
     machines.replies[("a", "status")] = status("working", "x")
     machines.replies[("b", "status")] = status(frontend="vscode", mode="interactive")
     vscode = []
-    monkeypatch.setattr(machine, "open_vscode", lambda rec, status=None: vscode.append(rec["name"]) or 0)
-    monkeypatch.setattr(machine, "interactive", lambda: terminal)
+    monkeypatch.setattr(machine, "open_vscode", lambda rec, panel: vscode.append((rec["name"], panel)) or 0)
+    monkeypatch.setattr(core, "interactive", lambda: terminal)
     monkeypatch.setattr(machine, "wait_for_handoff", lambda name: handed_off)
-    assert agents.open_one("b") == 0 and vscode == ["b"] and opened == (["b"] if attached else [])
-    assert agents.open_one("a") == 0 and vscode == ["b"] and opened[-1] == "a"
+    assert agents.open_one("b") == 0 and vscode == [("b", True)] and opened == (["b"] if attached else [])
+    assert len(machines.calls) == 1  # (the machine is asked once where Claude works)
+    assert agents.open_one("a") == 0 and vscode == [("b", True)] and opened[-1] == "a"

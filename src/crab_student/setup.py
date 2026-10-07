@@ -48,12 +48,8 @@ NOT_A_TERMINAL = (
 )
 
 
-def interactive() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def _ask_secret(prompt: str) -> str:
-    if not interactive():
+    if not core.interactive():
         raise core.CrabError(f"init needs to ask you something, but {NOT_A_TERMINAL}", 2)
     return getpass.getpass(prompt).strip()
 
@@ -119,7 +115,7 @@ def _github_step() -> bool:
         )
         return False
     if subprocess.run([gh, "auth", "status"], capture_output=True).returncode != 0:
-        if not interactive():
+        if not core.interactive():
             _say("GitHub", "not logged in: run gh auth login in a terminal, then init again.")
             return False
         _say("GitHub", "logging in with gh auth login:")

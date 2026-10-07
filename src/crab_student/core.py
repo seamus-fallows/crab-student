@@ -495,3 +495,11 @@ def fmt_hours(h: float | None) -> str:
 
 def ascii_text(text: str) -> str:
     return text.encode("ascii", "replace").decode("ascii")
+
+
+# ---- the terminal --------------------------------------------------------------------------------
+
+
+def interactive() -> bool:
+    """Someone is at this terminal (stdin and stdout are both one)."""
+    return sys.stdin.isatty() and sys.stdout.isatty()

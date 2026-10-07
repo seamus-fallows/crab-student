@@ -342,7 +342,7 @@ def cmd_secret(args: argparse.Namespace) -> int:
         core.set_secret_names([n for n in names if n != args.name])
         emit({"name": args.name, "result_line": f"Deleted {args.name}."}, args.json)
         return 0
-    if not setup.interactive():
+    if not core.interactive():
         raise core.CrabError(f"secret set asks for the value, but {setup.NOT_A_TERMINAL}", 2)
     value = getpass.getpass(f"Value of {args.name} (it will not be shown): ").strip()
     if not value:
@@ -465,7 +465,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError("no agent is running.")
     if args.vscode:
         for r in live:
-            machine.open_vscode(r)
+            machine.open_vscode(r, panel=machine.in_vscode(r))
         return 0
     return agents.open_one(args.name) if args.name else agents.open_all([r["name"] for r in live])
 

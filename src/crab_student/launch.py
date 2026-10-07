@@ -442,14 +442,23 @@ def resume_machine(rec: dict, out: Progress) -> None:
         raise core.CrabError(
             f"{name}'s machine no longer exists on Vast. Try again: crab-student start {name}"
         )
+    start_again(rec, inst, out)
+
+
+def start_again(rec: dict, inst: dict, out: Progress) -> None:
+    """Start the agent's machine again unless it runs (a new start: why it last stopped no longer holds), and wait
+    until it answers ssh."""
+    name = rec["name"]
     if not vast.running(inst):
+        out.line(f"Starting {name}...")
         vast.set_state(rec["instance_id"], "running")
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
         rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
     if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
         raise core.CrabError(
-            f"{name}'s machine did not come back up ({why}). Try again later: crab-student start {name}"
+            f"{name} did not come back up ({why}). Vast keeps trying: check again with "
+            f"crab-student status {name}, or stop it with crab-student stop {name}."
         )
 
 
@@ -869,16 +878,7 @@ def start(name: str, out: Progress, offer_ids: list[int] | None = None) -> dict:
         if vast.running(inst):
             out.line(f"{name} is already running.")
             return result(rec, "working", [])
-        vast.set_state(rec["instance_id"], "running")
-        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
-        rec.update(last_start=time.time(), stopped_since=None)
-        core.save(rec)
-        out.line(f"Starting {name}...")
-        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
-            raise core.CrabError(
-                f"{name} did not come back up ({why}). Vast keeps trying: check again with "
-                f"crab-student status {name}, or stop it with crab-student stop {name}."
-            )
+        start_again(rec, inst, out)
         machine.write_ssh_config()
         return result(rec, "working", [])
 

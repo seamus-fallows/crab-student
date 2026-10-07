@@ -207,7 +207,7 @@ def test_config_lists_gets_sets_and_resets(capsys):
 def test_secrets_are_stored_listed_and_deleted_without_showing_values(monkeypatch, capsys):
     assert run(capsys, "secret", "set", "HF_TOKEN")[0] == 2  # (it asks for the value: only in a terminal)
     assert core.secret_names() == [] and core.get_secret(core.secret_key("HF_TOKEN")) is None
-    monkeypatch.setattr(setup, "interactive", lambda: True)
+    monkeypatch.setattr(core, "interactive", lambda: True)
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": "hf_value_123")
     rc, out, err = run(capsys, "secret", "set", "HF_TOKEN", "--json")
     assert rc == 0 and json.loads(out) and "hf_value_123" not in out + err
@@ -352,9 +352,7 @@ def opened(fake_vast, machines, monkeypatch) -> list[tuple]:
     monkeypatch.setattr(machine, "open_one", lambda name: got.append(("terminal", name)) or 0)
     monkeypatch.setattr(machine, "open_all", lambda names: got.append(("terminals", names)) or 0)
     monkeypatch.setattr(
-        machine,
-        "open_vscode",
-        lambda rec, status=None: got.append(("vscode", rec["name"], rec["mode"])) or 0,
+        machine, "open_vscode", lambda rec, panel: got.append(("vscode", rec["name"], panel)) or 0
     )
     for name, mode in (("job1", "colleague"), ("job2", "interactive")):
         core.save(record(name, mode=mode, instance_id=fake_vast.add_instance(1, name)))
@@ -374,7 +372,7 @@ def test_an_interactive_agent_in_vs_code_opens_there_and_open_all_leaves_it_out(
     assert run(capsys, "open", "job2", "--vscode")[0] == 0
     rc, out, _ = run(capsys, "open", "--all")
     assert rc == 0 and "job2" in out
-    assert opened == [("vscode", "job2", "interactive")] * 2 + [("terminals", ["job1"])]
+    assert opened == [("vscode", "job2", True)] * 2 + [("terminals", ["job1"])]  # (with the Claude panel)
 
 
 def test_after_a_hand_off_an_interactive_agent_opens_in_a_terminal(opened, machines, capsys):
@@ -418,7 +416,7 @@ def test_open_follows_an_interactive_agents_launch_into_vs_code(
 ):
     launching(fake_vast, monkeypatch, mode="interactive")
     machines.replies[("job3", "status")] = machine_status("interactive", "vscode")
-    assert run(capsys, "open", "job3")[0] == 0 and opened == [("vscode", "job3", "interactive")]
+    assert run(capsys, "open", "job3")[0] == 0 and opened == [("vscode", "job3", True)]
 
 
 @pytest.mark.parametrize("end,at_work", [("failed", True), ("renting", False)])

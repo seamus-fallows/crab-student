@@ -41,13 +41,6 @@ class View:
     settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
 
 
-def _status(rec: dict) -> dict | None:
-    try:
-        return machine.remote(rec["name"], ["status"], timeout=20)
-    except core.CrabError:
-        return None
-
-
 def views(names: list[str] | None = None) -> list[View]:
     return listing(names)[0]
 
@@ -62,9 +55,13 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict]]:
             insts = {i["id"]: i for i in vast.instances()}
         except core.CrabError:
             insts = None  # (Vast unreachable: show what is known)
-    live = [r for r in recs if r["phase"] == "ready" and insts and vast.running(insts.get(r["instance_id"]))]
+    live = [
+        r["name"]
+        for r in recs
+        if r["phase"] == "ready" and insts and vast.running(insts.get(r["instance_id"]))
+    ]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        statuses = dict(zip([r["name"] for r in live], pool.map(_status, live), strict=True))
+        statuses = dict(zip(live, pool.map(machine.agent_status, live), strict=True))
     result, moved = [], False
     for rec in recs:
         inst = insts.get(rec.get("instance_id")) if insts else None
@@ -382,7 +379,7 @@ def send(name: str, text: str) -> dict:
         raise core.CrabError(
             f"{name} is not running, so it cannot get a message. Start it: crab-student start {name}"
         )
-    if (_status(rec) or {}).get("frontend") == "vscode":
+    if (machine.agent_status(name) or {}).get("frontend") == "vscode":
         raise core.CrabError(
             f"{name} is an interactive agent in VS Code: type to it there. {_vscode_hint(name)}"
         )
@@ -415,11 +412,10 @@ def open_one(name: str) -> int:
     """Attach the terminal to a running agent. An interactive agent whose Claude works in VS Code is opened there,
     and on a terminal this then waits for its hand-off and attaches to the agent in tmux."""
     rec = core.load(name)
-    status = machine.agent_status(rec)
-    if status["frontend"] != "vscode":
+    if not machine.in_vscode(rec):
         return machine.open_one(name)
-    machine.open_vscode(rec, status)
-    if not machine.interactive() or not machine.wait_for_handoff(name):
+    machine.open_vscode(rec, panel=True)
+    if not core.interactive() or not machine.wait_for_handoff(name):
         return 0
     return machine.open_one(name)
 

@@ -116,8 +116,9 @@ per rent request); agent repo `<login>/<repo>-agents`; deploy key title `crab-st
    fails, naming the label. Vast out of reach meanwhile is waited out (the timeouts decide). Every
    offer failed: exit 4. While the machine boots, the agent repo, its deploy key (4.2) and the branch go
    on GitHub; a failure there destroys the machine and fails the launch.
-4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's own failure destroys
-   the machine and fails the launch (exit 5); a lost connection leaves `setup`.
+4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's failure, or the call
+   ending without setup's result other than with ssh's exit 255, destroys the machine and fails the
+   launch (exit 5); ssh's exit 255 (a lost connection) or the call's timeout (1 hour) leaves `setup`.
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
    and setup, which resumes. Any other (`renting`, `failed`) is tried again, its machine destroyed first
    if it has one (by id, or found by its label; nothing was uploaded to it). Trying again takes the

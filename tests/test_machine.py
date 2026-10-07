@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import tarfile
+import threading
 import urllib.parse
 
 import pytest
@@ -54,17 +55,24 @@ class Sink(io.BytesIO):
 
 
 class Upload:
-    """subprocess.Popen for the upload: stdout gives `lines`, what goes to stdin is kept."""
+    """subprocess.Popen for the upload: stdout gives `lines` (then, with `hang`, nothing more until it is
+    killed), what goes to stdin is kept."""
 
-    def __init__(self, lines: list[bytes], returncode: int = 0):
-        self.stdin, self.stdout, self.stderr = Sink(), io.BytesIO(b"\n".join(lines) + b"\n"), io.BytesIO()
+    def __init__(self, lines: list[bytes], returncode: int = 0, hang: bool = False):
+        self.stdin, self.stderr, self.killed = Sink(), io.BytesIO(), threading.Event()
+        self.stdout = self.output([line + b"\n" for line in lines], hang)
         self.returncode = returncode
+
+    def output(self, lines: list[bytes], hang: bool):
+        yield from lines
+        if hang:
+            self.killed.wait(30)
 
     def wait(self) -> int:
         return self.returncode
 
     def kill(self) -> None:
-        pass
+        self.killed.set()
 
 
 # ---- the ssh config, host keys and addresses -----------------------------------------------------
@@ -200,19 +208,21 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
 
 
 @pytest.mark.parametrize(
-    "last,returncode,outcome",
+    "last,returncode,hang,outcome",
     [
-        (b'{"ok": true}', 0, "ok"),
-        (b"step 3/6 dependencies", 255, "unreachable"),  # (the connection dropped: the launch can go on)
-        (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
+        (b'{"ok": true}', 0, False, "ok"),
+        (b"step 3/6 dependencies", 255, False, "unreachable"),  # (ssh lost the connection: it goes on)
+        (b"step 3/6 dependencies", 1, True, "unreachable"),  # (the timeout killed ssh: 1 on Windows)
+        (b"Traceback (most recent call last):", 1, False, 5),  # (setup failed before its result)
+        (b"sh: 1: exec: ./python: not found", 127, False, 5),
     ],
 )
-def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
+def test_the_upload_outcome(last, returncode, hang, outcome, monkeypatch):
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode)
+        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode, hang)
     )
     try:
-        machine.upload_and_setup("job1", b"BUNDLE", lambda line: None)
+        machine.upload_and_setup("job1", b"BUNDLE", lambda line: None, timeout=0.2 if hang else 60)
         got = "ok"
     except machine.Unreachable:
         got = "unreachable"

@@ -179,8 +179,8 @@ def upload_and_setup(
     name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600
 ) -> list[str]:
     """One ssh call: unpack the bundle, run setup (which installs the project's dependencies too), pass its
-    "step i/N ..." lines on as they come; setup's warnings. Anything but setup's own answer (a lost connection,
-    a timeout) is Unreachable: the launch can continue."""
+    "step i/N ..." lines on as they come; setup's warnings. Without setup's answer, a lost connection (ssh's
+    exit 255) or the timeout is Unreachable (the launch can continue); any other exit is a failed setup."""
     cmd = [
         *ssh_cmd(name),
         "-o",
@@ -189,6 +189,7 @@ def upload_and_setup(
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err: list[bytes] = []
+    timed_out = threading.Event()
 
     def feed() -> None:
         try:
@@ -197,13 +198,17 @@ def upload_and_setup(
         except OSError:
             pass
 
+    def time_out() -> None:
+        timed_out.set()
+        proc.kill()
+
     threads = [
         threading.Thread(target=feed, daemon=True),
         threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True),
     ]
     for t in threads:
         t.start()
-    timer = threading.Timer(timeout, proc.kill)
+    timer = threading.Timer(timeout, time_out)
     timer.start()
     last = ""
     try:
@@ -221,10 +226,10 @@ def upload_and_setup(
     try:
         result = json.loads(last)
     except ValueError:
-        stderr = b"".join(err).decode("utf-8", "replace")
-        raise Unreachable(
-            f"the upload and setup on {name} did not finish ({core.last_line(stderr or last)})."
-        ) from None
+        why = core.last_line(b"".join(err).decode("utf-8", "replace") or last)
+        if proc.returncode == 255 or timed_out.is_set():  # (setup's outcome is unknown)
+            raise Unreachable(f"the upload and setup on {name} did not finish ({why}).") from None
+        raise core.CrabError(f"setup failed on {name}: {why}", 5) from None
     if not result.get("ok"):
         raise core.CrabError(
             f"setup failed at step {result.get('step')} ({result.get('label')}): {result.get('error')}", 5

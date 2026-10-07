@@ -199,16 +199,17 @@ def test_the_address_is_the_direct_port_when_there_is_one():
 
 
 @pytest.mark.parametrize(
-    ("actual", "intended", "running", "wants"),
+    ("actual", "intended", "cur_state", "running", "wants"),
     [
-        ("running", "running", True, True),
-        ("running", "stopped", False, True),  # on its way down: still counts
-        ("loading", "running", False, True),
-        ("created", None, False, True),
-        ("exited", "stopped", False, False),
+        ("running", "running", "running", True, True),
+        ("running", "stopped", "stopped", False, False),  # on its way down: where Vast takes it counts
+        ("loading", "running", "running", False, True),
+        ("exited", "running", "running", False, True),  # (started again, waiting for its host to have room)
+        ("created", None, "running", False, True),  # (no intended status: the current state says)
+        ("exited", "stopped", "stopped", False, False),
     ],
 )
-def test_running_and_wants_running(actual, intended, running, wants):
-    inst = {"actual_status": actual, "intended_status": intended}
+def test_running_and_wants_running(actual, intended, cur_state, running, wants):
+    inst = {"actual_status": actual, "intended_status": intended, "cur_state": cur_state}
     assert (vast.running(inst), vast.wants_running(inst)) == (running, wants)
     assert not vast.running(None) and not vast.wants_running(None)

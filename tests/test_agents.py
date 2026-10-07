@@ -418,6 +418,21 @@ def test_an_agent_stopped_with_stop_is_deleted_without_starting_it_once_its_note
     assert len(fake_vast.calls("PUT", "/")) == 1  # (the stop)
 
 
+def test_list_while_vast_stops_the_machine_shows_it_stopped_and_keeps_its_stop_note_good(
+    fake_vast, fake_github, machines, repo, tmp_path
+):
+    """Vast takes a while to stop a machine: on its way down it was not started again."""
+    iid = agent(fake_vast, repo=repo)
+    started = core.load("job1")["last_start"]
+    machines.replies[("job1", "save")] = saved()
+    agents.stop("job1", out())
+    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note()))  # (the stop's final save pushed it)
+    fake_vast.instances[iid]["actual_status"] = "running"  # (still running, Vast's intended status: stopped)
+    assert agents.views()[0].state == "stopped" and core.load("job1")["last_start"] == started
+    agents.delete("job1", False, out())  # (the note counts: no start, no --force)
+    assert iid not in fake_vast.instances and not core.record_path("job1").exists()
+
+
 def test_a_start_seen_from_here_makes_the_old_stop_note_stale(
     fake_vast, fake_github, machines, repo, tmp_path
 ):

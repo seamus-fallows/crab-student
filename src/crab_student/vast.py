@@ -253,8 +253,5 @@ def running(inst: dict | None) -> bool:
 
 
 def wants_running(inst: dict | None) -> bool:
-    """Running, or on its way up."""
-    if not inst:
-        return False
-    intended = inst.get("intended_status") or inst.get("cur_state")
-    return intended == "running" or inst.get("actual_status") in ("running", "loading", "created")
+    """Running, or on its way up: where Vast is taking the machine (one it is stopping is not)."""
+    return bool(inst) and (inst.get("intended_status") or inst.get("cur_state")) == "running"

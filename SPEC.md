@@ -190,7 +190,7 @@ NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 (in parallel). States: approval; starting; interrupted (a launch cut off: nobody holds its lock);
 failed; unknown (Vast or ssh did not answer); stopped (why, how long ago, the disk's cost per day);
 needs you; done; working; interactive (Claude in VS Code: active, or idle for how long). A `status`
-reporting another mode (after a hand-off) updates the record; a stopped machine seen running again moves
+reporting another mode (after a hand-off) updates the record; a stopped machine Vast starts again moves
 `last_start`. `list` warns on stderr about orphans: instances whose label ends in `-<install id>-<4 hex>`
 whose id and label no record has (a rent Vast did not confirm that went through after all).
 

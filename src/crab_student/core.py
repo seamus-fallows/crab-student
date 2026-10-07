@@ -73,6 +73,11 @@ def vast_key_file() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "vastai" / "vast_api_key"
 
 
+def vast_session_file() -> Path:
+    """The 2FA session key `vastai tfa login` saves: while it exists, the CLI sends it instead of the key."""
+    return vast_key_file().with_name("vast_tfa_key")
+
+
 def tool(name: str) -> str | None:
     """A program on PATH. On Windows, ssh and ssh-keygen are Windows' own OpenSSH, the one Windows
     Terminal and VS Code use (Git Bash puts a different ssh first on PATH)."""

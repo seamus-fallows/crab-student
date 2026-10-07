@@ -15,6 +15,9 @@ from crab_student import core
 DELAYS = (2.0, 5.0)  # between retries of a call that may be repeated (tests shorten them)
 RENT_TIMEOUT = 60.0
 RETRY_STATUS = (429, 500, 502, 503, 504)
+TFA_LOGIN = "vastai tfa login --method-type totp -c <the code from your authenticator>"
+# (Vast's reply, HTTP 404, to an expired 2FA session key: it must never read as "that machine is gone")
+SESSION_EXPIRED = "Session expired. Please log in again."
 
 
 class VastError(core.CrabError):
@@ -34,13 +37,15 @@ def base_url() -> str:
 
 
 def api_key() -> str:
-    try:
-        key = core.vast_key_file().read_text(encoding="utf-8").strip()
-    except OSError:
-        key = ""
-    if not key:
-        raise core.CrabError("crab-student is not set up yet (no Vast key). Run: crab-student init")
-    return key
+    """The key the vastai CLI would send: its 2FA session key while it has one, else its API key."""
+    for path in (core.vast_session_file(), core.vast_key_file()):
+        try:
+            key = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if key:
+            return key
+    raise core.CrabError("crab-student is not set up yet (no Vast key). Run: crab-student init")
 
 
 def _send(
@@ -85,14 +90,17 @@ def _reason(raw: bytes, status: int) -> str:
 
 
 def _parse(status: int, raw: bytes, what: str) -> dict:
-    if status in (401, 403):
-        raise VastError(
-            f"Vast refused the API key while trying to {what} (HTTP {status}). Check the key in "
-            f"{core.vast_key_file()}, or run crab-student init.",
-            status,
-        )
     if not 200 <= status < 300:
-        raise VastError(f"Vast could not {what}: {_reason(raw, status)}", status)
+        reason = _reason(raw, status)
+        if reason == SESSION_EXPIRED or "two factor" in reason.lower():
+            raise VastError(f"Vast wants a fresh 2FA login before it will {what}. Run: {TFA_LOGIN}", 401)
+        if status in (401, 403):
+            raise VastError(
+                f"Vast refused the API key while trying to {what} (HTTP {status}). Check the key in "
+                f"{core.vast_key_file()}, or run crab-student init.",
+                status,
+            )
+        raise VastError(f"Vast could not {what}: {reason}", status)
     try:
         data = json.loads(raw) if raw.strip() else {}
     except ValueError:

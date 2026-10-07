@@ -59,6 +59,7 @@ the code does it is in the modules named here.
   ssh/known_hosts_racing throwaway host keys of machines racing for a launch
   ssh/github_known_hosts GitHub's pinned ed25519 host key
 ~/.config/vastai/vast_api_key   the Vast key (the vastai CLI's file)
+~/.config/vastai/vast_tfa_key   the 2FA session key from `vastai tfa login`, sent instead while it exists
 ~/.claude/settings.json         read for the model, effort and fast mode (4.4); init adds permission rules
 ~/.claude/skills/crab-student/SKILL.md   the skill
 VS Code's user settings.json    remote.SSH.remotePlatform "linux" for agents' hosts (only if plain JSON)

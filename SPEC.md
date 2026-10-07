@@ -331,5 +331,5 @@ login shell with a hint.
 **6.9 The agent's tools.** `agent-status working|needs-you|done|failed "<message>"` writes `agent.json`;
 `done` is refused until `agent-runs/<name>/REPORT.md` is committed and nothing is uncommitted or
 unpushed. `agent-status` alone shows the status and the machine time. Hooks: `pre-commit` refuses staged
-lines containing a secret's value (the token and deploy key too) and files over 50 MB; `pre-push`
+lines containing a secret's value (the token's too) or a private key, and files over 50 MB; `pre-push`
 refuses any ref but `refs/heads/<branch>`, and deleting it.

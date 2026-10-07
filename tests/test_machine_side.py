@@ -28,7 +28,6 @@ CS_PY, FAKE_CLAUDE = REMOTE / "cs.py", REMOTE / "fake_claude.py"
 T0 = 1_700_000_000.0
 HF = "hf_" + "Zq8x" * 8  # a task secret's value
 TOKEN = "sk-ant-oat01-" + "Tk7w" * 20  # the Claude token
-KEY_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"  # (deploy key, line 1)
 NOTE = "agent-runs/job1/stopped.json"  # the stop note, in the repo
 MACHINE_FILES = ("rules.md", "rules-autonomous.md", "rules-colleague.md", "handoff.md")
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX (flock, sh scripts, symlinks)")
@@ -566,12 +565,10 @@ def test_declare_alone_shows_the_status_and_the_machine_time(cs, capsys):
     assert "0h30m" in shown and "60 min" in shown  # the machine time, and when it stops by itself
 
 
-@pytest.mark.parametrize("secret", ["HF_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "the deploy key"])
+@pytest.mark.parametrize("secret", ["HF_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
 def test_pre_commit_refuses_a_secret_value_and_never_prints_it(cs, repo, capsys, secret):
     secret_files(cs, {"HF_TOKEN": HF})
-    key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{KEY_LINE}\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
-    (cs.D / "deploy_key").write_text(key)
-    value = {"HF_TOKEN": HF, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "the deploy key": KEY_LINE}[secret]
+    value = {"HF_TOKEN": HF, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN}[secret]
     (repo / "train.py").write_text(f"print('hi')\nkey = '{value}'\n")
     git(repo, "add", "train.py")
     assert cs.cmd_hook("pre-commit", []) == 1
@@ -579,10 +576,24 @@ def test_pre_commit_refuses_a_secret_value_and_never_prints_it(cs, repo, capsys,
     assert secret in err and "train.py" in err and value not in err
 
 
+@pytest.mark.parametrize("kind", ["OPENSSH PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "PRIVATE KEY",
+                                  "ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK"])  # fmt: skip
+def test_pre_commit_refuses_any_private_key_and_never_prints_it(cs, repo, capsys, kind):
+    body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"
+    (repo / "id_test").write_text(f"-----BEGIN {kind}-----\n{body}\n-----END {kind}-----\n")
+    git(repo, "add", "id_test")
+    assert cs.cmd_hook("pre-commit", []) == 1
+    err = capsys.readouterr().err
+    assert "id_test" in err and body not in err
+
+
 def test_pre_commit_passes_ordinary_changes_and_refuses_a_file_over_50_mb(cs, repo, sized, capsys):
     secret_files(cs, {"SHORT": "abc"})  # (values under 8 characters are not looked for)
     (repo / "train.py").write_text("x = 'abc'\n")
-    git(repo, "add", "train.py")
+    (repo / "server.pub").write_text(
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n"
+    )
+    git(repo, "add", "train.py", "server.pub")
     assert cs.cmd_hook("pre-commit", []) == 0
     sized(repo / "data.bin", 51_000_000)
     git(repo, "add", "data.bin")

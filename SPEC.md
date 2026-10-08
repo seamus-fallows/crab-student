@@ -216,6 +216,9 @@ when `stopped_at` is at least 5 minutes after the record's `last_start`.
 ### 3.1 Launch
 
 1. **Plan** (`launch.launch`), writing nothing but the starting commit (`--dry-run` skips it, and stops here).
+   gh's token must have the `workflow` scope whenever it shows scopes (`github.login`): GitHub refuses
+   to push workflow files without it, through the deploy keys gh added too. Else exit 1, naming
+   `gh auth refresh -h github.com -s workflow`, which `init` runs in a terminal.
    The agent repo is checked: it must not have the branch. The starting commit is HEAD plus one commit of
    what `git commit -a` would commit, built from a copy of the index; untracked files, Git LFS objects
    and relative-URL submodules are not carried. The offers given with `--offers` (1 to 5, the pick first)

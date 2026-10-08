@@ -636,6 +636,23 @@ def test_refused_launches_rent_nothing(case, code, fake_vast, fake_github):
     assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github) and not fake_github.keys
 
 
+@pytest.mark.parametrize("no_repo", [False, True])
+def test_a_gh_login_without_the_workflow_scope_is_refused_before_anything_happens(
+    no_repo, fake_vast, fake_github, tmp_path, monkeypatch
+):
+    if no_repo:
+        monkeypatch.chdir(tmp_path)
+    fake_github.scopes = ["gist", "read:org", "repo"]  # (what gh auth login asks for by default)
+    error = fails(1, go, args(no_repo=no_repo))
+    assert github.ADD_WORKFLOW_SCOPE in error.message
+    assert not fake_vast.requests and not gh_writes(fake_github) and not core.record_path("job1").exists()
+
+
+def test_a_token_that_shows_no_scopes_is_not_held_back(fake_github, machines):
+    fake_github.scopes = None  # (a fine-grained token: GitHub sends no X-OAuth-Scopes)
+    assert go(args())["state"] == "working" and core.load("job1")["phase"] == "ready"
+
+
 def test_a_name_another_launch_takes_while_this_one_plans_rents_nothing(fake_vast, fake_github, monkeypatch):
     real_named, other = offers.named, {"name": "job1", "phase": "pending"}
 

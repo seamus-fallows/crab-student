@@ -281,6 +281,24 @@ def test_create_branch_skips_the_users_own_pre_push_hook(user_repo, fake_github,
     assert fake_github.branch_sha(AGENTS, "agent/t1") == head
 
 
+def test_a_refused_push_says_why(user_repo, fake_github, tmp_path, monkeypatch):
+    bare = fake_github.create_repo(AGENTS, description=MARKED)
+    hook = bare / "hooks" / "pre-receive"  # (refusing every push, as GitHub refuses some)
+    hook.write_text("#!/bin/sh\nexit 1\n", newline="\n")
+    hook.chmod(0o755)
+    probe = subprocess.run(["git", "-C", str(user_repo), "push", "-q", str(bare), "HEAD:refs/heads/probe"],
+                           capture_output=True)  # fmt: skip
+    if probe.returncode == 0:
+        pytest.skip("git does not run hooks here")
+    monkeypatch.setattr(github.time, "sleep", lambda seconds: None)  # (the push's retries)
+    head = git(user_repo, "rev-parse", "HEAD").strip()
+    repo = {**record(user_repo, "agent/t1")["repo"], "start_sha": head}
+    message = error(github.create_branch, repo, tmp_path / "t1.key").message
+    assert (
+        "! [remote rejected]" in message and "(pre-receive hook declined)" in message
+    )  # (not "failed to push")
+
+
 def test_read_file(fake_github, tmp_path):
     fake_github.create_repo(AGENTS, description=MARKED)
     agent_push(tmp_path, fake_github, "agent/t1", {"agent-runs/t1/REPORT.md": "# t1\nall good\n"})

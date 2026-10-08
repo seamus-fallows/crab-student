@@ -94,6 +94,26 @@ def test_init_checks_a_saved_vast_key_with_its_2fa_session(terminal, ready, fake
     assert core.vast_key_file().read_text() == "key-that-needs-2fa\n"
 
 
+@pytest.mark.parametrize("in_terminal", [True, False])
+def test_init_adds_the_workflow_scope_a_gh_login_lacks(
+    in_terminal, terminal, ready, fake_github, monkeypatch
+):
+    fake_github.scopes = ["gist", "read:org", "repo"]  # (what gh auth login asks for by default)
+    ran = []
+
+    def gh(cmd: list[str]) -> int:
+        ran.append(cmd[1:])
+        fake_github.scopes.append("workflow")
+        return 0
+
+    monkeypatch.setattr(setup.subprocess, "call", gh)
+    monkeypatch.setattr(core, "interactive", lambda: in_terminal)
+    assert setup.init() == (0 if in_terminal else 1)
+    assert ran == ([github.ADD_WORKFLOW_SCOPE.split()[1:]] if in_terminal else [])  # (else: says to run it)
+    fake_github.scopes = None  # (a token that shows no scopes, as a fine-grained one: nothing to add)
+    assert setup.init() == 0 and len(ran) == (1 if in_terminal else 0)
+
+
 def test_init_fails_after_three_bad_tokens(terminal):
     answers, _ = terminal
     answers += ["sk-ant-oat01-short", "sk-ant-api03-" + "a" * 90, "not a token"]

@@ -23,6 +23,10 @@ _REMOTE = re.compile(
 # The start of an agent repo's description: crab-student writes only to repos it made for agents' branches.
 MARK = "crab-student agent branches"
 KEY_TITLE = "crab-student"  # (agent repos' deploy keys)
+# GitHub refuses a push that adds or changes a workflow file (.github/workflows) unless gh's token has the
+# workflow scope, through the deploy keys gh added too: the first push of a repo with GitHub Actions to its
+# agent repo, and an agent's own workflow changes.
+ADD_WORKFLOW_SCOPE = "gh auth refresh -h github.com -s workflow"
 
 
 class GhError(core.CrabError):
@@ -58,8 +62,25 @@ def api(path: str, *fields: str, method: str = "GET") -> object:
     return json.loads(out) if out.strip() else None
 
 
+def account() -> tuple[str, list[str] | None]:
+    """The user's login, and the scopes of gh's token (None when it shows none, as a fine-grained token does)."""
+    head, body = re.split(r"\r?\n\r?\n", gh("api", "-i", "user"), maxsplit=1)
+    lines = (line.partition(":") for line in head.splitlines())
+    scopes = next((value for name, _, value in lines if name.strip().lower() == "x-oauth-scopes"), None)
+    names = None if scopes is None else [s.strip() for s in scopes.split(",") if s.strip()]
+    return str(json.loads(body)["login"]), names
+
+
 def login() -> str:
-    return str(api("user")["login"])
+    """The user's login, for a launch, refused (before anything is rented or written) while gh's token shows
+    scopes without workflow."""
+    user, scopes = account()
+    if scopes is not None and "workflow" not in scopes:
+        raise core.CrabError(
+            "your gh login lacks the workflow scope, without which GitHub refuses to push workflow files "
+            f"(.github/workflows), to agent repos too. Add it in a terminal: {ADD_WORKFLOW_SCOPE}"
+        )
+    return user
 
 
 def git_url(slug: str) -> str:
@@ -279,7 +300,11 @@ def create_branch(repo: dict, key_path: Path) -> None:
             return
         if attempt < 2:
             time.sleep(3)
-    raise core.CrabError(f"could not push the starting point to {repo['slug']}: {core.last_line(p.stderr)}")
+    # (git's last line only says "failed to push some refs": the refused ref's line has the reason)
+    refused = next((line.strip() for line in p.stderr.splitlines() if line.lstrip().startswith("! [")), None)
+    raise core.CrabError(
+        f"could not push the starting point to {repo['slug']}: {refused or core.last_line(p.stderr)}"
+    )
 
 
 def read_file(slug: str, branch: str, path: str) -> str | None:

@@ -21,8 +21,8 @@ import keyring.errors
 
 
 class CrabError(Exception):
-    """A failure the user can act on. `code`: 1 error, 2 usage, 3 needs approval / refused by a limit /
-    would lose work, 4 no machine fits, 5 setup failed."""
+    """A failure the user can act on. `code`: 1 error, 2 usage, 3 needs approval or would lose work, 4 no
+    machine fits or the offers given are gone or all failed, 5 setup failed."""
 
     def __init__(self, message: str, code: int = 1):
         super().__init__(message)

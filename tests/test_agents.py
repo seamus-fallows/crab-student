@@ -749,14 +749,20 @@ def test_delete_lets_go_of_outputs_only_while_every_file_is_as_it_was_fetched(
     assert (iid in fake_vast.instances) is not goes and asked == (["job1"] if fetched else [])
 
 
-def test_a_stopped_machine_cannot_say_whether_its_outputs_are_still_as_fetched(
-    fake_vast, fake_github, machines, repo, tmp_path, monkeypatch
+@pytest.mark.parametrize("noted, goes", [("d1", True), ("d2", False), (None, False)])
+def test_a_stopped_agents_outputs_go_only_when_its_stop_note_says_they_are_as_fetched(
+    noted, goes, fake_vast, fake_github, machines, repo, tmp_path, monkeypatch
 ):
+    """(None: a machine set up before stop notes carried the fingerprint cannot say.)"""
     iid = agent(fake_vast, status="exited", repo=repo, fetched=FETCHED)
-    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note(outputs=OUTPUTS)))
+    left = {**OUTPUTS, "digest": noted} if noted else OUTPUTS
+    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note(outputs=left)))
     asked = outputs_now(monkeypatch, SENT)
-    assert FETCHED["to"] in fails(3, agents.delete, "job1", False, out()).message  # (where the copy is)
-    assert iid in fake_vast.instances and not asked and not machines.calls
+    if goes:
+        agents.delete("job1", False, out())
+    else:
+        assert FETCHED["to"] in fails(3, agents.delete, "job1", False, out()).message  # (where the copy is)
+    assert (iid in fake_vast.instances) is not goes and not asked and not machines.calls  # (never started)
 
 
 # ---- wait ----------------------------------------------------------------------------------------

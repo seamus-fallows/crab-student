@@ -268,6 +268,7 @@ def outputs(tmp_path, monkeypatch):
     """A machine's /root/outputs (a temporary folder), reached through the stand-in for ssh."""
     root = tmp_path / "root"
     (root / "outputs").mkdir(parents=True)
+    (root / "crab-student").mkdir()
     ssh = tmp_path / "fake_ssh.py"
     ssh.write_text(FAKE_SSH)
     monkeypatch.setenv("CS_ROOT", str(root))
@@ -301,6 +302,27 @@ def test_fetch_copies_every_file_and_counts_what_was_sent_and_what_arrived(outpu
     assert progress[-1] == (count, size)
     if linked:  # (a link to a file arrives as the file: the machine's own check counts it as one)
         assert (dest / "latest.pt").is_file() and not (dest / "latest.pt").is_symlink()
+
+
+def test_the_machine_takes_the_same_fingerprint_of_its_outputs_as_the_copy_and_sees_the_copy(
+    outputs, tmp_path
+):
+    """(Its stop note carries the fingerprint, so a delete after a fetch can tell without starting the machine;
+    its watchdog takes a copy under way for activity.)"""
+    (outputs / "runs").mkdir()
+    (outputs / "runs" / "best.pt").write_bytes(b"w" * 1000)
+    (outputs / "log.txt").write_bytes(b"done\n")
+    sent = machine.fetch_outputs("job1", tmp_path / "copy", lambda files, size: None)["sent"]
+    code = (
+        "import cs, json, pathlib; "
+        "print(json.dumps([cs.left_behind(pathlib.Path('.'))['outputs'], cs.Probe().copying()]))"
+    )
+    p = subprocess.run([sys.executable, "-c", code], cwd=machine.REMOTE_SRC, capture_output=True, text=True)
+    noted, copying = json.loads(p.stdout)
+    assert {k: noted[k] for k in sent} == sent and copying
+    assert (
+        machine.outputs_state("job1") == sent
+    )  # (looking alone is no activity: the file was touched before)
 
 
 def test_the_fingerprint_of_the_outputs_changes_with_any_file_even_when_count_and_bytes_do_not(outputs):

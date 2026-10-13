@@ -342,23 +342,25 @@ def _problems(res: dict, copy: str | None = "") -> list[str]:
     return problems
 
 
-def _copy(rec: dict, running: bool) -> str | None:
+def _copy(rec: dict, noted: dict | None) -> str | None:
     """How the machine's /root/outputs stands against the copy `fetch` made: None when every file is as it was
     when it was copied (same paths, sizes and times of last change: a delete loses none of them), else what to
-    say about the copy ("" when there is none). Only a running machine can be asked."""
+    say about the copy ("" when there is none). A running machine is asked; for a stopped one, `noted` is what
+    its stop note says of its outputs (no fingerprint there if it was set up before stop notes had one)."""
     fetched = rec.get("fetched")
     if not fetched:
         return ""
     copied = (
         f"{fetched['files']} file(s), {_size(fetched['bytes'])} fetched to {fetched['to']} at {fetched['at']}"
     )
-    if not running:
-        return f" - {copied}; a stopped machine cannot say whether they changed since"
-    try:
-        now = machine.outputs_state(rec["name"])
-    except core.CrabError as e:
-        return f" - {copied}; whether they changed since could not be checked ({e.message})"
-    return None if now["digest"] == fetched["digest"] else f" - {copied}; they changed since: fetch again"
+    if noted is None:
+        try:
+            now = machine.outputs_state(rec["name"])["digest"]
+        except core.CrabError as e:
+            return f" - {copied}; whether they changed since could not be checked ({e.message})"
+    elif not (now := noted.get("digest")):
+        return f" - {copied}; this stopped machine cannot say whether they changed since"
+    return None if now == fetched["digest"] else f" - {copied}; they changed since: fetch again"
 
 
 def delete(name: str, force: bool, out: launch.Progress) -> dict:
@@ -392,8 +394,8 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                     f"(crab-student start {name}) and delete again, or delete anyway with --force.",
                     3,
                 )
-            held = (res.get("outputs") or {}).get("files")
-            if problems := _problems(res, _copy(rec, running) if held else ""):
+            held = res.get("outputs") or {}
+            if problems := _problems(res, _copy(rec, None if running else held) if held.get("files") else ""):
                 cfg = str(machine.config_file()).replace("\\", "/")
                 start = [] if running else [f"  crab-student start {name}"]
                 raise core.CrabError(
@@ -578,7 +580,7 @@ def fetch(name: str, to: Path | None, out: launch.Progress) -> dict:
         core.save(rec)
     line = (
         f"Copied {name}'s /root/outputs to {dest}: {here['files']} file(s), {_size(here['bytes'])}, as many as the "
-        f"machine sent. While it runs and they stay as copied there, crab-student delete {name} lets them go."
+        f"machine sent. While they stay as copied there, crab-student delete {name} lets them go."
     )
     return {"name": name, "to": str(dest), **here, "result_line": line}
 

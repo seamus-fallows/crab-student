@@ -6,6 +6,7 @@ library only. What the agent reads never names crab-student: it has no context f
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -25,6 +26,9 @@ from pathlib import Path
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
 D = ROOT / "crab-student"
 OUTPUTS = ROOT / "outputs"
+COPYING = (
+    D / "copying"
+)  # touched every half minute while the user's computer copies OUTPUTS: that is activity
 BIN = Path(os.environ.get("CS_BIN", "/usr/local/bin"))
 PROFILE_D = Path(os.environ.get("CS_PROFILE_D", "/etc/profile.d"))
 CLAUDE = ROOT / ".local" / "bin" / "claude"
@@ -752,6 +756,13 @@ class Probe:
             return False
         return any(int(x) >= 10 for x in p.stdout.split() if x.strip().isdigit())
 
+    def copying(self) -> bool:
+        """The outputs are being copied off the machine right now (a copy that stalls stops counting)."""
+        try:
+            return time.time() - COPYING.stat().st_mtime < 2 * TICK
+        except OSError:
+            return False
+
 
 def read_agent() -> dict:
     return read_json(D / "agent.json", {})
@@ -770,7 +781,7 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
     )
     if size != st["transcript_bytes"]:
         st["last_talk"], st["talk_nudged"] = now, False
-    if size != st["transcript_bytes"] or cpu_busy or probe.gpu_busy():
+    if size != st["transcript_bytes"] or cpu_busy or probe.gpu_busy() or probe.copying():
         st["last_activity"], st["nudged_at"] = now, None
     st["transcript_bytes"], st["cpu_seconds"] = size, cpu
     mode, state = machine_mode(c), read_agent().get("state")
@@ -1065,6 +1076,21 @@ def files_under(top: Path, skip=()):
                 yield path.relative_to(top).as_posix(), info.st_size
 
 
+def fingerprint(top: Path, names) -> str:
+    """One hash for these files under `top` as they are now: each one's path, size and time of last change.
+    The user's computer takes the same of the outputs it copies (each file just before it is read), so an
+    equal fingerprint later means every file is still the one that was copied."""
+    seen = hashlib.sha256()
+    for name in sorted(names):
+        try:
+            info = (top / name).stat()
+        except OSError:  # (gone meanwhile)
+            continue
+        line = "%s\0%d\0%d\n" % (name, info.st_size, info.st_mtime_ns)
+        seen.update(line.encode("utf-8", "surrogateescape"))
+    return seen.hexdigest()
+
+
 def left_behind(repo: Path) -> dict:
     """What git will not save: the files in /root/outputs, and files of 100 MB+ in the repo that git does not
     track (ignored ones too)."""
@@ -1076,7 +1102,12 @@ def left_behind(repo: Path) -> dict:
         if n >= 100_000_000 and f not in tracked
     ]
     return {
-        "outputs": {"files": len(outputs), "bytes": sum(outputs.values()), "sample": list(outputs)[:5]},
+        "outputs": {
+            "files": len(outputs),
+            "bytes": sum(outputs.values()),
+            "sample": list(outputs)[:5],
+            "digest": fingerprint(OUTPUTS, outputs),
+        },
         "large_files": large,
     }
 

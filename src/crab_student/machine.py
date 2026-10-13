@@ -252,12 +252,24 @@ def upload_and_setup(
 # bytes, digest}; the digest is a fingerprint of every file's path, size and time of last change. "copy" also
 # writes the files to stdout as a tar, and its fingerprint is of each file as it was just before it was read,
 # so a file changed during the copy or after it no longer matches. A file that goes away first is left out; one
-# cut short while it is read ends the stream there, so the copy fails instead of arriving damaged.
+# cut short while it is read ends the stream there, so the copy fails instead of arriving damaged. While bytes
+# flow, "copy" touches the file the machine's watchdog takes for activity (cs.COPYING: a long copy must not be
+# cut by the idle stop), every half minute; a machine set up before the watchdog looked there ignores it.
 OUTPUTS_SCRIPT = """\
-import hashlib, json, os, sys, tarfile
+import hashlib, json, os, sys, tarfile, time
 import cs
 copy = sys.argv[1] == "copy"
 tar = tarfile.open(fileobj=sys.stdout.buffer, mode="w|", dereference=True) if copy else None
+marker, touched = str(cs.D / "copying"), [0.0]
+class Flowing:
+    def __init__(self, f):
+        self.f = f
+    def read(self, n=-1):
+        if time.time() - touched[0] >= 30:
+            touched[0] = time.time()
+            open(marker, "a").close()
+            os.utime(marker, None)
+        return self.f.read(n)
 seen = []
 for entry in cs.files_under(cs.OUTPUTS):
     rel = entry[0]
@@ -272,7 +284,7 @@ for entry in cs.files_under(cs.OUTPUTS):
             info = tar.gettarinfo(arcname=rel, fileobj=f)
             if not info.isreg():
                 continue
-            tar.addfile(info, f)
+            tar.addfile(info, Flowing(f))
             size = info.size
         seen.append((rel, size, was.st_size, was.st_mtime_ns))
 if copy:

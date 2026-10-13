@@ -105,8 +105,8 @@ any of them is in such a state.
   their own terminal, no machine can be started, stopped or deleted. Tell them at once.
 
 When an agent is done and its report lists files in `/root/outputs`, run `crab-student fetch NAME`
-at once, also as a background Bash call: its machine stops itself after the idle time, copying does
-not count as activity, and a stopped machine cannot always be started again soon. The files go into a
+at once, also as a background Bash call: its machine stops itself after the idle time, and a stopped
+machine cannot always be started again soon. The files go into a
 new folder `NAME-outputs` in the current folder (`NAME-outputs-2`, ... beside an earlier copy), and the
 copy is checked. `--to DIR` (new or empty) asks the user first: the machine chooses the file names, so
 never point it at a folder where files mean something (`.claude`, `.github`, a folder of programs).
@@ -126,10 +126,9 @@ running. On Windows, running it yourself opens a new Windows Terminal window.
 Delete when the user asks for it (suggest `pull` and reading the report first if they have not). `delete`
 refuses (exit 3) when work would be lost and lists it: show that list and let the user decide about
 `--force`. Never add
-`--force` on your own. Files in `/root/outputs` that `fetch` copied do not count as lost while the
-machine runs and every one is as it was copied: after a fetch, a plain `delete` is enough while the
-machine still runs. A stopped machine cannot say whether they changed: `delete` then names the copy
-and leaves `--force` to the user. A stopped agent's disk is still billed
+`--force` on your own. Files in `/root/outputs` that `fetch` copied do not count as lost while every
+one is as it was copied, so after a fetch a plain `delete` is enough, also once the machine has
+stopped. A stopped agent's disk is still billed
 (`list` shows its disk cost per day and how long it has sat), and it can usually be deleted without
 starting it again.
 

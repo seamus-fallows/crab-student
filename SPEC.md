@@ -205,9 +205,10 @@ never destroys. The boot starts the watchdog, which resumes the conversation.
 5 minutes after `last_start`. No such note, GitHub unreachable, or a failed check: refused (exit 3)
 without `--force`. Refused too (exit 3, with the list and the copy commands) for unpushed commits,
 uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. The files in
-`/root/outputs` do not count when the running machine's fingerprint of them now (5.5) equals the
-record's `fetched.digest`: every file is as it was copied. A stopped machine cannot be asked, so its
-outputs count, and the refusal names the copy. Then: destroy the machine and any racing
+`/root/outputs` do not count when their fingerprint equals the record's `fetched.digest` (every file is
+as it was copied): a running machine is asked for it now (5.5), a stopped one's is in its stop note
+(6.7; a machine set up before notes had it cannot say, so its outputs count). The refusal names the
+copy. Then: destroy the machine and any racing
 rents' machines, add the agent's cost to `spend.jsonl` (5.6), release the deploy key, delete the branch
 only if it still points at `start_sha`, forget the host key and the record.
 
@@ -245,7 +246,8 @@ name leading outside, one Windows cannot hold, or one that is the same file as a
 refused), with its mtime. The copy counts only if nothing was refused and the files and bytes found in
 `DIR` afterwards equal those sent; then the record's `fetched` keeps `{files, bytes, digest, to, at}`.
 A stream that was cut off removes `DIR` again (exit 1); a copy with refused files stays, unrecorded.
-The machine's idle stop does not count a copy as activity.
+While bytes flow, the script touches `D/copying` every half minute, which the watchdog takes for
+activity (6.3), so the idle stop does not cut a long copy (a machine set up before that ignores it).
 
 **5.6 What an agent cost** (`agents.spend`, a lower estimate). The machine counts `used_hours` from each
 container start. When a new start is known (`start`, a stopped machine seen running, or `used_hours`
@@ -299,7 +301,8 @@ container's key.
 **6.3 The watchdog** (`cs.py watch`, one per container by flock; `status` and `agent-attach` start it
 if it is not running). Every minute: touch `heartbeat`; while the frontend is `tmux`, keep the tmux
 session `agent` (running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files
-under `~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy.
+under `~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy, or
+the outputs are being copied off the machine (`D/copying` touched within the last two minutes: 5.5).
 Colleague: a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a
 check-in after a long silence while it says `working`. Typed messages start with `Automated message
 from the machine:`. **Stop** after `idle_minutes` idle, done or not: set `stopping`, notify, final save
@@ -341,8 +344,10 @@ with what the user asked for. `status` then reports the new mode and `tmux`.
 and untracked files up to 10 MB each (100 MB in all), commit `Autosave (<reason>)` unless the
 pre-commit hook refuses, push. A **final** save (every stop: the watchdog's and `crab-student stop`'s)
 puts the stop note `agent-runs/<name>/stopped.json` in the same commit: `{stopped_at (epoch seconds),
-reason, outputs {files, bytes, sample}, large_files [{path, bytes}], not_committed (first 50 paths),
-not_committed_count}`. A refused commit leaves no note. The note on the branch is the only record of a
+reason, outputs {files, bytes, sample, digest}, large_files [{path, bytes}], not_committed (first 50
+paths), not_committed_count}`. `digest` is `cs.fingerprint` of the outputs: the SHA-256 over each
+file's path, size and time of last change that `machine.OUTPUTS_SCRIPT` takes too (the two must stay
+the same formula). A refused commit leaves no note. The note on the branch is the only record of a
 stop; `delete` reads it.
 
 **6.8 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
@@ -351,7 +356,8 @@ prints `{"error": ...}` and exits 1):
 - `status`: name, mode, frontend, agent `{state, message, at}` (`{}` until set), idle_seconds,
   used_hours, stopping, stop_reason, stop_sent_for, git `{branch, head, dirty, unpushed}`.
 - `save --reason R [--final]`: committed, pushed, skipped, dirty, unpushed, error, note, note_committed.
-- `check`: a save, then its fields (unpushed after a fetch) plus outputs and large_files.
+- `check`: a save, then its fields (unpushed after a fetch) plus outputs (as in the stop note) and
+  large_files.
 - `send`: stdin typed into the pane as one bracketed paste; refused while Claude is in VS Code.
 
 `open` runs `agent-attach` with `ssh -t`: `tmux -u attach` (waiting up to 30 s for the session), else a

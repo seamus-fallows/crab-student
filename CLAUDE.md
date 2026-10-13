@@ -75,8 +75,9 @@ IMPORTANT: read SPEC section 1 before changing renting, stopping, `delete`, secr
   approval price, so the launcher picks for the task.
 - `init` must be re-run after the skill or permission rules (`setup.ALLOW`, `ASK`, `DENY`) change.
 - Changes to `remote/` reach only agents launched afterwards. `fetch` and `delete` run
-  `machine.OUTPUTS_SCRIPT` against whatever `cs.py` the machine has (it uses `cs.files_under` and
-  `cs.OUTPUTS`): renaming those breaks them on agents already launched.
+  `machine.OUTPUTS_SCRIPT` against whatever `cs.py` the machine has (it uses `cs.files_under`, `cs.OUTPUTS`
+  and `cs.D`): renaming those breaks them on agents already launched. Its fingerprint and `cs.fingerprint`
+  (in the stop note) must stay the same formula: a test compares them.
 - What comes from a machine (file names and contents in `fetch`) is external input: it is only ever written
   into a folder that was empty, never over a file.
 - `wait` and `fetch` can run for a long time: start them as background Bash calls.

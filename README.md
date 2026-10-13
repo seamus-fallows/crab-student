@@ -245,12 +245,13 @@ session ended, say), running machines are still asked over ssh, and the result c
 fetch goes beside it, into `NAME-outputs-2`, and so on). The machine chooses the file names and what is
 in them, so fetch only writes into a folder that is new or empty, never replaces a file, and your
 Claude Code must ask you before using another folder (`--to DIR`). A link to a file arrives as that file. The copy is checked: the folder then holds as many files
-and bytes as the machine sent. `delete` afterwards asks the running machine whether every file is still
-as it was copied (same paths, sizes and times of last change) and, if so, no longer counts them as work
-that would be lost. A stopped machine cannot be asked: `delete` then says where your copy is and leaves
-`--force` to you. So fetch when the agent is done, before its machine stops itself (Vast cannot always
-start a stopped machine again soon), and mind that a copy does not count as activity: one that takes
-longer than what is left of `idle_minutes` is cut off when the machine stops.
+and bytes as the machine sent. `delete` afterwards no longer counts those files as work that would be
+lost while every one is still as it was copied (same paths, sizes and times of last change): a running
+machine is asked, and a stopped one said so in its stop note, so it can be deleted without starting it.
+Fetch when the agent is done, before its machine stops itself (Vast cannot always start a stopped
+machine again soon). A copy under way counts as activity, so the idle stop does not cut a long one.
+(Agents launched before fetch existed: a copy does not keep their machine up, and once stopped they
+cannot say whether their outputs changed, so `delete` names your copy and leaves `--force` to you.)
 
 **What it cost.** TIME and SPENT in `list` cover every start of an agent, not only the last one: its
 machine hours at the machine's price, plus its disk for the time it sat stopped. `crab-student spend`

@@ -3,12 +3,15 @@ and terminals (open, open --all, VS Code with the Claude panel)."""
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import io
 import json
 import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -17,7 +20,7 @@ import time
 import urllib.parse
 import webbrowser
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from crab_student import core
 
@@ -241,6 +244,153 @@ def upload_and_setup(
             f"setup failed at step {result.get('step')} ({result.get('label')}): {result.get('error')}", 5
         )
     return result.get("warnings") or []
+
+
+# Run on the machine by outputs_state and fetch_outputs (Python 3.8 syntax): on the stdin of its Python, in the
+# folder of cs.py, with "state" or "copy" as its argument. It goes through the files the machine's own check
+# counts in /root/outputs (cs.files_under: a link to a file as that file) and prints, last on stderr, {files,
+# bytes, digest}; the digest is a fingerprint of every file's path, size and time of last change. "copy" also
+# writes the files to stdout as a tar, and its fingerprint is of each file as it was just before it was read,
+# so a file changed during the copy or after it no longer matches. A file that goes away first is left out; one
+# cut short while it is read ends the stream there, so the copy fails instead of arriving damaged.
+OUTPUTS_SCRIPT = """\
+import hashlib, json, os, sys, tarfile
+import cs
+copy = sys.argv[1] == "copy"
+tar = tarfile.open(fileobj=sys.stdout.buffer, mode="w|", dereference=True) if copy else None
+seen = []
+for entry in cs.files_under(cs.OUTPUTS):
+    rel = entry[0]
+    try:
+        f = open(str(cs.OUTPUTS / rel), "rb")
+    except OSError:
+        continue
+    with f:
+        was = os.fstat(f.fileno())
+        size = was.st_size
+        if copy:
+            info = tar.gettarinfo(arcname=rel, fileobj=f)
+            if not info.isreg():
+                continue
+            tar.addfile(info, f)
+            size = info.size
+        seen.append((rel, size, was.st_size, was.st_mtime_ns))
+if copy:
+    tar.close()
+    sys.stdout.buffer.flush()
+digest = hashlib.sha256()
+for rel, _, size, changed in sorted(seen):
+    digest.update(("%s\\0%d\\0%d\\n" % (rel, size, changed)).encode("utf-8", "surrogateescape"))
+result = {"files": len(seen), "bytes": sum(s[1] for s in seen), "digest": digest.hexdigest()}
+print(json.dumps(result), file=sys.stderr)
+"""
+
+
+def _outputs_command(name: str, mode: str) -> list[str]:
+    return [*ssh_cmd(name), "-o", "ConnectTimeout=15", f"cd {REMOTE_DIR} && {PY} - {mode}"]
+
+
+def _outputs_result(name: str, code: int, stderr: bytes) -> dict | None:
+    """What OUTPUTS_SCRIPT printed last ({files, bytes, digest}), or None if it did not get that far."""
+    text = stderr.decode("utf-8", "replace")
+    if code == 255:
+        raise Unreachable(f"could not reach {name} over ssh ({core.last_line(text)}).")
+    try:
+        said = json.loads(core.last_line(text))
+        return {"files": int(said["files"]), "bytes": int(said["bytes"]), "digest": str(said["digest"])}
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def outputs_state(name: str) -> dict:
+    """{files, bytes, digest} of the machine's /root/outputs as it is now (see OUTPUTS_SCRIPT)."""
+    try:
+        p = subprocess.run(
+            _outputs_command(name, "state"), input=OUTPUTS_SCRIPT.encode(), capture_output=True, timeout=300
+        )
+    except subprocess.TimeoutExpired:
+        raise Unreachable(f"{name} did not answer within 300 s over ssh.") from None
+    state = _outputs_result(name, p.returncode, p.stderr)
+    if p.returncode != 0 or state is None:
+        why = core.last_line(p.stderr.decode("utf-8", "replace"))
+        raise core.CrabError(f"{name} could not list its /root/outputs: {why}")
+    return state
+
+
+def fetch_outputs(name: str, dest: Path, on_progress: Callable[[int, int], None]) -> dict:
+    """Copy the files in the machine's /root/outputs into `dest`, which the caller knows to be empty or not
+    there yet: nothing is ever replaced. Returns {"files", "bytes"} (what is in `dest` afterwards, counted on
+    disk), "sent" ({files, bytes, digest} from the machine) and "refused" ([(path, why)]: files not written)."""
+    proc = subprocess.Popen(
+        _outputs_command(name, "copy"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    err: list[bytes] = []
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(OUTPUTS_SCRIPT.encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    threads = [
+        threading.Thread(target=feed, daemon=True),
+        threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    arrived = size = 0
+    refused: list[tuple[str, str]] = []
+    cut = ""
+    try:
+        with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
+            for member in tar:
+                target = _target(dest, member.name) if member.isreg() else None
+                if target is None:
+                    refused.append((member.name, "not a name a file can have on this computer"))
+                    continue
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    # "x": a second name that is the same file here (Windows: letter case, short names) fails
+                    # instead of replacing the first
+                    with open(target, "xb") as f:
+                        shutil.copyfileobj(tar.extractfile(member), f, 1 << 20)
+                except OSError as e:
+                    if e.errno == errno.ENOSPC:  # (every later file would fail too, after being sent)
+                        raise
+                    refused.append((member.name, e.strerror or type(e).__name__))
+                    continue
+                with contextlib.suppress(OSError):
+                    os.utime(target, (member.mtime, member.mtime))
+                arrived, size = arrived + 1, size + member.size
+                on_progress(arrived, size)
+    except (tarfile.TarError, EOFError, OSError) as e:
+        cut = str(e) or type(e).__name__
+    finally:
+        proc.stdout.close()
+    try:
+        code = proc.wait(timeout=30 if cut else None)
+    except subprocess.TimeoutExpired:  # (nobody reads what it sends any more, and it has not noticed)
+        proc.kill()
+        code = proc.wait()
+    for t in threads:
+        t.join(5)
+    sent = _outputs_result(name, code, b"".join(err))
+    if cut or code != 0 or sent is None:
+        why = cut or core.last_line(b"".join(err).decode("utf-8", "replace"))
+        raise core.CrabError(f"the copy from {name} was cut off ({why}).")
+    on_disk = [os.path.getsize(os.path.join(folder, f)) for folder, _, names in os.walk(dest) for f in names]
+    return {"files": len(on_disk), "bytes": sum(on_disk), "sent": sent, "refused": refused}
+
+
+def _target(dest: Path, name: str) -> Path | None:
+    """Where a file from the machine goes under `dest`, or None for a name that would land outside it."""
+    parts = PurePosixPath(name).parts
+    windows = os.name == "nt"  # (where these characters are more than part of a name)
+    if not parts or any(p in ("/", "..") or (windows and re.search(r'[\\:*?"<>|]', p)) for p in parts):
+        return None
+    target = Path(os.path.abspath(dest.joinpath(*parts)))
+    return target if target.is_relative_to(dest) else None
 
 
 # ---- terminals -----------------------------------------------------------------------------------

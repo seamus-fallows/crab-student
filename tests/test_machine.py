@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -219,6 +220,141 @@ def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
     except core.CrabError as e:
         got = e.code
     assert got == outcome
+
+
+# ---- fetching /root/outputs ----------------------------------------------------------------------
+
+# In place of ssh: runs the script it gets on stdin as the machine would (in the folder of cs.py, whose /root is
+# CS_ROOT, with the argument the command ends in), or stands in for a machine that misbehaves (FAKE_SSH):
+# "unreachable"; "garbage"; "short" (a file's header and half its bytes); "silent" (a whole tar, but no account
+# of what was sent); "names" (a tar the real script would not send: names that lead outside the folder, one
+# name twice, and one that differs from another only in letter case).
+FAKE_SSH = """\
+import io, json, os, sys, tarfile
+mode = os.environ.get("FAKE_SSH", "")
+out = sys.stdout.buffer
+def tar_of(names):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name in names:
+            info = tarfile.TarInfo(name)
+            info.size = 5
+            tar.addfile(info, io.BytesIO(b"12345"))
+    return buf.getvalue()
+if mode == "unreachable":
+    print("ssh: connect to host 203.0.113.7 port 22: Connection timed out", file=sys.stderr)
+    sys.exit(255)
+if mode == "garbage":
+    out.write(b"x" * 700)
+    sys.exit(1)
+if mode == "short":
+    out.write(tar_of(["a.txt"])[:514])
+    sys.exit(1)
+if mode in ("silent", "names"):
+    names = ["a.txt"] if mode == "silent" else ["ok.txt", "../up.txt", "/abs.txt", "ok.txt", "sub/x.txt", "sub/X.TXT"]
+    out.write(tar_of(names))
+    if mode == "names":
+        print(json.dumps({"files": len(names), "bytes": 5 * len(names), "digest": "d"}), file=sys.stderr)
+    sys.exit(0)
+os.chdir(os.environ["CS_DIR"])
+sys.path.insert(0, os.getcwd())
+sys.argv = ["-", sys.argv[-1].split()[-1]]
+exec(compile(sys.stdin.read(), "outputs", "exec"), {"__name__": "__main__"})
+"""
+
+
+@pytest.fixture
+def outputs(tmp_path, monkeypatch):
+    """A machine's /root/outputs (a temporary folder), reached through the stand-in for ssh."""
+    root = tmp_path / "root"
+    (root / "outputs").mkdir(parents=True)
+    ssh = tmp_path / "fake_ssh.py"
+    ssh.write_text(FAKE_SSH)
+    monkeypatch.setenv("CS_ROOT", str(root))
+    monkeypatch.setenv("CS_DIR", str(machine.REMOTE_SRC))
+    monkeypatch.setattr(machine, "ssh_cmd", lambda name: [sys.executable, str(ssh)])
+    return root / "outputs"
+
+
+def test_fetch_copies_every_file_and_counts_what_was_sent_and_what_arrived(outputs, tmp_path):
+    (outputs / "runs" / "a").mkdir(parents=True)
+    (outputs / "summary.csv").write_bytes(b"seed,loss\n0,0.41\n")
+    (outputs / "runs" / "a" / "best.pt").write_bytes(bytes(range(256)) * 4096)  # (1 MB, more than one block)
+    (outputs / "runs" / "empty.log").write_bytes(b"")
+    old = 1_700_000_000
+    os.utime(outputs / "summary.csv", (old, old))
+    linked = True
+    try:
+        (outputs / "latest.pt").symlink_to(outputs / "runs" / "a" / "best.pt")
+    except OSError:  # (Windows without the right to make links)
+        linked = False
+    dest, progress = tmp_path / "copy", []
+    got = machine.fetch_outputs("job1", dest, lambda files, size: progress.append((files, size)))
+    count = 3 + linked
+    size = 17 + 1_048_576 * (1 + linked)
+    sent = got["sent"]
+    assert (got["files"], got["bytes"], got["refused"]) == (count, size, [])
+    assert (sent["files"], sent["bytes"]) == (count, size) and sent == machine.outputs_state("job1")
+    assert (dest / "summary.csv").read_bytes() == b"seed,loss\n0,0.41\n"
+    assert (dest / "runs" / "a" / "best.pt").read_bytes() == (outputs / "runs" / "a" / "best.pt").read_bytes()
+    assert (dest / "runs" / "empty.log").read_bytes() == b"" and (dest / "summary.csv").stat().st_mtime == old
+    assert progress[-1] == (count, size)
+    if linked:  # (a link to a file arrives as the file: the machine's own check counts it as one)
+        assert (dest / "latest.pt").is_file() and not (dest / "latest.pt").is_symlink()
+
+
+def test_the_fingerprint_of_the_outputs_changes_with_any_file_even_when_count_and_bytes_do_not(outputs):
+    """(What delete must not miss after a fetch: checkpoints rotated, or one overwritten in place.)"""
+    for name in ("ckpt-100.pt", "ckpt-200.pt", "latest.pt"):
+        (outputs / name).write_bytes(b"w" * 1000)
+        os.utime(outputs / name, (1_700_000_000, 1_700_000_000))
+    before = machine.outputs_state("job1")
+    assert machine.outputs_state("job1") == before and (before["files"], before["bytes"]) == (3, 3000)
+    (outputs / "ckpt-100.pt").rename(
+        outputs / "ckpt-300.pt"
+    )  # (the oldest checkpoint made way for a new one)
+    rotated = machine.outputs_state("job1")
+    (outputs / "latest.pt").write_bytes(b"v" * 1000)
+    os.utime(outputs / "latest.pt", (1_700_000_500, 1_700_000_500))
+    rewritten = machine.outputs_state("job1")
+    assert [(s["files"], s["bytes"]) for s in (rotated, rewritten)] == [(3, 3000)] * 2
+    assert len({before["digest"], rotated["digest"], rewritten["digest"]}) == 3
+
+
+def test_fetch_of_an_empty_outputs_folder_copies_nothing(outputs, tmp_path):
+    got = machine.fetch_outputs("job1", tmp_path / "copy", lambda files, size: None)
+    assert (got["files"], got["bytes"], got["sent"]["files"], got["refused"]) == (0, 0, 0, [])
+
+
+@pytest.mark.parametrize(
+    "mode, unreachable", [("unreachable", True), ("garbage", False), ("short", False), ("silent", False)]
+)
+def test_a_copy_that_does_not_arrive_whole_is_an_error(mode, unreachable, outputs, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_SSH", mode)
+    e = fails(1, machine.fetch_outputs, "job1", tmp_path / "copy", lambda files, size: None)
+    assert isinstance(e, machine.Unreachable) is unreachable
+    if unreachable:
+        assert isinstance(fails(1, machine.outputs_state, "job1"), machine.Unreachable)
+
+
+def test_a_file_is_never_written_outside_the_folder_or_over_another(outputs, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_SSH", "names")
+    dest = tmp_path / "into" / "copy"
+    got = machine.fetch_outputs("job1", dest, lambda files, size: None)
+    one_file = os.path.normcase("x.txt") == os.path.normcase("X.TXT")  # (Windows: only the first is written)
+    refused = [name for name, _ in got["refused"]]
+    assert refused == ["../up.txt", "/abs.txt", "ok.txt", *(["sub/X.TXT"] if one_file else [])]
+    assert got["files"] == 3 - one_file and got["sent"]["files"] == 6  # (the caller sees it is not complete)
+    assert [p.name for p in (tmp_path / "into").iterdir()] == ["copy"]  # (nothing next to the folder)
+    assert (dest / "ok.txt").read_bytes() == b"12345"
+
+
+def test_only_names_that_stay_inside_the_folder_are_written(tmp_path):
+    dest = tmp_path.resolve()
+    assert machine._target(dest, "runs/a/best.pt") == dest / "runs" / "a" / "best.pt"
+    for name in ("../escape.txt", "runs/../../escape.txt", "/etc/passwd", ""):
+        assert machine._target(dest, name) is None, name
+    assert (machine._target(dest, "a:b.txt") is None) is (os.name == "nt")  # (Windows: not a plain name)
 
 
 # ---- terminals -----------------------------------------------------------------------------------

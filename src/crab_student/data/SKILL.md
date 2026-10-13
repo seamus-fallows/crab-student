@@ -78,15 +78,40 @@ The machine installs the project's dependencies during setup, before the agent s
 | how one is doing | `crab-student status NAME --json` |
 | its report | `crab-student report NAME` |
 | its results in their repo | `crab-student pull NAME` |
+| its big output files on this computer | `crab-student fetch NAME` (below) |
 | to tell it something | `crab-student send NAME` with the text on stdin |
 | to stop it (it saves first) | `crab-student stop NAME` |
 | to start it again | `crab-student start NAME --json` |
+| what the agents have cost | `crab-student spend` |
 | what machines cost | `crab-student offers [--gpus N --gpu-ram GB] [--kinds]` |
 
 Summarize the output in plain words; do not paste tables unless asked. A state of `needs you` means
 the agent asked a question: show it, and pass the answer on with `send` (or the user can type to the
 agent directly with `open`). An agent that is done stops its machine after the idle time; for a
 follow-up, `start` it (its conversation resumes), then `send`.
+
+## Waiting for agents
+
+When you are to act on an agent's results, or to tell the user when it finishes, never write a polling
+loop: run `crab-student wait NAME ... --json` as a Bash call with `run_in_background: true`. It ends
+when one of those agents is done, failed, needs the user, stopped, cut off or deleted, and after 60
+minutes otherwise (`--timeout MINUTES`). Act on what it says, then run it again with the names in its
+`waiting`, until none is left. Without names it watches every agent there is, and ends at once while
+any of them is in such a state.
+
+- `unseen` in the result (exit code 1): an agent could not be seen for 10 minutes. Tell the user at
+  once, with the reason.
+- `vast_problem` in the result (most often Vast wants a fresh 2FA login): until the user fixes it in
+  their own terminal, no machine can be started, stopped or deleted. Tell them at once.
+
+When an agent is done and its report lists files in `/root/outputs`, run `crab-student fetch NAME`
+at once, also as a background Bash call: its machine stops itself after the idle time, copying does
+not count as activity, and a stopped machine cannot always be started again soon. The files go into a
+new folder `NAME-outputs` in the current folder (`NAME-outputs-2`, ... beside an earlier copy), and the
+copy is checked. `--to DIR` (new or empty) asks the user first: the machine chooses the file names, so
+never point it at a folder where files mean something (`.claude`, `.github`, a folder of programs).
+
+The user can also get phone or chat notifications (the `notify_url` setting).
 
 ## Watching
 
@@ -101,8 +126,12 @@ running. On Windows, running it yourself opens a new Windows Terminal window.
 Delete when the user asks for it (suggest `pull` and reading the report first if they have not). `delete`
 refuses (exit 3) when work would be lost and lists it: show that list and let the user decide about
 `--force`. Never add
-`--force` on your own. A stopped agent's disk is still billed (`list` shows its disk cost per day and how
-long it has sat), and it can usually be deleted without starting it again.
+`--force` on your own. Files in `/root/outputs` that `fetch` copied do not count as lost while the
+machine runs and every one is as it was copied: after a fetch, a plain `delete` is enough while the
+machine still runs. A stopped machine cannot say whether they changed: `delete` then names the copy
+and leaves `--force` to the user. A stopped agent's disk is still billed
+(`list` shows its disk cost per day and how long it has sat), and it can usually be deleted without
+starting it again.
 
 ## Rules
 

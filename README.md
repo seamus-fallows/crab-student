@@ -54,8 +54,10 @@ missing):
 
 - **Vast key.** It uses the key file the `vastai` CLI keeps (`~/.config/vastai/vast_api_key`), so
   switching accounts there switches crab-student too. If there is none, it asks for one and saves it.
-  If your key requires 2FA, log in with `vastai tfa login --method-type totp -c <code>` (about once a
-  week); crab-student uses that session too and says when it needs a new one.
+  If your key requires 2FA, log in with `vastai tfa login --method-type totp -c <code>`; crab-student
+  uses that session too and says when it needs a new one. Vast ends a session after a while and does
+  not say after how long; when yours ends, the error says how long ago you had logged in (see Trouble
+  for what still works without it).
 - **GitHub.** It uses your `gh` login.
 - **SSH key.** It makes a key just for crab-student's machines and adds one `Include` line to
   `~/.ssh/config`, so `ssh crab-student-<name>` and VS Code can reach your agents' machines.
@@ -138,8 +140,10 @@ Claude. `status` shows what an agent got.
 **Your repo.** The agent starts from your current commit on a new branch `agent/<name>`. Local
 commits that are not on GitHub yet, and uncommitted changes to tracked files, go along (as one extra
 commit on the agent's branch; your own checkout is not touched). Untracked files do not; the launch
-warns about them. A task that has nothing to do with a repo (`--no-repo`) goes to a private
-`crab-student-work` repo on your GitHub.
+warns about them. With `--committed-only` the uncommitted changes stay behind too: say so when other
+work is going on in the checkout, or its half-finished edits become the agent's starting point. A task
+that has nothing to do with a repo (`--no-repo`) goes to a private `crab-student-work` repo on your
+GitHub.
 
 **Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
 with CUDA, Python and pip in `/venv/main`). Setup adds what the machine needs to host an agent (tmux,
@@ -210,18 +214,48 @@ connection does not matter.
 ## Keeping track
 
 ```
-crab-student list            # every agent: mode, state, its own status line, time and money since its last start
+crab-student list            # every agent: mode, state, its own status line, its machine time and what it has cost
 crab-student status NAME     # one agent in detail
+crab-student wait [NAME ...] # come back when an agent needs you
 crab-student report NAME     # its REPORT.md
 crab-student pull NAME       # fetch its branch into your repo (your checkout is not touched)
+crab-student fetch NAME      # copy its /root/outputs into a new folder here, and check the copy
+crab-student spend           # what your agents have cost, deleted ones too
 ```
 
 An agent's state is `approval` (waiting for your OK), `starting`, `interrupted` (a launch that was cut
 off: `start NAME` continues it), `working`, `needs you`, `interactive` (Claude is in VS Code; the
 message says whether you are active there or for how long it has been idle), `done`, `failed`,
-`stopped` (with why, how long ago, and what its disk costs per day) or `unknown` (Vast or the machine
-did not answer). `status` also shows the mode, where Claude runs (tmux or VS Code) and the model,
-effort and fast mode the agent got.
+`stopped` (with why, how long ago, and what its disk costs per day) or `unknown` (neither Vast nor the
+machine answered; the message says why). `status` also shows the mode, where Claude runs (tmux or VS
+Code) and the model, effort and fast mode the agent got. `list` and `status` give up with an error after
+3 minutes rather than hang.
+
+**Waiting.** `crab-student wait NAME ...` returns when one of those agents is `done`, `failed`, `needs
+you`, `stopped`, `interrupted`, waiting for `approval` or deleted, and after an hour otherwise
+(`--timeout MINUTES`), so whoever watches always hears back; your Claude Code runs it in the background
+instead of polling. It says which agents are still at work, for the next `wait`. Without names it
+watches every agent you have, so it returns at once while any of them is in one of those states: none
+that finished while nobody looked is passed over. It looks once a minute. If an agent stays `unknown`
+for 10 minutes it stops waiting and exits with code 1, saying why. When Vast cannot be asked (your 2FA
+session ended, say), running machines are still asked over ssh, and the result carries Vast's reason.
+
+**Big output files.** The agent keeps them in `/root/outputs` (not in git) and lists them in its report.
+`crab-student fetch NAME` copies them into a new folder `./NAME-outputs` while the machine runs (a later
+fetch goes beside it, into `NAME-outputs-2`, and so on). The machine chooses the file names and what is
+in them, so fetch only writes into a folder that is new or empty, never replaces a file, and your
+Claude Code must ask you before using another folder (`--to DIR`). A link to a file arrives as that file. The copy is checked: the folder then holds as many files
+and bytes as the machine sent. `delete` afterwards asks the running machine whether every file is still
+as it was copied (same paths, sizes and times of last change) and, if so, no longer counts them as work
+that would be lost. A stopped machine cannot be asked: `delete` then says where your copy is and leaves
+`--force` to you. So fetch when the agent is done, before its machine stops itself (Vast cannot always
+start a stopped machine again soon), and mind that a copy does not count as activity: one that takes
+longer than what is left of `idle_minutes` is cut off when the machine stops.
+
+**What it cost.** TIME and SPENT in `list` cover every start of an agent, not only the last one: its
+machine hours at the machine's price, plus its disk for the time it sat stopped. `crab-student spend`
+adds the agents you deleted (each is written to `~/.crab-student/spend.jsonl` when it goes) and a
+total. They count only what this computer saw, so they run low rather than high; Vast's bill decides.
 
 (`pull` for a `--no-repo` agent uses `~/crab-student-work`, cloning it the first time, unless you give
 `--repo PATH`.)
@@ -259,8 +293,7 @@ branch stays on GitHub.
 ## Money and safety
 
 - **You are responsible for your machines.** There is no time limit: a machine runs until it goes
-  idle or you stop it. `list` shows what each one costs and how long it has run since it was last
-  started.
+  idle or you stop it. `list` shows how long each one has run and about what it has cost.
 - **Idle stop.** The machine stops itself after an hour (`idle_minutes`) with nothing happening: no
   CPU or GPU work (a running job always counts) and no activity in the conversation, whether it is in
   tmux or in VS Code. An open but unused session does not keep it up. This applies whether the agent
@@ -308,10 +341,11 @@ branch stays on GitHub.
 ### What your Claude Code may do without asking
 
 `init` adds these rules to `~/.claude/settings.json`. Allowed: `guide`, `offers`, `launch`, `list`,
-`status`, `report`, `pull`, `send`, `open`, `stop`, `start`, `delete`, `decline`, `secret list` (a
-`launch` over the price limit waits for `approve` by itself; restarting a stopped agent with `start`
-only gives an agent you already have more machine time; `delete` refuses to destroy unsaved work unless
-forced). Always asked first: `approve`, `delete --force`, `config`, `init`, `secret set`, `secret delete`.
+`status`, `wait`, `spend`, `report`, `pull`, `fetch`, `send`, `open`, `stop`, `start`, `delete`,
+`decline`, `secret list` (a `launch` over the price limit waits for `approve` by itself; restarting a
+stopped agent with `start` only gives an agent you already have more machine time; `delete` refuses to
+destroy unsaved work unless forced; `fetch` only fills a new folder `NAME-outputs`). Always asked
+first: `approve`, `delete --force`, `fetch --to`, `config`, `init`, `secret set`, `secret delete`.
 
 The launcher runs in the background and cannot ask you anything, so it can use only the allowed
 commands; a command outside that list would interrupt you with a permission prompt in your main
@@ -373,5 +407,13 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
   `crab-student start NAME` tries again. A refused Claude token: `crab-student init --claude-token`.
 - **Claude in VS Code asks you to log in**: the extension could not find the token. In the Claude panel,
   log in with your subscription, or hand the agent over with `/handoff` (tmux always has the token).
-- **Big outputs**: the agent keeps them in `/root/outputs` (not in git) and lists them in its report;
-  copy them with `scp -F ~/.crab-student/ssh/config -r crab-student-NAME:/root/outputs .`
+- **"Vast wants a fresh 2FA login"**: your Vast session ended. Run `vastai tfa login --method-type totp
+  -c <code>` (crab-student removes the ended session's key, which would otherwise make that very
+  command fail with "Session expired"). Until you do, nothing can be rented, started, stopped or deleted,
+  but your agents carry on, their machines still stop themselves when idle, and `list`, `status`, `wait`
+  and `fetch` still work over ssh.
+- **A stopped machine does not start** ("resources are currently unavailable"): its host is busy; Vast
+  starts it when there is room, which can take hours. That is why outputs are best fetched before a
+  machine stops. Work that only needs the branch can go on a new agent meanwhile.
+- **Big outputs** in another place than `/root/outputs`: `scp -F ~/.crab-student/ssh/config -r
+  crab-student-NAME:PATH .`

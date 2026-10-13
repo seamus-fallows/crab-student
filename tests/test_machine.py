@@ -325,6 +325,14 @@ def test_the_machine_takes_the_same_fingerprint_of_its_outputs_as_the_copy_and_s
     )  # (looking alone is no activity: the file was touched before)
 
 
+def test_a_machine_that_cannot_note_the_copy_still_sends_its_files(outputs, tmp_path):
+    """(A full or read-only disk is when the outputs most need to come off the machine.)"""
+    (outputs / "best.pt").write_bytes(b"w" * 1000)
+    (outputs.parent / "crab-student" / "copying").mkdir()  # (nothing can be written where the note goes)
+    got = machine.fetch_outputs("job1", tmp_path / "copy", lambda files, size: None)
+    assert (got["files"], got["sent"]["files"]) == (1, 1) and (tmp_path / "copy" / "best.pt").exists()
+
+
 def test_the_fingerprint_of_the_outputs_changes_with_any_file_even_when_count_and_bytes_do_not(outputs):
     """(What delete must not miss after a fetch: checkpoints rotated, or one overwritten in place.)"""
     for name in ("ckpt-100.pt", "ckpt-200.pt", "latest.pt"):
@@ -363,7 +371,8 @@ def test_a_file_is_never_written_outside_the_folder_or_over_another(outputs, tmp
     monkeypatch.setenv("FAKE_SSH", "names")
     dest = tmp_path / "into" / "copy"
     got = machine.fetch_outputs("job1", dest, lambda files, size: None)
-    one_file = os.path.normcase("x.txt") == os.path.normcase("X.TXT")  # (Windows: only the first is written)
+    (tmp_path / "probe").write_text("")
+    one_file = (tmp_path / "PROBE").exists()  # (Windows, and macOS as a rule: only the first is written)
     refused = [name for name, _ in got["refused"]]
     assert refused == ["../up.txt", "/abs.txt", "ok.txt", *(["sub/X.TXT"] if one_file else [])]
     assert got["files"] == 3 - one_file and got["sent"]["files"] == 6  # (the caller sees it is not complete)

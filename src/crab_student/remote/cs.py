@@ -757,9 +757,10 @@ class Probe:
         return any(int(x) >= 10 for x in p.stdout.split() if x.strip().isdigit())
 
     def copying(self) -> bool:
-        """The outputs are being copied off the machine right now (a copy that stalls stops counting)."""
+        """The outputs are being copied off the machine right now (a copy that stalls stops counting, and a
+        time in the future is no copy)."""
         try:
-            return time.time() - COPYING.stat().st_mtime < 2 * TICK
+            return 0 <= time.time() - COPYING.stat().st_mtime < 2 * TICK
         except OSError:
             return False
 

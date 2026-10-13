@@ -267,8 +267,11 @@ class Flowing:
     def read(self, n=-1):
         if time.time() - touched[0] >= 30:
             touched[0] = time.time()
-            open(marker, "a").close()
-            os.utime(marker, None)
+            try:
+                open(marker, "a").close()
+                os.utime(marker, None)
+            except OSError:  # (a full or read-only disk must not stop the files from being rescued)
+                pass
         return self.f.read(n)
 seen = []
 for entry in cs.files_under(cs.OUTPUTS):

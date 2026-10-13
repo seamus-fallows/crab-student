@@ -336,9 +336,9 @@ def test_a_copy_of_the_outputs_counts_as_activity_only_while_it_is_under_way(cs)
     cs.COPYING.parent.mkdir(parents=True, exist_ok=True)
     cs.COPYING.write_text("")  # (the copy touches it every half minute while bytes flow)
     assert probe.copying()
-    stalled = time.time() - 2 * cs.TICK - 1
-    os.utime(cs.COPYING, (stalled, stalled))
-    assert not probe.copying()
+    for when in (time.time() - 2 * cs.TICK - 1, time.time() + 86400):  # (stalled; a time yet to come)
+        os.utime(cs.COPYING, (when, when))
+        assert not probe.copying()
 
 
 # ---- save, check, status, send -------------------------------------------------------------------

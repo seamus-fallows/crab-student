@@ -122,12 +122,23 @@ def _github_step() -> bool:
         return False
     if subprocess.run([gh, "auth", "status"], capture_output=True).returncode != 0:
         if not core.interactive():
-            _say("GitHub", "not logged in: run gh auth login in a terminal, then init again.")
+            _say("GitHub", "not logged in: run gh auth login -s workflow in a terminal, then init again.")
             return False
         _say("GitHub", "logging in with gh auth login:")
-        if subprocess.call([gh, "auth", "login"]) != 0:
+        if subprocess.call([gh, "auth", "login", "-s", "workflow"]) != 0:
             return False
-    _say("GitHub", f"ok - logged in as {github.login()}")
+    user, scopes = github.account()
+    if scopes is not None and "workflow" not in scopes:  # (see github.ADD_WORKFLOW_SCOPE)
+        if not core.interactive():
+            _say(
+                "GitHub",
+                f"no workflow scope: run {github.ADD_WORKFLOW_SCOPE} in a terminal, then init again.",
+            )
+            return False
+        _say("GitHub", f"adding the workflow scope with {github.ADD_WORKFLOW_SCOPE}:")
+        if subprocess.call([gh, *github.ADD_WORKFLOW_SCOPE.split()[1:]]) != 0:
+            return False
+    _say("GitHub", f"ok - logged in as {user}")
     return True
 
 

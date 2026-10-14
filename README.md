@@ -18,7 +18,8 @@ a colleague who asks about the big decisions, or be a Claude Code session you dr
   long-lived token, not an API key.
 - Python 3.11+, and [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io) to install
   crab-student (plain pip works too).
-- git, and the GitHub CLI [`gh`](https://cli.github.com), logged in to your GitHub account.
+- git, and the GitHub CLI [`gh`](https://cli.github.com), logged in to your GitHub account with the
+  `workflow` scope (`init` adds it).
 - An OpenSSH client. Windows has one built in.
 - A Vast.ai account with some credit, and its [API key](https://cloud.vast.ai/manage-keys/).
 - Optional: Windows Terminal on Windows, for the window that follows a launch and for `open --all`; tmux
@@ -54,7 +55,10 @@ To upgrade, run the same install command again with `--force` (pip: `--force-rei
   crab-student uses that session too, and says when it needs a new one. Vast ends a session after a
   while and does not say after how long; when yours ends, the error says how long ago you had logged in
   (see [Trouble](#trouble) for what still works without it).
-- **GitHub.** It uses your `gh` login, and runs `gh auth login` if you are not logged in.
+- **GitHub.** It uses your `gh` login, and runs `gh auth login` if you are not logged in. GitHub refuses
+  to push workflow files (`.github/workflows`) without the login's `workflow` scope, even to agent repos,
+  so `init` adds it with `gh auth refresh -h github.com -s workflow` if it is missing, and a launch
+  refuses to start without it.
 - **SSH key.** It makes a key just for your agents' machines, and adds one `Include` line to
   `~/.ssh/config`, so `ssh crab-student-NAME` and VS Code reach them.
 - **Claude token.** You run `claude setup-token` in another terminal and paste the token. It is kept in
@@ -436,6 +440,10 @@ index) goes into its brief.
   subscription in the Claude panel, or hand the agent over with `/handoff` (tmux always has the token).
 - **Git LFS files and submodules with relative URLs** don't reach the agent repo, so the agent doesn't
   get them: say in the brief where it can download what it needs.
+- **GitHub refuses a push "without `workflow` scope"**: your `gh` login cannot write workflow files
+  (`.github/workflows`), not even to an agent repo. Run `gh auth refresh -h github.com -s workflow` (a
+  fine-grained token needs the Workflows permission instead), then `crab-student start NAME` if a launch
+  failed for it.
 - **"Vast wants a fresh 2FA login"**: your Vast session ended. Run `vastai tfa login --method-type totp
   -c <code>` (crab-student removes the ended session's key, which would otherwise make that very
   command fail with "Session expired"). Until you do, nothing can be rented, started, stopped or deleted,

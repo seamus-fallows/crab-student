@@ -1,6 +1,6 @@
 """A fake GitHub: a folder of bare repos (real git for every clone, push and fetch) and an in-process
 stand-in for the `gh` calls crab-student makes (any other call fails the test). Tests read `keys`, `private`
-and `description`."""
+and `description`, and set `scopes` (those of gh's token; None: a token that shows none)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ class FakeGitHub:
         self.private: dict[str, bool] = {}
         self.description: dict[str, str] = {}
         self.keys: dict[str, dict[int, dict]] = {}
+        self.scopes: list[str] | None = ["gist", "read:org", "repo", "workflow"]
         self.calls: list[tuple[str, ...]] = []
         self._next_key = 100
 
@@ -64,13 +65,21 @@ class FakeGitHub:
             return ""
         assert args[0] == "api", args
         rest = list(args[1:])
-        method, raw = "GET", False
+        method, raw, headers = "GET", False, rest[:1] == ["-i"]
+        if headers:
+            rest = rest[1:]
         if rest[:1] == ["-X"]:
             method, rest = rest[1], rest[2:]
         if rest[:1] == ["-H"]:
             raw, rest = "raw" in rest[1], rest[2:]
         path, fields = rest[0], dict(f.split("=", 1) for f in rest[1:] if not f.startswith("-"))
-        return self._api(method, path, fields, raw)
+        body = self._api(method, path, fields, raw)
+        if not headers:
+            return body
+        head = ["HTTP/2.0 200 OK", "Content-Type: application/json; charset=utf-8"]  # (as gh prints them)
+        if self.scopes is not None:
+            head.append(f"X-Oauth-Scopes: {', '.join(self.scopes)}")
+        return "\r\n".join(head) + "\r\n\r\n" + body
 
     def _missing(self) -> GhError:
         return GhError("GitHub: gh: Not Found (HTTP 404)", True)

@@ -28,8 +28,8 @@ A single-user tool its owner wants simple and fast.
 - Which machine to rent is the launcher's choice (`data/launch.md`, served by `crab-student guide launch`), not
   code. `offers.py` only applies fixed rules and filters.
 - `src/crab_student/remote/`: the machine side, uploaded flat to `/root/crab-student/` (the onstart command and
-  dead-man switch name that path). Standard library only, Python 3.8 syntax (no runtime `X | Y`, dict `|`,
-  `removeprefix`, `zip(strict=)`), LF line endings. The watchdog never dies of an exception.
+  dead-man switch name that path). Standard library only, Python 3.11+ like the rest, LF line endings. The
+  watchdog never dies of an exception.
 
 ## Conventions
 

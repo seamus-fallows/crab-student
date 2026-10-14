@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """crab-student on the machine: setup, the watchdog, Claude Code in tmux, the hand-off from VS Code, and the
-commands the local side runs over ssh (each prints one JSON object on its last line). Python 3.8+ standard
-library only. What the agent reads never names crab-student: it has no context for the name."""
+commands the local side runs over ssh (each prints one JSON object on its last line). Python 3.11+ (the one
+setup links as D/python), standard library only. What the agent reads never names crab-student: it has no
+context for the name."""
 
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ CLAUDE = ROOT / ".local" / "bin" / "claude"
 BRIEF = ROOT / "BRIEF.md"  # (where the agent reads its brief, outside the tool's folder)
 VENV = Path(os.environ.get("CS_VENV", "/venv/main"))  # the image's Python environment, when it has one
 VSCODE_HOME = ROOT / ".vscode-server"  # (VS Code's server, its extensions and its machine settings)
-VSCODE_DOWNLOAD = "https://update.code.visualstudio.com/commit:%s/%s/stable"
+VSCODE_DOWNLOAD = "https://update.code.visualstudio.com/commit:{commit}/server-linux-{arch}/stable"
 CLAUDE_EXTENSION = "anthropic.claude-code"
 # What installing the dependencies leaves in the repo, ignored machine-wide so that neither the autosave nor
 # the agent commits it (and agent-status done is not refused for it).
@@ -43,7 +44,7 @@ INSTALL_LEFTOVERS = (".venv/", "*.egg-info/", "__pycache__/")
 TICK = float(os.environ.get("CS_TICK_SECONDS", "60"))
 PY = sys.executable or "python3"
 CPU_BUSY_CORES = 0.25
-QUIET_MINUTES = 20  # a "working" agent silent this long gets a check-in (longer than its longest sleep)
+QUIET_MINUTES = 20  # a "working" agent silent this long has likely ended its turn: it gets a check-in
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
 STEPS = ("environment", "repository", "dependencies", "Claude Code", "agent settings", "starting the agent")
@@ -54,8 +55,8 @@ CLAUDE_KEYS = ("model", "effortLevel", "modelSettings", "fastMode")
 
 MACHINE = "Automated message from the machine: "
 FIRST_PROMPT = (
-    "Your task is in %s and your rules for working on this machine are in ~/.claude/CLAUDE.md. Read both, "
-    'run agent-status working "<first step>", then start.' % BRIEF
+    f"Your task is in {BRIEF} and your rules for working on this machine are in ~/.claude/CLAUDE.md. Read "
+    'both, run agent-status working "<first step>", then start.'
 )
 LOST = (
     " Your previous conversation could not be restored: read your report and git log to see how far you "
@@ -128,7 +129,7 @@ def cfg() -> dict:
 
 def write(path: Path, text: str, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))  # (the watchdog and a command may race)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")  # (the watchdog and a command may race)
     tmp.write_text(text)
     os.chmod(str(tmp), mode)
     os.replace(str(tmp), str(path))
@@ -157,7 +158,7 @@ def last_line(text: str) -> str:
 
 def fmt_hours(h: float) -> str:
     m = max(0, round(h * 60))
-    return "%dh%02dm" % (m // 60, m % 60)
+    return f"{m // 60}h{m % 60:02d}m"
 
 
 def run(args, check: bool = False, timeout: float = 120, **kw) -> subprocess.CompletedProcess:
@@ -165,11 +166,11 @@ def run(args, check: bool = False, timeout: float = 120, **kw) -> subprocess.Com
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, **kw)
     except FileNotFoundError:
-        p = subprocess.CompletedProcess(args, 127, "", "%s: not found" % args[0])
+        p = subprocess.CompletedProcess(args, 127, "", f"{args[0]}: not found")
     except subprocess.TimeoutExpired:
-        p = subprocess.CompletedProcess(args, 124, "", "timed out after %d s" % timeout)
+        p = subprocess.CompletedProcess(args, 124, "", f"timed out after {timeout:g} s")
     if check and p.returncode:
-        raise RuntimeError("%s failed: %s" % (Path(str(args[0])).name, last_line(p.stderr or p.stdout)))
+        raise RuntimeError(f"{Path(str(args[0])).name} failed: {last_line(p.stderr or p.stdout)}")
     return p
 
 
@@ -209,7 +210,7 @@ def inherited(key: str) -> bool:
 def agent_env(c: dict) -> dict:
     """Claude Code's environment in tmux, with the token, the task's secrets and the Python environment."""
     env = {k: v for k, v in os.environ.items() if not inherited(k)}
-    env["PATH"] = "%s:%s" % (path_head(c), env.get("PATH", "/usr/bin:/bin"))
+    env["PATH"] = f"{path_head(c)}:{env.get('PATH', '/usr/bin:/bin')}"
     env.pop("VIRTUAL_ENV", None)
     venv = active_venv(c)
     if venv:
@@ -224,7 +225,7 @@ def agent_env(c: dict) -> dict:
 def path_head(c: dict) -> str:
     """What goes before PATH: the repo's own .venv (once the install makes one; until then the shell skips
     it), the tools installed for root (Claude Code, uv), the image's Python environment."""
-    return "%s/.venv/bin:%s/.local/bin:%s/bin" % (c["repo_dir"], ROOT, VENV)
+    return f"{c['repo_dir']}/.venv/bin:{ROOT}/.local/bin:{VENV}/bin"
 
 
 def active_venv(c: dict):
@@ -241,12 +242,12 @@ def python() -> str:
 
 
 def report_path(c: dict) -> str:
-    return "agent-runs/%s/REPORT.md" % c["name"]
+    return f"agent-runs/{c['name']}/REPORT.md"
 
 
 def read_handoff() -> dict:
-    """The hand-off from VS Code, once there was one: mode, from (the conversation forked), prompt, at;
-    fork_failed once that conversation could not be forked."""
+    """The hand-off from VS Code, once there was one: mode, from (the conversation forked), to (the session id
+    it is forked into), prompt, at."""
     return read_json(D / "handoff.json", {})
 
 
@@ -285,14 +286,14 @@ def cmd_setup() -> int:
     )
     for i, step in enumerate(steps, 1):
         label = STEPS[i - 1]
-        print("step %d/%d %s" % (i, len(steps), label), flush=True)
+        print(f"step {i}/{len(steps)} {label}", flush=True)
         # (each step is bounded: the dead-man switch waits for it)
         write(D / "heartbeat", str(int(time.time())), 0o600)
         try:
             step(c, jobs)
         except Exception as e:  # reported to the local side, which destroys the machine
             with open(str(D / "logs" / "setup.log"), "a") as f:
-                f.write("step %d (%s) failed: %s\n" % (i, label, e))
+                f.write(f"step {i} ({label}) failed: {e}\n")
             return out({"ok": False, "step": i, "label": label, "error": str(e)})
     return out({"ok": True, "warnings": deps_warnings() + vscode_server_ready(jobs)})
 
@@ -308,13 +309,13 @@ def vscode_server_ready(jobs: dict) -> list:
     except subprocess.TimeoutExpired:
         job.kill()
     tail = last_line((D / "logs" / "vscode.log").read_text(errors="replace"))
-    return ["VS Code's server and its Claude extension could not be put on the machine ahead of time (%s): VS "
-            "Code installs its server when you first open the agent, and the extension only if your "
-            "remote.SSH.defaultExtensions lists %s." % (tail, CLAUDE_EXTENSION)]  # fmt: skip
+    return [f"VS Code's server and its Claude extension could not be put on the machine ahead of time ({tail}): "
+            "VS Code installs its server when you first open the agent, and the extension only if your "
+            f"remote.SSH.defaultExtensions lists {CLAUDE_EXTENSION}."]  # fmt: skip
 
 
 def _script(path: Path, command: str) -> None:
-    write(path, '#!/bin/sh\nexec %s %s "$@"\n' % (PY, command), 0o755)
+    write(path, f'#!/bin/sh\nexec {PY} {command} "$@"\n', 0o755)
 
 
 def setup_environment(c: dict, jobs: dict) -> None:
@@ -322,15 +323,15 @@ def setup_environment(c: dict, jobs: dict) -> None:
     write_profile(c)
     write(ROOT / ".no_auto_tmux", "")
     write(ROOT / ".tmux.conf", TMUX_CONF.format(name=c["name"]))
-    _script(BIN / "agent-attach", "%s/cs.py attach" % D)
-    _script(BIN / "agent-status", "%s/cs.py declare" % D)
+    _script(BIN / "agent-attach", f"{D}/cs.py attach")
+    _script(BIN / "agent-status", f"{D}/cs.py declare")
     if machine_mode(c) == "interactive":
-        _script(BIN / "agent-handoff", "%s/cs.py handoff" % D)
+        _script(BIN / "agent-handoff", f"{D}/cs.py handoff")
     for hook in ("pre-commit", "pre-push"):
-        _script(D / "hooks" / hook, "%s/cs.py hook %s" % (D, hook))
+        _script(D / "hooks" / hook, f"{D}/cs.py hook {hook}")
     OUTPUTS.mkdir(parents=True, exist_ok=True)
-    run(["git", "config", "--global", "user.name", "%s (Claude Code agent)" % c["name"]], check=True)
-    run(["git", "config", "--global", "user.email", "%s@agent.invalid" % c["name"]], check=True)
+    run(["git", "config", "--global", "user.name", f"{c['name']} (Claude Code agent)"], check=True)
+    run(["git", "config", "--global", "user.email", f"{c['name']}@agent.invalid"], check=True)
     ignore = ROOT / ".config" / "git" / "ignore"  # (git's own global ignore file)
     kept = ignore.read_text().splitlines() if ignore.exists() else []
     write(ignore, "\n".join(kept + [x for x in INSTALL_LEFTOVERS if x not in kept]) + "\n")
@@ -354,15 +355,15 @@ def write_profile(c: dict) -> None:
     repo, head = shlex.quote(c["repo_dir"]), path_head(c)
     lines = [
         "export IS_SANDBOX=1 DISABLE_AUTOUPDATER=1",
-        'for f in %s/claude.env %s/secrets.env; do [ -r "$f" ] && . "$f"; done' % (D, D),
-        'case "$PATH" in "%s:"*) ;; *) export PATH="%s:$PATH" ;; esac' % (head, head),
-        "if [ -x %s/.venv/bin/python ]; then export VIRTUAL_ENV=%s/.venv" % (repo, repo),
-        "elif [ -x %s/bin/python ]; then export VIRTUAL_ENV=%s; fi" % (VENV, VENV),
-        'case $- in *i*) if [ "$PWD" = "$HOME" ] && [ -d %s ]; then cd %s; fi ;; esac' % (repo, repo),
+        f'for f in {D}/claude.env {D}/secrets.env; do [ -r "$f" ] && . "$f"; done',
+        f'case "$PATH" in "{head}:"*) ;; *) export PATH="{head}:$PATH" ;; esac',
+        f"if [ -x {repo}/.venv/bin/python ]; then export VIRTUAL_ENV={repo}/.venv",
+        f"elif [ -x {VENV}/bin/python ]; then export VIRTUAL_ENV={VENV}; fi",
+        f'case $- in *i*) if [ "$PWD" = "$HOME" ] && [ -d {repo} ]; then cd {repo}; fi ;; esac',
     ]
     write(PROFILE_D / "agent.sh", "\n".join(lines) + "\n")
     profile = PROFILE_D / "agent.sh"
-    bashrc, line = ROOT / ".bashrc", "[ -r %s ] && . %s" % (profile, profile)
+    bashrc, line = ROOT / ".bashrc", f"[ -r {profile} ] && . {profile}"
     text = bashrc.read_text() if bashrc.exists() else ""
     if line not in text:
         write(bashrc, text + ("\n" if text and not text.endswith("\n") else "") + line + "\n")
@@ -375,18 +376,19 @@ def vscode_server_command(commit: str) -> str:
         return "echo 'not a VS Code commit'; exit 1"
     arch = "arm64" if platform.machine() in ("aarch64", "arm64") else "x64"
     server = shlex.quote(str(VSCODE_HOME / "cli" / "servers" / ("Stable-" + commit) / "server"))
+    url = VSCODE_DOWNLOAD.format(commit=commit, arch=arch)
+    extensions = shlex.quote(str(VSCODE_HOME / "extensions"))
     return (
-        "set -o pipefail; mkdir -p %s && ([ -x %s/bin/code-server ] || curl -fsSL --retry 3 %s | tar -xz -C %s "
-        "--strip-components=1) && %s/bin/code-server --install-extension %s --extensions-dir %s"
-        % (server, server, VSCODE_DOWNLOAD % (commit, "server-linux-" + arch), server, server, CLAUDE_EXTENSION,
-           shlex.quote(str(VSCODE_HOME / "extensions")))
-    )  # fmt: skip
+        f"set -o pipefail; mkdir -p {server} && ([ -x {server}/bin/code-server ] || curl -fsSL --retry 3 {url} | "
+        f"tar -xz -C {server} --strip-components=1) && {server}/bin/code-server --install-extension "
+        f"{CLAUDE_EXTENSION} --extensions-dir {extensions}"
+    )
 
 
 def git_ssh() -> str:
     return (
-        "ssh -i %s/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=%s/github_known_hosts "
-        "-o StrictHostKeyChecking=yes" % (D, D)
+        f"ssh -i {D}/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile={D}/github_known_hosts "
+        "-o StrictHostKeyChecking=yes"
     )
 
 
@@ -402,7 +404,7 @@ def setup_repository(c: dict, jobs: dict) -> None:
             run(base, env=env, timeout=1800, check=True)
     git("config", "core.sshCommand", git_ssh(), cwd=repo)
     git("config", "core.hooksPath", str(D / "hooks"), cwd=repo)
-    git("config", "remote.origin.push", "refs/heads/%s:refs/heads/%s" % (c["branch"], c["branch"]), cwd=repo)
+    git("config", "remote.origin.push", f"refs/heads/{c['branch']}:refs/heads/{c['branch']}", cwd=repo)
 
 
 def setup_settings(c: dict, jobs: dict) -> None:
@@ -447,7 +449,7 @@ def write_vscode_settings(c: dict) -> None:
 def write_rules(c: dict, mode: str) -> None:
     """~/.claude/CLAUDE.md: the rules every agent in tmux follows, with its mode's section."""
     fill = {
-        "mode_rules": (D / ("rules-%s.md" % mode)).read_text().strip(),
+        "mode_rules": (D / f"rules-{mode}.md").read_text().strip(),
         "name": c["name"],
         "branch": c["branch"],
         "repo_dir": c["repo_dir"],
@@ -459,7 +461,7 @@ def write_rules(c: dict, mode: str) -> None:
     }
     rules = (D / "rules.md").read_text()
     for key, value in fill.items():
-        rules = rules.replace("{{%s}}" % key, value)
+        rules = rules.replace("{{" + key + "}}", value)
     write(ROOT / ".claude" / "CLAUDE.md", rules)
 
 
@@ -487,15 +489,15 @@ def setup_claude(c: dict, jobs: dict) -> None:
             job.wait(max(1, deadline - time.time()))
         except subprocess.TimeoutExpired:
             job.kill()
-            raise RuntimeError("installing %s took over 3 minutes" % name) from None
+            raise RuntimeError(f"installing {name} took over 3 minutes") from None
     install_log = D / "logs" / "install.log"
     tail = last_line(install_log.read_text()) if install_log.exists() else "no output"
     if not shutil.which("tmux"):
-        raise RuntimeError("tmux could not be installed (%s)" % tail)
+        raise RuntimeError(f"tmux could not be installed ({tail})")
     if c["fake_claude"]:
         return
     if run([str(CLAUDE), "--version"]).returncode:
-        raise RuntimeError("Claude Code did not install (%s)" % tail)
+        raise RuntimeError(f"Claude Code did not install ({tail})")
     p = run(
         [str(CLAUDE), "-p", "Reply with the word ok", "--model", "haiku"],
         env=agent_env(c),
@@ -504,8 +506,8 @@ def setup_claude(c: dict, jobs: dict) -> None:
     )
     if p.returncode:
         raise RuntimeError(
-            "the Claude token was refused (%s): run crab-student init --claude-token, then "
-            "crab-student start %s" % (last_line(p.stderr or p.stdout), c["name"])
+            f"the Claude token was refused ({last_line(p.stderr or p.stdout)}): run crab-student init "
+            f"--claude-token, then crab-student start {c['name']}"
         )
 
 
@@ -538,12 +540,12 @@ def deps_command(c: dict) -> str:
     if (repo / "uv.lock").exists() or re.search(r"(?m)^\[tool\.uv[\].]", pyproject):
         return "(command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && uv sync"
     if re.search(r"(?m)^\[project\]", pyproject):
-        return "%s -m pip install -e ." % py
+        return f"{py} -m pip install -e ."
     reqs = sorted(p.name for p in repo.glob("requirements*.txt"))
     if reqs:
-        return " && ".join("%s -m pip install -r %s" % (py, shlex.quote(r)) for r in reqs)
+        return " && ".join(f"{py} -m pip install -r {shlex.quote(r)}" for r in reqs)
     if (repo / "setup.py").exists():
-        return "%s -m pip install -e ." % py
+        return f"{py} -m pip install -e ."
     return ""
 
 
@@ -565,7 +567,7 @@ def setup_dependencies(c: dict, jobs: dict) -> None:
         except subprocess.TimeoutExpired:
             os.killpg(job.pid, signal.SIGKILL)  # (the whole install, not only its shell)
             code = job.wait()
-            logs.write("\nThe install was stopped after %d minutes.\n" % (DEPS_TIMEOUT // 60))
+            logs.write(f"\nThe install was stopped after {DEPS_TIMEOUT // 60} minutes.\n")
     write(D / "deps.json", json.dumps({"command": command, "exit_code": code}))
 
 
@@ -589,8 +591,8 @@ def deps_warnings() -> list:
         return []
     tail = (deps_log_tail(1) or ["no output"])[0].strip()
     return [
-        "Installing the project's dependencies (%s) failed with exit code %s (%s). The machine was set up anyway; "
-        "the install's log is %s there." % (d["command"], d["exit_code"], tail, D / "logs" / "deps.log")
+        f"Installing the project's dependencies ({d['command']}) failed with exit code {d['exit_code']} ({tail}). "
+        f"The machine was set up anyway; the install's log is {D / 'logs' / 'deps.log'} there."
     ]
 
 
@@ -604,12 +606,11 @@ def deps_rule() -> str:
             "(`requirements.txt`, `pyproject.toml`, `uv.lock`, `environment.yml`, its README)."
         )
     if code == 0:
-        return "The repo's dependencies were installed when the machine was set up (`%s`)." % command
+        return f"The repo's dependencies were installed when the machine was set up (`{command}`)."
     tail = "\n".join("  " + x for x in deps_log_tail(12))
     return (
-        "Installing the repo's dependencies when the machine was set up (`%s`) failed with exit code %s. Fix that "
-        "first, unless it has been fixed since. The end of its output:\n\n  ```\n%s\n  ```"
-        % (command, code, tail)
+        f"Installing the repo's dependencies when the machine was set up (`{command}`) failed with exit code "
+        f"{code}. Fix that first, unless it has been fixed since. The end of its output:\n\n  ```\n{tail}\n  ```"
     )
 
 
@@ -627,9 +628,10 @@ def session_id(c: dict) -> str:
     return path.read_text().strip() if path.exists() else c["session_id"]
 
 
-def fork_from(h: dict):
-    """The VS Code conversation to fork into tmux: after a hand-off, until a fork of it failed."""
-    return h["from"] if h.get("from") and not h.get("fork_failed") and transcript(h["from"]) else None
+def fork_from(h: dict, sid: str):
+    """The VS Code conversation to fork into tmux as `sid`: only as the session id the hand-off chose, so once
+    that id is given up for a new one, never again."""
+    return h["from"] if h.get("to") == sid and transcript(h["from"]) else None
 
 
 def session_running() -> bool:
@@ -652,7 +654,7 @@ def agent_started(c: dict, seconds: float) -> bool:
 
 
 def first_prompt(lost: bool) -> str:
-    """A new conversation's prompt (after a hand-off whose fork failed, with what the user asked for then)."""
+    """A new conversation's prompt (after a hand-off, with what the user asked for then)."""
     asked = read_handoff().get("prompt")
     words = " When they handed the task over, the user asked you to continue with: " + asked if asked else ""
     return FIRST_PROMPT + (LOST if lost else "") + words
@@ -666,7 +668,7 @@ def claude_argv(c: dict, sid: str, first: bool, lost: bool) -> list:
     if transcript(sid):
         return [*argv, "--resume", sid, *([RESTART_NOTE] if first else [])]
     h = read_handoff()
-    if fork_from(h):
+    if fork_from(h, sid):
         prompt = HANDOFF_PROMPT.format(how=HOW[h["mode"]], prompt=h["prompt"])
         return [*argv, "--resume", h["from"], "--fork-session", "--session-id", sid, prompt]
     return [*argv, "--session-id", sid, first_prompt(lost)]
@@ -676,15 +678,13 @@ def cmd_claude() -> int:
     """Runs in the tmux pane: starts, resumes or forks the agent's conversation, and again after it exits."""
     c, first, lost = cfg(), True, False
     while True:
-        sid, h = session_id(c), read_handoff()
+        sid = session_id(c)
         resuming = transcript(sid)
-        forking = not resuming and bool(fork_from(h))
+        forking = not resuming and bool(fork_from(read_handoff(), sid))
         started = time.time()
         rc = subprocess.call(claude_argv(c, sid, first, lost), cwd=c["repo_dir"], env=agent_env(c))
         if (resuming or forking) and rc and time.time() - started < 20:  # it could not be resumed or forked
-            if forking:  # (the VS Code conversation cannot be forked: a new one starts from the brief)
-                save_handoff(dict(h, fork_failed=True))
-            write(D / "session_id", str(uuid.uuid4()), 0o600)
+            write(D / "session_id", str(uuid.uuid4()), 0o600)  # (a new conversation starts from the brief)
             lost = True
             continue
         first = False
@@ -703,11 +703,11 @@ def cmd_attach() -> int:
     if frontend(c) == "tmux" and wait_until(session_running, 30):
         os.execvp("tmux", ["tmux", "-u", "attach", "-t", SESSION])  # (-u: UTF-8 even without a locale)
     if frontend(c) == "tmux":
-        print("The agent's session is not running (see crab-student status %s). Opening a shell." % c["name"])
+        print(f"The agent's session is not running (see crab-student status {c['name']}). Opening a shell.")
     elif os.environ.get("TERM_PROGRAM") != "vscode":  # (in VS Code itself, a plain shell says enough)
         print(
-            "%s works in VS Code, not in tmux: open it with crab-student open %s --vscode (or type /handoff "
-            "in its Claude chat to leave it running here). Opening a shell." % (c["name"], c["name"])
+            f"{c['name']} works in VS Code, not in tmux: open it with crab-student open {c['name']} --vscode (or "
+            "type /handoff in its Claude chat to leave it running here). Opening a shell."
         )
     os.execvp("bash", ["bash", "-l"])
     return 1
@@ -771,21 +771,28 @@ def read_agent() -> dict:
 
 def tick(st: dict, c: dict, now: float, probe) -> list:
     """One watchdog step: update the state, return the actions (notify:<state>, nudge, check-in, stop:<why>).
-    The one stop rule: `idle_minutes` with no CPU or GPU work and no conversation, done or not."""
+    The one stop rule: `idle_minutes` with no CPU or GPU work, no conversation and no copy of the outputs
+    under way, done or not."""
     actions = []
     dt = min(max(now - st["last_tick"], 0), 2 * TICK)
     st["last_tick"] = now
     st["used_seconds"] += dt
-    size, cpu = probe.transcript_bytes(), probe.cpu_seconds()
+    size, cpu, agent = probe.transcript_bytes(), probe.cpu_seconds(), read_agent()
     cpu_busy = (
         cpu is not None and st["cpu_seconds"] is not None and cpu - st["cpu_seconds"] >= CPU_BUSY_CORES * dt
     )
+    work = cpu_busy or probe.gpu_busy()
     if size != st["transcript_bytes"]:
-        st["last_talk"], st["talk_nudged"] = now, False
-    if size != st["transcript_bytes"] or cpu_busy or probe.gpu_busy() or probe.copying():
-        st["last_activity"], st["nudged_at"] = now, None
-    st["transcript_bytes"], st["cpu_seconds"] = size, cpu
-    mode, state = machine_mode(c), read_agent().get("state")
+        st["last_talk"] = now
+    if size != st["transcript_bytes"] or work or probe.copying():
+        st["last_activity"] = now
+    # The reminders come again only once the agent itself did something (work, or a status update): they
+    # grow the conversation too, so an agent that cannot answer (a usage limit, a revoked token) would
+    # otherwise be reminded, and its machine kept up, forever.
+    if work or agent.get("at") != st["agent_at"]:
+        st["nudged_at"], st["talk_nudged"] = None, False
+    st["transcript_bytes"], st["cpu_seconds"], st["agent_at"] = size, cpu, agent.get("at")
+    mode, state = machine_mode(c), agent.get("state")
     if state != st["notified_state"] and state in ("needs-you", "done", "failed"):
         actions.append("notify:" + state)
     st["notified_state"] = state
@@ -795,11 +802,11 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
         actions.append("nudge")
         st["nudged_at"] = now
     # An agent that says "working" but has not said a word for a while has likely ended its turn with a
-    # job still running (and nothing prompts an interactive session): remind it once per quiet stretch.
+    # job still running (and nothing prompts an interactive session): remind it.
     quiet = now - st["last_talk"] >= QUIET_MINUTES * 60
     if mode != "interactive" and state == "working" and quiet and not st["talk_nudged"]:
         actions.append("check-in")
-        st["talk_nudged"] = True
+        st["last_talk"], st["talk_nudged"] = now, True  # (the check-in is talk: a new quiet stretch begins)
     if idle >= c["idle_minutes"] * 60:
         actions.append("stop:done" if state == "done" else "stop:idle")
     return actions
@@ -819,6 +826,7 @@ def load_state() -> dict:
         "nudged_at": None,
         "last_talk": 0.0,
         "talk_nudged": False,
+        "agent_at": None,
         "stop_sent_at": None,
     }
     return dict(defaults, **read_json(D / "state.json", {}))
@@ -889,7 +897,7 @@ def ensure_agent_session(c: dict) -> None:
             "50",
             "-c",
             c["repo_dir"],
-            "%s %s/cs.py claude" % (PY, D),
+            f"{PY} {D}/cs.py claude",
         )
 
 
@@ -925,7 +933,6 @@ def cmd_watch() -> int:
     while True:
         try:
             c = cfg()
-            write(D / "heartbeat", str(int(time.time())), 0o600)
             if st["stopping"]:
                 vast_stop(vast_env)
             else:
@@ -934,8 +941,10 @@ def cmd_watch() -> int:
                 for action in tick(st, c, time.time(), probe):
                     perform(action, st, c, vast_env)
             save_state(st)
+            # (only a tick that did its work: one failing every minute leaves the dead-man switch to stop it)
+            write(D / "heartbeat", str(int(time.time())), 0o600)
         except Exception as e:  # the watchdog never dies of a bug (the dead-man switch is the net)
-            log("tick failed: %r" % (e,))
+            log(f"tick failed: {e!r}")
         time.sleep(TICK)
 
 
@@ -944,22 +953,22 @@ def perform(action: str, st: dict, c: dict, vast_env: dict) -> None:
     if action.startswith("notify:"):
         state = action.split(":", 1)[1]
         words = {"needs-you": "needs you", "done": "is done", "failed": "failed"}[state]
-        notify(c, state, "%s %s: %s" % (c["name"], words, a.get("message", "")))
+        notify(c, state, f"{c['name']} {words}: {a.get('message', '')}")
     elif action == "nudge":
         type_to_agent(NUDGE.format(minutes=c["idle_minutes"] // 2))
     elif action == "check-in":
         type_to_agent(CHECK_IN.format(minutes=QUIET_MINUTES))
     elif action.startswith("stop:"):
         reason = action.split(":", 1)[1]
-        why = {"idle": "idle for %d min", "done": "done, and idle for %d min"}[reason] % c["idle_minutes"]
+        why = {"idle": "idle", "done": "done, and idle"}[reason] + f" for {c['idle_minutes']} min"
         st.update(stopping=reason, stop_reason=reason)
         save_state(st)
         log("stopping: " + why)
-        notify(c, "stopped", "%s stopped: %s" % (c["name"], why))
+        notify(c, "stopped", f"{c['name']} stopped: {why}")
         try:
-            log("saved: %s" % json.dumps(save(reason, final=True)))
+            log(f"saved: {json.dumps(save(reason, final=True))}")
         except Exception as e:
-            log("save failed: %r" % (e,))
+            log(f"save failed: {e!r}")
         st["stop_sent_at"] = time.time()  # (after the save: from now on a stop from outside loses nothing)
         save_state(st)
         vast_stop(vast_env)
@@ -980,10 +989,8 @@ def vast_credentials() -> dict:
 
 def vast_stop(vast_env: dict) -> None:
     """Ask Vast to stop this machine with its own key (never destroy)."""
-    url = "%s/api/v0/instances/%s/" % (
-        vast_env.get("CS_VAST_URL", "https://console.vast.ai").rstrip("/"),
-        vast_env.get("CONTAINER_ID", ""),
-    )
+    base = vast_env.get("CS_VAST_URL", "https://console.vast.ai").rstrip("/")
+    url = f"{base}/api/v0/instances/{vast_env.get('CONTAINER_ID', '')}/"
     req = urllib.request.Request(
         url,
         data=json.dumps({"state": "stopped"}).encode(),
@@ -998,7 +1005,7 @@ def vast_stop(vast_env: dict) -> None:
         urllib.request.urlopen(req, timeout=30).close()
         log("asked Vast to stop the machine")
     except Exception as e:
-        log("the stop call failed (it is tried again): %s" % (getattr(e, "code", None) or type(e).__name__))
+        log(f"the stop call failed (it is tried again): {getattr(e, 'code', None) or type(e).__name__}")
 
 
 def notify(c: dict, event: str, text: str) -> None:
@@ -1029,7 +1036,7 @@ def notify(c: dict, event: str, text: str) -> None:
             urllib.request.Request(url, data=body, method="POST", headers=headers), timeout=10
         ).close()
     except Exception as e:
-        log("notify failed: %s" % (getattr(e, "code", None) or type(e).__name__))
+        log(f"notify failed: {getattr(e, 'code', None) or type(e).__name__}")
 
 
 # ---- git: state, save, check ---------------------------------------------------------------------
@@ -1043,7 +1050,7 @@ def git_state(c: dict) -> dict:
     unpushed = (
         int(ab[2].lstrip("+"))
         if ab
-        else int(git("rev-list", "--count", "origin/%s..HEAD" % c["branch"], check=False).strip() or 0)
+        else int(git("rev-list", "--count", f"origin/{c['branch']}..HEAD", check=False).strip() or 0)
     )
     return {
         "branch": branch,
@@ -1087,7 +1094,7 @@ def fingerprint(top: Path, names) -> str:
             info = (top / name).stat()
         except OSError:  # (gone meanwhile)
             continue
-        line = "%s\0%d\0%d\n" % (name, info.st_size, info.st_mtime_ns)
+        line = f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n"
         seen.update(line.encode("utf-8", "surrogateescape"))
     return seen.hexdigest()
 
@@ -1120,7 +1127,7 @@ def restore(repo: Path, path: str) -> None:
 
 
 def stop_note_path(c: dict) -> str:
-    return "agent-runs/%s/stopped.json" % c["name"]
+    return f"agent-runs/{c['name']}/stopped.json"
 
 
 def stop_note(c: dict, reason: str) -> dict:
@@ -1152,7 +1159,7 @@ def save(reason: str, final: bool = False) -> dict:
         return res
     busy = any((repo / ".git" / f).exists() for f in GIT_BUSY)
     if busy or git("symbolic-ref", "-q", "--short", "HEAD", check=False).strip() != branch:
-        res["error"] = "a merge or rebase is in progress" if busy else "the repo is not on %s" % branch
+        res["error"] = "a merge or rebase is in progress" if busy else f"the repo is not on {branch}"
     else:
         git("add", "-u")
         added, total, skipped = [], 0, []
@@ -1173,7 +1180,7 @@ def save(reason: str, final: bool = False) -> dict:
             git("add", "-f", "--", note_path)  # (-f: even where the repo's .gitignore would leave it out)
         staged = [f for f in git("diff", "--cached", "--name-only", "-z").split("\0") if f]
         if staged:
-            p = run(["git", "commit", "-q", "-m", "Autosave (%s)" % reason], cwd=str(repo))
+            p = run(["git", "commit", "-q", "-m", f"Autosave ({reason})"], cwd=str(repo))
             if p.returncode:
                 git("reset", "-q")
                 res["error"] = "not committed: " + last_line(p.stderr or p.stdout)
@@ -1182,7 +1189,7 @@ def save(reason: str, final: bool = False) -> dict:
             else:
                 res["committed"] = len([f for f in staged if f != note_path])
                 res["note_committed"] = final
-    p = run(["git", "push", "-q", "origin", "refs/heads/%s:refs/heads/%s" % (branch, branch)], cwd=str(repo))
+    p = run(["git", "push", "-q", "origin", f"refs/heads/{branch}:refs/heads/{branch}"], cwd=str(repo))
     res["pushed"] = p.returncode == 0
     if p.returncode and not res["error"]:
         res["error"] = "push failed: " + last_line(p.stderr)
@@ -1197,9 +1204,7 @@ def cmd_check() -> int:
     repo, branch = Path(c["repo_dir"]), c["branch"]
     if (repo / ".git").exists():
         git("fetch", "-q", "origin", branch, check=False, timeout=60)
-        res["unpushed"] = int(
-            git("rev-list", "--count", "origin/%s..HEAD" % branch, check=False).strip() or 0
-        )
+        res["unpushed"] = int(git("rev-list", "--count", f"origin/{branch}..HEAD", check=False).strip() or 0)
     res.update(left_behind(repo))
     return out(res)
 
@@ -1233,7 +1238,7 @@ def cmd_send(text: str) -> int:
     c = cfg()
     if frontend(c) == "vscode":
         raise RuntimeError(
-            "it works in VS Code, not in tmux: type to it there (crab-student open %s --vscode)" % c["name"]
+            f"it works in VS Code, not in tmux: type to it there (crab-student open {c['name']} --vscode)"
         )
     type_to_agent(text)
     return out({"sent": True})
@@ -1248,10 +1253,10 @@ def cmd_declare(args: list) -> int:
     if not args:
         a, st = read_agent(), load_state()
         if machine_mode(c) != "interactive":
-            print("status: %s - %s" % (a.get("state", "not set"), a.get("message", "")))
+            print(f"status: {a.get('state', 'not set')} - {a.get('message', '')}")
         print(
-            "the machine has run for %s since it was started; it stops after %d min without activity"
-            % (fmt_hours(st["used_seconds"] / 3600), c["idle_minutes"])
+            f"the machine has run for {fmt_hours(st['used_seconds'] / 3600)} since it was started; it stops after "
+            f"{c['idle_minutes']} min without activity"
         )
         return 0
     if machine_mode(c) == "interactive":
@@ -1273,12 +1278,11 @@ def cmd_declare(args: list) -> int:
         problems = done_problems(c)
         if problems:
             print(
-                "not done yet: %s. Commit and push (git push), then run agent-status done again."
-                % "; ".join(problems)
+                f"not done yet: {'; '.join(problems)}. Commit and push (git push), then run agent-status done again."
             )
             return 1
     write(D / "agent.json", json.dumps({"state": state, "message": message, "at": int(time.time())}))
-    print("status: %s - %s" % (state, message))
+    print(f"status: {state} - {message}")
     return 0
 
 
@@ -1305,16 +1309,17 @@ def cmd_handoff(args: list) -> int:
         return 1
     write_rules(c, mode)
     (ROOT / ".claude" / "commands" / "handoff.md").unlink(missing_ok=True)
-    write(D / "session_id", str(uuid.uuid4()), 0o600)
-    save_handoff({"mode": mode, "from": sid, "prompt": prompt, "at": int(time.time())})
+    new = str(uuid.uuid4())
+    write(D / "session_id", new, 0o600)
+    save_handoff({"mode": mode, "from": sid, "to": new, "prompt": prompt, "at": int(time.time())})
     drop_inherited()  # (this runs under the Claude Code in VS Code: its variables must not reach the agent)
     spawn_watchdog()
     ensure_agent_session(c)
     # (at most 90 s: Claude Code cuts a Bash command off after 2 minutes by default)
     how = "now continues" if agent_started(c, 90) else "is starting (it can take a minute) to continue"
     print(
-        "Handed over: a %s agent %s this conversation in tmux on this machine. Stop here: end your turn without "
-        "further work, and tell the user they can close VS Code." % (mode, how)
+        f"Handed over: a {mode} agent {how} this conversation in tmux on this machine. Stop here: end your turn "
+        "without further work, and tell the user they can close VS Code."
     )
     return 0
 
@@ -1331,29 +1336,26 @@ def this_conversation(given: list):
 def done_problems(c: dict) -> list:
     problems = []
     if run(["git", "ls-files", "--error-unmatch", report_path(c)], cwd=c["repo_dir"]).returncode:
-        problems.append("%s is not committed" % report_path(c))
+        problems.append(f"{report_path(c)} is not committed")
     dirty = [x[3:] for x in git("status", "--porcelain").splitlines() if x.strip()]
     if dirty:
-        problems.append("%d file(s) are not committed (%s)" % (len(dirty), ", ".join(dirty[:3])))
+        problems.append(f"{len(dirty)} file(s) are not committed ({', '.join(dirty[:3])})")
     git("fetch", "-q", "origin", c["branch"], check=False, timeout=30)
-    ahead = int(git("rev-list", "--count", "origin/%s..HEAD" % c["branch"], check=False).strip() or 0)
+    ahead = int(git("rev-list", "--count", f"origin/{c['branch']}..HEAD", check=False).strip() or 0)
     if ahead:
-        problems.append("%d commit(s) are not pushed" % ahead)
+        problems.append(f"{ahead} commit(s) are not pushed")
     return problems
 
 
 def cmd_hook(name: str, args: list) -> int:
     c = cfg()
     if name == "pre-push":
-        want = "refs/heads/%s" % c["branch"]
+        want = f"refs/heads/{c['branch']}"
         for line in sys.stdin.read().splitlines():
             parts = line.split()
             if len(parts) == 4 and (parts[2] != want or set(parts[1]) == {"0"}):
                 what = "delete " + c["branch"] if parts[2] == want else parts[2]
-                print(
-                    "Refused: this machine may push only to %s, not %s." % (c["branch"], what),
-                    file=sys.stderr,
-                )
+                print(f"Refused: this machine may push only to {c['branch']}, not {what}.", file=sys.stderr)
                 return 1
         return 0
     secrets = dict(
@@ -1375,8 +1377,8 @@ def cmd_hook(name: str, args: list) -> int:
             for secret, value in secrets.items():
                 if len(value) >= 8 and value in line:
                     print(
-                        "Refused: %s contains the value of secret %s. Use the environment variable instead."
-                        % (current, secret),
+                        f"Refused: {current} contains the value of secret {secret}. Use the environment variable "
+                        "instead.",
                         file=sys.stderr,
                     )
                     return 1
@@ -1384,8 +1386,8 @@ def cmd_hook(name: str, args: list) -> int:
         path = Path(c["repo_dir"]) / f
         if path.is_file() and path.stat().st_size > 50_000_000:
             print(
-                "Refused: %s is %.1f GB: keep big files out of git (add it to .gitignore; put outputs in "
-                "/root/outputs)." % (f, path.stat().st_size / 1e9),
+                f"Refused: {f} is {path.stat().st_size / 1e9:.1f} GB: keep big files out of git (add it to "
+                ".gitignore; put outputs in /root/outputs).",
                 file=sys.stderr,
             )
             return 1

@@ -25,7 +25,16 @@ from pathlib import Path, PurePosixPath
 from crab_student import core
 
 REMOTE_DIR = "/root/crab-student"
-PY = 'exec "$(command -v python3 || echo /venv/main/bin/python)"'
+MIN_PYTHON = (3, 11)  # (the local side's too: the tests run the machine code on it)
+# The machine code runs on the first Python new enough among the image's python3 and /venv/main's. Setup links
+# it as D/python, and everything after runs that link (the commands over ssh, the watchdog Vast's onstart
+# starts, the scripts setup writes): an ssh command's PATH and the onstart command's may differ.
+SETUP = (
+    'for p in "$(command -v python3)" /venv/main/bin/python; do '
+    f'"$p" -c "import sys; sys.exit(sys.version_info < {MIN_PYTHON})" 2>/dev/null && ln -sf "$p" python && '
+    "exec ./python cs.py setup; done; "
+    f"echo 'the image needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer' >&2; exit 1"
+)
 REMOTE_SRC = Path(__file__).parent / "remote"
 ALIAS_PREFIX = "crab-student-"  # (agents' ssh host names)
 REMOTE_PLATFORM = "remote.SSH.remotePlatform"  # (VS Code: which hosts run Linux)
@@ -115,7 +124,7 @@ def ssh_cmd(name: str, *, tty: bool = False) -> list[str]:
 
 
 def _remote_command(args: list[str]) -> str:
-    return f"cd {REMOTE_DIR} && {PY} cs.py {' '.join(shlex.quote(a) for a in args)}"
+    return f"cd {REMOTE_DIR} && exec ./python cs.py {' '.join(shlex.quote(a) for a in args)}"
 
 
 def remote(name: str, args: list[str], *, input: bytes | None = None, timeout: float = 60) -> dict:
@@ -182,16 +191,17 @@ def upload_and_setup(
     name: str, data: bytes, on_line: Callable[[str], None], timeout: float = 3600
 ) -> list[str]:
     """One ssh call: unpack the bundle, run setup (which installs the project's dependencies too), pass its
-    "step i/N ..." lines on as they come; setup's warnings. Anything but setup's own answer (a lost connection,
-    a timeout) is Unreachable: the launch can continue."""
+    "step i/N ..." lines on as they come; setup's warnings. Without setup's answer, a lost connection (ssh's
+    exit 255) or the timeout is Unreachable (the launch can continue); any other exit is a failed setup."""
     cmd = [
         *ssh_cmd(name),
         "-o",
         "ConnectTimeout=15",
-        f"mkdir -p {REMOTE_DIR} && tar -xzf - -C {REMOTE_DIR} --no-same-owner && {_remote_command(['setup'])}",
+        f"mkdir -p {REMOTE_DIR} && tar -xzf - -C {REMOTE_DIR} --no-same-owner && cd {REMOTE_DIR} && {{ {SETUP}; }}",
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err: list[bytes] = []
+    timed_out = threading.Event()
 
     def feed() -> None:
         try:
@@ -200,13 +210,17 @@ def upload_and_setup(
         except OSError:
             pass
 
+    def time_out() -> None:
+        timed_out.set()
+        proc.kill()
+
     threads = [
         threading.Thread(target=feed, daemon=True),
         threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True),
     ]
     for t in threads:
         t.start()
-    timer = threading.Timer(timeout, proc.kill)
+    timer = threading.Timer(timeout, time_out)
     timer.start()
     last = ""
     try:
@@ -224,10 +238,10 @@ def upload_and_setup(
     try:
         result = json.loads(last)
     except ValueError:
-        stderr = b"".join(err).decode("utf-8", "replace")
-        raise Unreachable(
-            f"the upload and setup on {name} did not finish ({core.last_line(stderr or last)})."
-        ) from None
+        why = core.last_line(b"".join(err).decode("utf-8", "replace") or last)
+        if proc.returncode == 255 or timed_out.is_set():  # (setup's outcome is unknown)
+            raise Unreachable(f"the upload and setup on {name} did not finish ({why}).") from None
+        raise core.CrabError(f"setup failed on {name}: {why}", 5) from None
     if not result.get("ok"):
         raise core.CrabError(
             f"setup failed at step {result.get('step')} ({result.get('label')}): {result.get('error')}", 5
@@ -235,7 +249,7 @@ def upload_and_setup(
     return result.get("warnings") or []
 
 
-# Run on the machine by outputs_state and fetch_outputs (Python 3.8 syntax): on the stdin of its Python, in the
+# Run on the machine by outputs_state and fetch_outputs: on the stdin of its Python (D/python), in the
 # folder of cs.py, with "state" or "copy" as its argument. It goes through the files the machine's own check
 # counts in /root/outputs (cs.files_under: a link to a file as that file) and prints, last on stderr, {files,
 # bytes, digest}; the digest is a fingerprint of every file's path, size and time of last change. "copy" also
@@ -291,7 +305,7 @@ print(json.dumps(result), file=sys.stderr)
 
 
 def _outputs_command(name: str, mode: str) -> list[str]:
-    return [*ssh_cmd(name), "-o", "ConnectTimeout=15", f"cd {REMOTE_DIR} && {PY} - {mode}"]
+    return [*ssh_cmd(name), "-o", "ConnectTimeout=15", f"cd {REMOTE_DIR} && exec ./python - {mode}"]
 
 
 def _outputs_result(name: str, code: int, stderr: bytes) -> dict | None:

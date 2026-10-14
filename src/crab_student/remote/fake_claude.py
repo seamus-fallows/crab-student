@@ -38,7 +38,7 @@ def main(argv: list) -> int:
     def step(*cmd: str) -> int:
         time.sleep(SLEEP)
         rc = subprocess.run(list(cmd)).returncode
-        note("tool", "%s -> %d" % (" ".join(cmd), rc))
+        note("tool", f"{' '.join(cmd)} -> {rc}")
         return rc
 
     if resume and not fork:
@@ -58,7 +58,7 @@ def main(argv: list) -> int:
         if not (runs / "REPORT.md").exists():
             note("early-done", str(step("agent-status", "done", "too early")))  # (refused: no report yet)
         (runs / "REPORT.md").write_text(
-            "# %s: fake run\n\nStatus: done\n\n## Summary\nA fake agent ran.\n" % name
+            f"# {name}: fake run\n\nStatus: done\n\n## Summary\nA fake agent ran.\n"
         )
         step("git", "add", "-A")
         step("git", "commit", "-q", "-m", "fake: report")
@@ -66,8 +66,9 @@ def main(argv: list) -> int:
         step("agent-status", "done", "fake run finished")
     print("fake-claude: ready", flush=True)
     for line in sys.stdin:
-        note("user", line.rstrip("\n"))
-        print('fake-claude: got "%s"' % line.rstrip("\n"), flush=True)
+        text = line.rstrip("\n")
+        note("user", text)
+        print(f'fake-claude: got "{text}"', flush=True)
     while True:  # (like the real screen, it stays until someone quits it)
         time.sleep(3600)
 

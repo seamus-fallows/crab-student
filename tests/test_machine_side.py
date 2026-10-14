@@ -118,8 +118,8 @@ def last_json(capsys) -> dict:
     return json.loads(capsys.readouterr().out.splitlines()[-1])
 
 
-def set_agent(cs, state: str, message: str = "") -> None:
-    (cs.D / "agent.json").write_text(json.dumps({"state": state, "message": message, "at": 0}))
+def set_agent(cs, state: str, message: str = "", at: int = 0) -> None:
+    (cs.D / "agent.json").write_text(json.dumps({"state": state, "message": message, "at": at}))
 
 
 def secret_files(cs, secrets: dict, token: str = TOKEN) -> None:
@@ -153,10 +153,12 @@ def make_transcript(cs, sid: str, folder: str = "-root-work-proj") -> Path:
 
 
 def handed_off(cs, **fields) -> dict:
-    """handoff.json as agent-handoff leaves it (from: a new VS Code conversation, unless given), with changes."""
-    h = dict({"mode": "colleague", "prompt": "finish the tests", "at": 0}, **fields)
+    """handoff.json and session_id as agent-handoff leaves them (from: a new VS Code conversation, to: a new
+    session id, unless given), with changes."""
+    h = dict({"mode": "colleague", "to": str(uuid.uuid4()), "prompt": "finish the tests", "at": 0}, **fields)
     if "from" not in h:
         h["from"] = make_transcript(cs, str(uuid.uuid4())).stem
+    (cs.D / "session_id").write_text(h["to"])
     (cs.D / "handoff.json").write_text(json.dumps(h))
     return h
 
@@ -257,10 +259,10 @@ def test_a_running_job_keeps_a_finished_agents_machine_up(cs):
     assert first_stop(seen) == ("stop:done", 160)
 
 
-@pytest.mark.parametrize("mode, state, nudges", [("colleague", "needs-you", [30, 70]), ("colleague", "working", []),
+@pytest.mark.parametrize("mode, state, nudges", [("colleague", "needs-you", [30]), ("colleague", "working", []),
                                                  ("colleague", "done", []), ("autonomous", "needs-you", []),
                                                  ("interactive", "needs-you", [])])  # fmt: skip
-def test_only_a_colleague_that_asked_is_nudged_once_per_quiet_stretch(cs, mode, state, nudges):
+def test_only_a_colleague_that_asked_is_nudged(cs, mode, state, nudges):
     st, probe, c = watchdog(cs, idle_minutes=60, mode=mode)
     set_agent(cs, state)
 
@@ -286,6 +288,29 @@ def test_a_check_in_comes_once_per_silent_stretch_to_an_agent_in_tmux(cs, mode, 
 
     seen = run_minutes(cs, st, probe, c, range(1, 80), busy_and_a_word_at_40)
     assert minutes_with(seen, "check-in") == check_ins
+
+
+@pytest.mark.parametrize("state, reminder", [("needs-you", "nudge"), ("working", "check-in")])
+@pytest.mark.parametrize("event", [None, "status update", "cpu", "gpu"])
+def test_an_agent_that_cannot_answer_gets_one_reminder_and_its_machine_stops_on_schedule(
+    cs, state, reminder, event
+):
+    """A reminder grows the conversation itself (an activity): only the agent's own doing at minute 45 (a
+    status update, CPU or GPU work) brings another."""
+    st, probe, c = watchdog(cs, idle_minutes=60, mode="colleague")
+    set_agent(cs, state)
+    seen = {}
+    for m in range(1, 200):
+        if m == 45 and event == "status update":
+            set_agent(cs, state, at=45)
+        probe.cpu += 60.0 if m == 45 and event == "cpu" else 0.0
+        probe.gpu = m == 45 and event == "gpu"
+        seen[m] = cs.tick(st, c, T0 + 60 * m, probe)
+        if reminder in seen[m]:
+            probe.work(m)  # (typed into the conversation, as if by the agent's user)
+    reminders = minutes_with(seen, reminder)
+    assert len(reminders) == (2 if event else 1) and reminders[-1] >= (45 if event else 0)
+    assert first_stop(seen) == ("stop:idle", reminders[-1] + 61)  # (idle_minutes after the last one)
 
 
 def test_after_a_hand_off_the_watchdog_treats_the_agent_by_its_new_mode(cs):
@@ -766,7 +791,8 @@ def test_claude_argv_for_a_new_a_resumed_and_a_restarted_conversation(cs):
 
 def test_claude_argv_after_a_hand_off_forks_the_vs_code_conversation(cs):
     c = set_config(cs, mode="interactive")
-    sid, h = c["session_id"], handed_off(cs, mode="autonomous", prompt="finish the tests")
+    h = handed_off(cs, mode="autonomous", prompt="finish the tests")
+    sid = cs.session_id(c)
     fork = cs.claude_argv(c, sid, first=True, lost=False)
     assert fork[-6:-1] == ["--resume", h["from"], "--fork-session", "--session-id", sid]
     assert fork[-1].startswith("Automated message from the machine:") and fork[-1].endswith(
@@ -822,7 +848,6 @@ def test_claude_starts_a_new_conversation_when_the_saved_one_cannot_be_resumed(c
 def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, monkeypatch):
     c = set_config(cs, mode="interactive")
     h = handed_off(cs)
-    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000001")  # (what agent-handoff chose)
 
     def claude(argv):
         if "--fork-session" in argv:
@@ -831,15 +856,14 @@ def test_a_forked_conversation_is_resumed_under_its_own_id_after_it_exits(cs, mo
 
     calls = run_claude(cs, monkeypatch, claude, presses=1)
     new = cs.session_id(c)
-    assert new == "f0f0f0f0-0000-4000-8000-000000000001" and cs.transcript(new)
-    assert calls[0][-6:-2] == ["--resume", h["from"], "--fork-session", "--session-id"]
+    assert new == h["to"] and cs.transcript(new)  # (the id agent-handoff chose)
+    assert calls[0][-6:-1] == ["--resume", h["from"], "--fork-session", "--session-id", new]
     assert calls[1][-2:] == ["--resume", new]
 
 
 def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_asked(cs, monkeypatch):
     c = set_config(cs, mode="interactive")
-    (cs.D / "session_id").write_text("f0f0f0f0-0000-4000-8000-000000000002")  # (what agent-handoff chose)
-    handed_off(cs, prompt="finish the tests")
+    h = handed_off(cs, prompt="finish the tests")
 
     def claude(argv):
         if "--fork-session" in argv:
@@ -851,10 +875,29 @@ def test_a_conversation_that_cannot_be_forked_starts_anew_with_what_the_user_ask
     calls = run_claude(cs, monkeypatch, claude, presses=1)
     assert [("--fork-session" in argv) for argv in calls] == [True, False, False]
     new = cs.session_id(c)
-    assert new not in ("f0f0f0f0-0000-4000-8000-000000000002", cs.read_handoff()["from"])
+    assert new not in (h["to"], h["from"])
     assert calls[1][-3:-1] == ["--session-id", new] and calls[1][-1].startswith(cs.FIRST_PROMPT + cs.LOST)
-    assert calls[1][-1].endswith("finish the tests") and cs.read_handoff()["fork_failed"]
+    assert calls[1][-1].endswith("finish the tests")
     assert calls[2][-2:] == ["--resume", new]  # (the new conversation from then on, never a fork again)
+
+
+def test_a_hand_off_is_forked_once_even_when_its_conversation_is_given_up_later(cs, monkeypatch):
+    """The forked conversation cannot be resumed later: a new one starts from the brief, told so. Forking the
+    VS Code conversation again would silently drop everything done in tmux since."""
+    c = set_config(cs, mode="interactive")
+    h = handed_off(cs, prompt="finish the tests")
+
+    def claude(argv):
+        if "--session-id" in argv:  # (the fork, or a new conversation: saved as soon as it starts)
+            make_transcript(cs, argv[argv.index("--session-id") + 1])
+            return 0
+        return 1  # (resuming the forked conversation fails at once)
+
+    calls = run_claude(cs, monkeypatch, claude, presses=1)
+    new = cs.session_id(c)
+    assert [("--fork-session" in argv) for argv in calls] == [True, False, False]
+    assert calls[1][-2:] == ["--resume", h["to"]] and new != h["to"]
+    assert calls[2][-3:-1] == ["--session-id", new] and calls[2][-1].startswith(cs.FIRST_PROMPT + cs.LOST)
 
 
 # ---- the hand-off --------------------------------------------------------------------------------
@@ -894,7 +937,7 @@ def test_handoff_switches_the_mode_writes_the_rules_and_starts_the_agent_in_tmux
     assert (cs.machine_mode(c), cs.frontend(c)) == ("autonomous", "tmux") and c["mode"] == "interactive"
     assert "## Work on your own" in (cs.ROOT / ".claude" / "CLAUDE.md").read_text()
     assert not (cs.ROOT / ".claude" / "commands" / "handoff.md").exists()
-    assert cs.session_id(c) not in (c["session_id"], interactive.sid)
+    assert cs.session_id(c) == h["to"] and h["to"] not in (c["session_id"], interactive.sid)  # (forked into)
     assert interactive.started == [[]]  # (once, with none of the VS Code Claude's variables)
     assert cs.cmd_handoff(["colleague"]) == 1 and cs.read_handoff() == h  # (once only)
 
@@ -1182,6 +1225,26 @@ def test_fake_claude_works_a_tiny_task_through_to_done_and_forks_like_claude(cs,
     assert fork.read_text().startswith(transcript.read_text().splitlines()[0])
 
 
+@pytest.mark.parametrize("tick_fails", [False, True])
+def test_the_heartbeat_says_a_watchdog_tick_was_done(cs, monkeypatch, tick_fails):
+    """A tick that fails every minute must not keep the dead-man switch satisfied."""
+
+    class OneTick(Clock):
+        def sleep(self, seconds: float) -> None:
+            raise EndOfTest
+
+    monkeypatch.setattr(cs, "time", OneTick())
+    monkeypatch.setattr(cs, "_lock", lambda path, wait=False: path)  # (flock: one watchdog per container)
+    monkeypatch.setattr(os, "environ", os.environ.copy())  # (the watchdog edits its own environment)
+    monkeypatch.setattr(cs, "Probe", FakeProbe)
+    monkeypatch.setattr(cs, "ensure_agent_session", lambda c: None)
+    if tick_fails:
+        monkeypatch.setattr(cs, "tick", lambda *a: 1 / 0)
+    with pytest.raises(EndOfTest):
+        cs.cmd_watch()
+    assert (cs.D / "heartbeat").exists() is not tick_fails
+
+
 @posix_only
 def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_start(cs, tmp_path):
     tmux = tmp_path / "tools" / "tmux"
@@ -1194,7 +1257,7 @@ def test_one_watchdog_per_container_and_machine_time_counts_from_the_latest_star
     watch = [sys.executable, str(CS_PY), "watch"]
     first = subprocess.Popen(watch, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        assert wait_for(lambda: cs.load_state()["boot"] == 2000.0, 30)
+        assert wait_for(lambda: cs.load_state()["boot"] == 2000.0 and (cs.D / "heartbeat").exists(), 30)
         assert subprocess.run(watch, env=env, capture_output=True, timeout=30).returncode == 0  # left at once
         st = cs.load_state()
         assert 0 <= st["used_seconds"] < 20 and st["stopping"] is None and (cs.D / "heartbeat").exists()

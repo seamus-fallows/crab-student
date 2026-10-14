@@ -112,9 +112,10 @@ For colleague and autonomous, use these headings, each with what the agent needs
 - **Context** - the repo, the files that matter, where the data is and how big it is.
 - **What to do** - steps, experiments, parameters, scope.
 - **Deliverables and success criteria** - what evidence the report must show.
-- **Constraints** - your time estimate if you made one, where big outputs go (`/root/outputs`), what
-  not to change. Long jobs should run in the background with a log, because the machine stops itself
-  when nothing is running and nobody is talking to the agent.
+- **Constraints** - your time estimate if you made one, where big outputs go (where the user said, e.g.
+  a Hugging Face repo, with its secret attached; else `/root/outputs`), what not to change. Long jobs
+  should run in the background with a log, because the machine stops itself when nothing is running and
+  nobody is talking to the agent.
 - **Secrets available** - names only.
 - **Preferences** - anything the user already said about how to do it.
 

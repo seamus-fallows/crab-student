@@ -25,9 +25,9 @@ the code does it is in the modules named here.
    and is tried again by `start`) or right after its setup failed. `start` on a stopped agent never
    destroys. `delete` checks for unsaved work first (5.3).
 5. **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
-   activity, done or not, always saving first. The dead-man switch stops it if the watchdog never runs
-   or dies; setup refuses a machine with no key to stop itself; `list`/`status` stop a machine whose own
-   stop call Vast has not taken after 5 minutes. Nothing on the machine destroys it.
+   activity, done or not, always saving first. The dead-man switch stops it if the watchdog never runs,
+   dies or keeps failing; setup refuses a machine with no key to stop itself; `list`/`status` stop a
+   machine whose own stop call Vast has not taken after 5 minutes. Nothing on the machine destroys it.
 6. **Secrets** (the Claude token, deploy keys, task secrets) never appear on command lines, in logs, the
    brief, records or git. They reach the machine only inside the upload stream, as 0600 files (and in
    its 0600 `~/.claude/settings.json`).
@@ -123,8 +123,9 @@ per rent request); agent repo `<login>/<repo>-agents`; deploy key title `crab-st
    fails, naming the label. Vast out of reach meanwhile is waited out (the timeouts decide). Every
    offer failed: exit 4. While the machine boots, the agent repo, its deploy key (4.2) and the branch go
    on GitHub; a failure there destroys the machine and fails the launch.
-4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's own failure destroys
-   the machine and fails the launch (exit 5); a lost connection leaves `setup`.
+4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Without setup's result, ssh's
+   exit 255 (a lost connection) or the call's 1-hour timeout leaves `setup`; any other failure, setup's
+   own or its command's, destroys the machine and fails the launch (exit 5).
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
    and setup, which resumes. Any other (`renting`, `failed`) is tried again, its machine destroyed first
    if it has one (by id, or found by its label; nothing was uploaded to it). Trying again takes the
@@ -198,7 +199,7 @@ NAME (dry run): would rent SHORT at $X/hr - MODE - no approval needed
 (in parallel). States: approval; starting; interrupted (a launch cut off: nobody holds its lock);
 failed; unknown (Vast or ssh did not answer); stopped (why, how long ago, the disk's cost per day);
 needs you; done; working; interactive (Claude in VS Code: active, or idle for how long). A `status`
-reporting another mode (after a hand-off) updates the record; a stopped machine seen running again moves
+reporting another mode (after a hand-off) updates the record; a stopped machine Vast starts again moves
 `last_start`. `list` warns on stderr about orphans: instances whose label ends in `-<install id>-<4 hex>`
 whose id and label no record has (a rent Vast did not confirm that went through after all).
 
@@ -280,14 +281,18 @@ total.
 `/root/outputs`; the brief at `/root/BRIEF.md` (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command, `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&
-<python> cs.py setup`, with a tar.gz on stdin: the `remote/` files (`fake_claude.py` only for
-`--fake-claude`), `config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings,
-fake_claude, session_id, idle_minutes, notify_url, secret_names, setup, vscode_commit), `BRIEF.md`,
-`claude.env` and `secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600),
-`github_known_hosts`. Setup prints `step i/6 <label>` lines, then `{"ok": true, "warnings": [...]}` or
-`{"ok": false, "step", "label", "error"}`; once `setup-done` exists it only restarts the watchdog
-(`{"ok": true, "resumed": true}`). A setup run again (after a lost connection) waits on `setup.lock` for
-the first; each step touches `heartbeat`, so the dead-man switch waits for a long step. The steps:
+...`, with a tar.gz on stdin: the `remote/` files (`fake_claude.py` only for `--fake-claude`),
+`config.json` (0600: name, branch, repo_url, repo_dir, mode, claude_settings, fake_claude, session_id,
+idle_minutes, notify_url, secret_names, setup, vscode_commit), `BRIEF.md`, `claude.env` and
+`secrets.env` (0600, `export K=<quoted>` lines), `deploy_key` (0600), `github_known_hosts`. The command
+links the first Python 3.11 or newer (`machine.MIN_PYTHON`) among `python3` and `/venv/main/bin/python`
+as `D/python` and runs `./python cs.py setup`; with none, it exits 1, saying the image needs Python
+3.11 or newer (a failed setup: exit 5). Everything after runs `D/python`: the commands over ssh (6.8),
+the watchdog (6.2) and the scripts setup writes. Setup prints `step i/6 <label>` lines, then
+`{"ok": true, "warnings": [...]}` or `{"ok": false, "step", "label", "error"}`; once `setup-done`
+exists it only restarts the watchdog (`{"ok": true, "resumed": true}`). A setup run again (after a lost
+connection) waits on `setup.lock` for the first; each step touches `heartbeat`, so the dead-man switch
+waits for a long step. The steps:
 
 1. `environment`: the login profile `/etc/profile.d/agent.sh`, also run from `~/.bashrc` (PATH with the
    repo's `.venv`, `~/.local/bin`, `/venv/main`; the token and secrets; shells start in the repo); the
@@ -310,20 +315,25 @@ the first; each step touches `heartbeat`, so the dead-man switch waits for a lon
 
 **6.2 onstart** (run by Vast as root at every container start; each command ends in `;` or `&`): write
 `CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` (0600) and the start time to `booted`;
-start the dead-man loop; start the watchdog if `setup-done` exists. **Dead-man loop:** every 60 s, if
-the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast stop with the
-container's key.
+start the dead-man loop; start the watchdog (`./python cs.py watch`) if `setup-done` exists. **Dead-man
+loop:** every 60 s, if the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast
+stop with the container's key.
 
 **6.3 The watchdog** (`cs.py watch`, one per container by flock; `status` and `agent-attach` start it
-if it is not running). Every minute: touch `heartbeat`; while the frontend is `tmux`, keep the tmux
-session `agent` (running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files
-under `~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy, or
-the outputs are being copied off the machine (`D/copying` touched within the last two minutes: 5.5).
-Colleague: a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a
-check-in after a long silence while it says `working`. Typed messages start with `Automated message
-from the machine:`. **Stop** after `idle_minutes` idle, done or not: set `stopping`, notify, final save
-(6.7), record `stop_sent_at`, call Vast stop with the container's key, retried every tick; `stop_reason`
-is `idle` or `done`. A new container start resets the clocks. Notifications go to `notify_url`.
+if it is not running). Every minute: while the frontend is `tmux`, keep the tmux session `agent`
+(running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files under
+`~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy, or the
+outputs are being copied off the machine (`D/copying` touched within the last two minutes: 5.5; a copy
+is not the agent doing something, so it brings no reminder back). Colleague:
+a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a check-in
+after 20 minutes without the conversation growing while it says `working`. Each comes again only once
+the agent itself did something: a status update (`agent.json`'s `at`), CPU or GPU work. (A reminder
+grows the conversation, an activity: an agent that cannot answer gets one, and its machine stops
+`idle_minutes` later.) Typed messages start with `Automated message from the machine:`. **Stop** after
+`idle_minutes` idle, done or not: set `stopping`, notify, final save (6.7), record `stop_sent_at`, call
+Vast stop with the container's key, retried every tick; `stop_reason` is `idle` or `done`. A tick that
+did all this touches `heartbeat` last: one that fails leaves it, so the dead-man switch (6.2) stops a
+watchdog that keeps failing. A new container start resets the clocks. Notifications go to `notify_url`.
 
 **6.4 Modes.** The machine's mode starts as the launch's and changes only by hand-off (6.6).
 
@@ -350,11 +360,13 @@ with]`, or asks in words. The command has Claude commit and push, run `agent-han
 --session=${CLAUDE_SESSION_ID} <mode> "<what to continue with>"` (default `colleague`), and end its
 turn. `agent-handoff` refuses once handed off; the conversation is the `--session=` one, else
 `CLAUDE_CODE_SESSION_ID` (the first that names a saved transcript; neither: refused). It writes the
-mode's rules, removes `/handoff`, picks a new session id, writes `handoff.json` `{mode, from, prompt,
-at}` (the machine's mode is now that mode), starts the tmux session and waits up to 90 s for Claude. In
-tmux, `claude --resume <from> --fork-session --session-id <new id> "<hand-off prompt>"` continues the
-whole conversation under the new id; if that fails at once, a new conversation starts from the brief
-with what the user asked for. `status` then reports the new mode and `tmux`.
+mode's rules, removes `/handoff`, picks a new session id, writes `handoff.json` `{mode, from, to (the
+new id), prompt, at}` (the machine's mode is now that mode), starts the tmux session and waits up to
+90 s for Claude. In tmux, `claude --resume <from> --fork-session --session-id <to> "<hand-off prompt>"`
+continues the whole conversation under the new id. The fork is made only into `to`: when it, or later
+a resume of the conversation it made, fails at once, a new conversation (a new id) starts from the
+brief with what the user asked for, and the VS Code conversation is never forked again. `status` then
+reports the new mode and `tmux`.
 
 **6.7 Save before stopping.** On the agent's branch and not mid-merge or rebase: stage tracked changes
 and untracked files up to 10 MB each (100 MB in all), commit `Autosave (<reason>)` unless the
@@ -366,7 +378,7 @@ file's path, size and time of last change that `machine.OUTPUTS_SCRIPT` takes to
 the same formula). A refused commit leaves no note. The note on the branch is the only record of a
 stop; `delete` reads it.
 
-**6.8 Commands over ssh** (`cd D && <python> cs.py ...`; each prints one JSON object last; a failure
+**6.8 Commands over ssh** (`cd D && ./python cs.py ...`; each prints one JSON object last; a failure
 prints `{"error": ...}` and exits 1):
 
 - `status`: name, mode, frontend, agent `{state, message, at}` (`{}` until set), idle_seconds,

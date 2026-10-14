@@ -21,15 +21,15 @@ machine, not from the user.
   the machine stops.
 - Push only `{{branch}}`. Never force-push, change remotes or hooks, or use `--no-verify`.
 - Keep big files (over 50 MB), datasets, checkpoints, caches and virtualenvs out of git with
-  `.gitignore`. Put big outputs in `/root/outputs/` and list them in your report.
+  `.gitignore`. Put big outputs where the brief says, else in `/root/outputs/`, and list them in your
+  report.
 - Keep your notes, report and small results (tables, plots, JSON under 5 MB) in `agent-runs/{{name}}/`.
 - The machine writes `agent-runs/{{name}}/stopped.json` when it stops. Leave that file alone.
 
 ## Long jobs
 
-- A single Bash command is cut off after about 10 minutes. Run anything longer in the background:
-  `nohup <command> > agent-runs/{{name}}/logs/<job>.log 2>&1 &`, and note its PID.
-- Check on it with `tail` and `sleep` (at most 9 minutes per call), and keep checking until it ends.
+- Run long jobs in the background, `nohup <command> > agent-runs/{{name}}/logs/<job>.log 2>&1 &`, note
+  the PID, and keep checking on it until it ends.
 - Save checkpoints, so a restart can resume instead of starting over.
 - `nvidia-smi` shows the GPUs.
 
@@ -44,8 +44,9 @@ machine, not from the user.
 ## When the machine stops
 
 - The machine stops itself after {{idle_minutes}} minutes with nothing happening: no CPU or GPU work
-  and no progress in this conversation. A running job keeps it going. It commits and pushes your work
-  before stopping, but push yourself anyway.
+  and no progress in this conversation. A job keeps it going only while it uses the CPU or GPU, so
+  while you wait on a download or upload, check on it often enough (well within {{idle_minutes}}
+  minutes). It commits and pushes your work before stopping, but push yourself anyway.
 - There is no time limit: the user decides how long the task may take.
 - Never stop or destroy the machine yourself, and never call the Vast API: the user manages the machine
   from their own computer.

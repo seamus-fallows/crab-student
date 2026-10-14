@@ -114,7 +114,8 @@ def test_failures_go_to_stderr_with_their_exit_code(exc, code, monkeypatch, caps
      "wait --timeout 0", "wait --timeout soon", "fetch", "fetch job1 job2", "spend job1",
      "delete job1 --f", "delete job1 --forc", "fetch job1 --t results", "launch job1 --off 1",
      "launch job1 --offers 1 --mode solo", "launch job1 --offers 1 --effort max", "launch job1 --offers 1 --fast on",
-     "launch --offers 1", "start job1 --offers 1,a", "approve", "approve job1 job2"],
+     "launch --offers 1", "start job1 --offers 1,a", "approve", "approve job1 job2",
+     "delete job1 --fo", "--vers"],  # (no abbreviated flags: the permission rules ask before --force)
 )  # fmt: skip
 def test_usage_mistakes_exit_2(argv, launched, capsys):
     assert exit_code(argv.split()) == 2 and not launched

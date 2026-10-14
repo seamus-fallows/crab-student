@@ -9,7 +9,9 @@ import os
 import subprocess
 import sys
 import tarfile
+import threading
 import urllib.parse
+from pathlib import Path
 
 import pytest
 
@@ -55,17 +57,24 @@ class Sink(io.BytesIO):
 
 
 class Upload:
-    """subprocess.Popen for the upload: stdout gives `lines`, what goes to stdin is kept."""
+    """subprocess.Popen for the upload: stdout gives `lines` (then, with `hang`, nothing more until it is
+    killed), what goes to stdin is kept."""
 
-    def __init__(self, lines: list[bytes], returncode: int = 0):
-        self.stdin, self.stdout, self.stderr = Sink(), io.BytesIO(b"\n".join(lines) + b"\n"), io.BytesIO()
+    def __init__(self, lines: list[bytes], returncode: int = 0, hang: bool = False):
+        self.stdin, self.stderr, self.killed = Sink(), io.BytesIO(), threading.Event()
+        self.stdout = self.output([line + b"\n" for line in lines], hang)
         self.returncode = returncode
+
+    def output(self, lines: list[bytes], hang: bool):
+        yield from lines
+        if hang:
+            self.killed.wait(30)
 
     def wait(self) -> int:
         return self.returncode
 
     def kill(self) -> None:
-        pass
+        self.killed.set()
 
 
 # ---- the ssh config, host keys and addresses -----------------------------------------------------
@@ -201,25 +210,55 @@ def test_the_upload_streams_setup_progress_and_a_failed_step_is_exit_5(monkeypat
 
 
 @pytest.mark.parametrize(
-    "last,returncode,outcome",
+    "last,returncode,hang,outcome",
     [
-        (b'{"ok": true}', 0, "ok"),
-        (b"step 3/6 dependencies", 255, "unreachable"),  # (the connection dropped: the launch can go on)
-        (b"Traceback (most recent call last):", 1, "unreachable"),  # (no result: start can check and go on)
+        (b'{"ok": true}', 0, False, "ok"),
+        (b"step 3/6 dependencies", 255, False, "unreachable"),  # (ssh lost the connection: it goes on)
+        (b"step 3/6 dependencies", 1, True, "unreachable"),  # (the timeout killed ssh: 1 on Windows)
+        (b"Traceback (most recent call last):", 1, False, 5),  # (setup failed before its result)
+        (b"sh: 1: exec: ./python: not found", 127, False, 5),
     ],
 )
-def test_the_upload_outcome(last, returncode, outcome, monkeypatch):
+def test_the_upload_outcome(last, returncode, hang, outcome, monkeypatch):
     monkeypatch.setattr(
-        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode)
+        subprocess, "Popen", lambda cmd, **kw: Upload([b"step 1/6 environment", last], returncode, hang)
     )
     try:
-        machine.upload_and_setup("job1", b"BUNDLE", lambda line: None)
+        machine.upload_and_setup("job1", b"BUNDLE", lambda line: None, timeout=0.2 if hang else 60)
         got = "ok"
     except machine.Unreachable:
         got = "unreachable"
     except core.CrabError as e:
         got = e.code
     assert got == outcome
+
+
+def fake_python(path: Path, version: tuple[int, int]) -> Path:
+    """A stand-in Python of `version`: it answers setup's version check, else says how it was run."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'#!/bin/sh\n[ "$1" = -c ] && exit {int(version < machine.MIN_PYTHON)}\necho "$0 $*"\n')
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell")
+@pytest.mark.parametrize("version, runs", [((3, 11), True), ((3, 13), True), ((3, 10), False)])
+def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_after(tmp_path, version, runs):
+    if Path("/venv/main/bin/python").exists():
+        pytest.skip("this computer has the image's /venv/main")
+    python3 = fake_python(tmp_path / "bin" / "python3", version)
+    d = tmp_path / "crab-student"
+    d.mkdir()
+    env = {"PATH": f"{python3.parent}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+    p = subprocess.run(
+        ["sh", "-c", machine.SETUP], cwd=d, env=env, capture_output=True, text=True, timeout=30
+    )
+    if runs:
+        program, *args = p.stdout.split()
+        assert p.returncode == 0 and Path(program).name == "python" and args == ["cs.py", "setup"]
+        assert (d / "python").resolve() == python3.resolve()
+    else:  # (no Python new enough: a failed setup, exit 5 once it reaches the local side)
+        assert p.returncode == 1 and not (d / "python").exists() and p.stderr
 
 
 # ---- fetching /root/outputs ----------------------------------------------------------------------

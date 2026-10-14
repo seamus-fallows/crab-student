@@ -30,10 +30,6 @@ ignore = ["SIM105", "SIM905"]
 [tool.ruff.lint.pycodestyle]
 max-line-length = 125  # (the formatter wraps at 110; long messages may run a little over)
 
-[tool.ruff.lint.per-file-ignores]
-# The machine side runs on the image's Python, which may be as old as 3.8.
-"src/crab_student/remote/*" = ["UP"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"

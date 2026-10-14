@@ -30,15 +30,15 @@ they ask for others (`--model`, `--effort`, `--fast`).
 
 ## Launching
 
-Do not estimate the task yourself. Start a background fork (the Agent tool, `subagent_type: "fork"`,
-`run_in_background: true`). A fork sees this conversation, including the user's exact words, so the
-prompt is only:
+Do not estimate the task yourself. Start the launcher as a background subagent, a fork
+(`subagent_type: "fork"`, `run_in_background: true`). A fork sees this conversation, including the
+user's exact words, so the prompt is only:
 
 > Run `crab-student guide launch` and follow it for the task above.
 
-If forks are not available (the Agent tool refuses "fork", as in some Claude Code environments), start a
-general-purpose background agent instead, with the task in the user's words and the context in the
-prompt (repo path, relevant files, data, secrets, the mode, model, price or hours they mentioned),
+If forks are not available (some Claude Code environments refuse `subagent_type: "fork"`), start a
+general-purpose background subagent instead, with the task in the user's words and the context in the
+prompt (repo path, relevant files, data, secret names, the mode, model, price or hours they mentioned),
 followed by the same instruction.
 
 For several agents at once (a sweep, or several tasks), start ONE launcher with all of them: it writes a

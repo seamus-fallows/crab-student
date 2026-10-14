@@ -51,6 +51,7 @@ def isolated(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     keyring.set_keyring(MemoryKeyring())
     monkeypatch.setattr(vast, "DELAYS", (0.01, 0.01))
+    monkeypatch.setattr(vast, "_ended", "")  # (what one test's expired 2FA login left behind)
     monkeypatch.setattr(launch, "POLL", 0.01)
     monkeypatch.setattr(launch, "LABEL_WAIT", 0.3)
     monkeypatch.setattr(agents, "FOLLOW_POLL", 0.01)

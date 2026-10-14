@@ -6,6 +6,7 @@ import dataclasses
 import io
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,10 +61,12 @@ def patched(monkeypatch) -> list[tuple[str, tuple]]:
     for name in ("approve", "start"):
         stand_in(launch, name, result())
     stand_in(launch, "decline", "Declined job1: nothing was rented.")
-    for name in ("stop", "delete", "send"):
+    for name in ("stop", "delete", "send", "fetch"):
         stand_in(agents, name, {"name": "job1", "result_line": f"{name}: done"})
+    stand_in(agents, "wait", {"attention": [], "result_line": "job1: done - see REPORT", "exit_code": 0})
+    stand_in(agents, "spending", {"agents": [], "deleted": [], "total_usd": 0})
     stand_in(agents, "report", "# Report\n")
-    stand_in(agents, "listing", ([view()], []))
+    stand_in(agents, "listing", ([view()], [], None))
     stand_in(agents, "view", view())
     stand_in(github, "pull", "Fetched agent/job1.")
     core.save(record())
@@ -107,6 +110,8 @@ def test_failures_go_to_stderr_with_their_exit_code(exc, code, monkeypatch, caps
      "launch job1 --offers 0", "launch job1 --offers 1 --disk nan", "launch job1 --offers 1 --hours 3",
      "offers --hours inf", "offers --hours 0", "offers --gpus 4-2", "offers --gpus two", "offers --ram -1",
      "offers --limit 0", "offers --sort fastest", "launch job1 --offers 1 --brief-file no-such-brief.md",
+     "wait --timeout 0", "wait --timeout soon", "fetch", "fetch job1 job2", "spend job1",
+     "delete job1 --f", "delete job1 --forc", "fetch job1 --t results", "launch job1 --off 1",
      "launch job1 --offers 1 --mode solo", "launch job1 --offers 1 --effort max", "launch job1 --offers 1 --fast on",
      "launch --offers 1", "start job1 --offers 1,a", "approve", "approve job1 job2"],
 )  # fmt: skip
@@ -133,7 +138,7 @@ def test_launch_json_is_one_value_with_progress_on_stderr(monkeypatch, capsys):
 
 @pytest.mark.parametrize(
     "argv",
-    ["approve job1", "start job1", "stop job1", "delete job1", "list",
+    ["approve job1", "start job1", "stop job1", "delete job1", "list", "wait", "wait job1", "fetch job1", "spend",
      "status job1", "config", "config regions", "config regions CA", "config regions --reset", "secret list",
      "secret delete HF_TOKEN"],
 )  # fmt: skip
@@ -148,12 +153,55 @@ def test_json_prints_exactly_one_value(argv, patched, capsys):
     [("approve job1", "approve", ("job1",)), ("decline job1", "decline", ("job1",)),
      ("start job1", "start", ("job1",)), ("stop job1", "stop", ("job1",)),
      ("delete job1 --force", "delete", ("job1", True)), ("delete job1", "delete", ("job1", False)),
-     ("send job1 hello there", "send", ("job1", "hello there")), ("report job1", "report", ("job1",))],
+     ("send job1 hello there", "send", ("job1", "hello there")), ("report job1", "report", ("job1",)),
+     ("fetch job1", "fetch", ("job1", None)), ("fetch job1 --to results", "fetch", ("job1", Path("results"))),
+     ("wait", "wait", ([], 3600)), ("wait job1 job2 --timeout 5", "wait", (["job1", "job2"], 300))],
 )  # fmt: skip
 def test_commands_reach_their_layer(argv, layer, args, patched, capsys):
     rc, out, _ = run(capsys, *argv.split())
     assert rc == 0 and out
     assert patched[-1][0] == layer and patched[-1][1][: len(args)] == args
+
+
+def test_wait_passes_its_exit_code_on_and_looks_through_listing(patched, monkeypatch, capsys):
+    def wait(names, timeout, look):
+        return {"result_line": f"saw {len(look(names)[0])}", "exit_code": 1, "attention": []}
+
+    monkeypatch.setattr(agents, "wait", wait)
+    rc, out, _ = run(capsys, "wait", "job1", "--json")
+    assert rc == 1 and json.loads(out)["result_line"] == "saw 1" and patched[-1] == ("listing", (["job1"],))
+
+
+def test_a_look_that_never_finishes_ends_the_command_with_an_error(monkeypatch, capsys):
+    ended = []
+    monkeypatch.setattr(cli.os, "_exit", ended.append)
+    with cli.deadline(0.01, "looking at the agents"):
+        time.sleep(0.3)
+    assert ended == [1] and capsys.readouterr().err.startswith("error:")
+    with cli.deadline(5, "looking at the agents"):
+        pass
+    time.sleep(0.05)
+    assert ended == [1]  # (done in time: nothing more)
+
+
+def test_spend_lists_agents_here_and_deleted_with_the_total(monkeypatch, capsys):
+    here = {"name": "job2", "machine": "1x RTX 4090, Québec", "state": "working", "hours": 2.0, "usd": 0.8}
+    gone = {"name": "job1", "machine": "1x RTX 4090 (Quebec, CA)", "created": "2026-10-09T18:25:00Z",
+            "deleted": "2026-10-10T14:30:00Z", "hours": 1.5, "usd": 0.6}  # fmt: skip
+    spent = {"agents": [here], "deleted": [gone], "total_usd": 1.4}
+    monkeypatch.setattr(agents, "spending", lambda: spent)
+    rc, out, _ = run(capsys, "spend")
+    lines = out.splitlines()
+    assert (
+        rc == 0
+        and out.isascii()
+        and "$0.80" in lines[1]
+        and "deleted 2026-10-10" in lines[2]
+        and "$1.40" in out
+    )
+    assert json.loads(run(capsys, "spend", "--json")[1]) == spent
+    monkeypatch.setattr(agents, "spending", lambda: {"agents": [], "deleted": [], "total_usd": 0})
+    assert "No agent" in run(capsys, "spend")[1]
 
 
 def test_pull_and_a_message_on_stdin(patched, monkeypatch, capsys):
@@ -172,7 +220,7 @@ def test_a_launch_that_needs_approval_exits_3(launched, monkeypatch, capsys):
 
 
 def test_all_output_is_ascii_but_the_agents_report(patched, monkeypatch, capsys):
-    monkeypatch.setattr(agents, "listing", lambda: ([view(message="naïve ✓")], []))
+    monkeypatch.setattr(agents, "listing", lambda: ([view(message="naïve ✓")], [], None))
     monkeypatch.setattr(agents, "view", lambda name: view(message="naïve ✓"))
     for argv in ("list", "list --json", "status job1", "status job1 --json"):
         assert cli.main(argv.split()) == 0
@@ -260,10 +308,10 @@ def test_launch_passes_its_options_on(launched, tmp_path, capsys):
 
 def test_launch_without_options_leaves_the_agent_settings_open(launched, capsys):
     assert cli.main(["launch", "job1", "--offers", "1"]) == 0
-    assert cli.main(["launch", "job2", "--offers", "1", "--no-fast"]) == 0
+    assert cli.main(["launch", "job2", "--offers", "1", "--no-fast", "--committed-only"]) == 0
     a, b = launched
     assert (a.mode, a.model, a.effort, a.fast, a.setup, a.disk_gb) == (None, None, None, None, None, 64)
-    assert b.fast is False
+    assert b.fast is False and (a.committed_only, b.committed_only) == (False, True)
 
 
 # ---- list and status -----------------------------------------------------------------------------
@@ -274,7 +322,7 @@ def test_list_fits_the_terminal_and_keeps_its_columns_apart(monkeypatch, capsys)
     views = [view("ablation-1", message=long), view("big-train", state="failed", used_h=None, spent=None),
              view("sweep", state="done", used_h=100.5, spent=150.25),
              view("resnet-rerun", state="interactive", mode="interactive", message="in VS Code, idle 12m")]  # fmt: skip
-    monkeypatch.setattr(agents, "listing", lambda: (views, []))
+    monkeypatch.setattr(agents, "listing", lambda: (views, [], None))
     for width in (80, 120, 250):
         monkeypatch.setattr(cli.shutil, "get_terminal_size", lambda *_, w=width: os.terminal_size((w, 24)))
         lines = run(capsys, "list")[1].splitlines()
@@ -286,13 +334,22 @@ def test_list_fits_the_terminal_and_keeps_its_columns_apart(monkeypatch, capsys)
 
 
 def test_list_without_agents_and_as_json(monkeypatch, capsys):
-    monkeypatch.setattr(agents, "listing", lambda: ([], []))
+    monkeypatch.setattr(agents, "listing", lambda: ([], [], None))
     assert "No agents yet" in run(capsys, "list")[1]
     stopped = view("job2", state="stopped", stopped_h=26.5, disk_usd_day=0.17)
-    monkeypatch.setattr(agents, "listing", lambda: ([view(), stopped], []))
+    monkeypatch.setattr(agents, "listing", lambda: ([view(), stopped], [], None))
     rows = json.loads(run(capsys, "list", "--json")[1])
     assert [r["name"] for r in rows] == ["job1", "job2"] and all(set(r) == VIEW_KEYS for r in rows)
     assert (rows[1]["stopped_h"], rows[1]["disk_usd_day"]) == (26.5, 0.17)
+
+
+def test_list_says_on_stderr_why_vast_could_not_be_asked(monkeypatch, capsys):
+    why = "Vast wants a fresh 2FA login before it will list your machines. Run: vastai tfa login"
+    monkeypatch.setattr(agents, "listing", lambda: ([view(state="unknown", message=why)], [], why))
+    for argv in (["list"], ["list", "--json"]):
+        rc, out, err = run(capsys, *argv)
+        assert rc == 0 and err.startswith("warning:") and "vastai tfa login" in err
+    assert json.loads(out)[0]["state"] == "unknown"
 
 
 def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast, machines, capsys):

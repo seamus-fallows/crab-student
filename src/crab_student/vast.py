@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
@@ -18,6 +19,7 @@ RETRY_STATUS = (429, 500, 502, 503, 504)
 TFA_LOGIN = "vastai tfa login --method-type totp -c <the code from your authenticator>"
 # (Vast's reply, HTTP 404, to an expired 2FA session key: it must never read as "that machine is gone")
 SESSION_EXPIRED = "Session expired. Please log in again."
+_ended = ""  # (set when this process removed an expired session key: what the 2FA error adds about it)
 
 
 class VastError(core.CrabError):
@@ -75,7 +77,23 @@ def _send(
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         with e:
-            return e.code, e.read()
+            status, raw = e.code, e.read()
+    if status == 404 and _reason(raw, status) == SESSION_EXPIRED:
+        _forget_session(headers["Authorization"].removeprefix("Bearer "))
+    return status, raw
+
+
+def _forget_session(sent: str) -> None:
+    """Remove the 2FA session key Vast just called expired: left in place, the vastai CLI sends it with
+    `vastai tfa login` too, which then fails the same way. (A newer one, from a login meanwhile, stays.) Vast
+    does not say how long a login lasts, so the error that follows says how old this one was."""
+    global _ended
+    path = core.vast_session_file()
+    with contextlib.suppress(OSError):
+        if path.read_text(encoding="utf-8").strip() == sent:
+            age = max(0.0, time.time() - path.stat().st_mtime) / 3600
+            path.unlink()
+            _ended = f" (the login that ended was made {core.fmt_hours(age)} ago)"
 
 
 def _reason(raw: bytes, status: int) -> str:
@@ -93,7 +111,9 @@ def _parse(status: int, raw: bytes, what: str) -> dict:
     if not 200 <= status < 300:
         reason = _reason(raw, status)
         if reason == SESSION_EXPIRED or "two factor" in reason.lower():
-            raise VastError(f"Vast wants a fresh 2FA login before it will {what}. Run: {TFA_LOGIN}", 401)
+            raise VastError(
+                f"Vast wants a fresh 2FA login before it will {what}{_ended}. Run: {TFA_LOGIN}", 401
+            )
         if status in (401, 403):
             raise VastError(
                 f"Vast refused the API key while trying to {what} (HTTP {status}). Check the key in "

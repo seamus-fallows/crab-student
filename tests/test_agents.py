@@ -135,9 +135,109 @@ def test_display_state(fields, inst, st, busy, state, shown):
     assert got == state and shown in message
 
 
-def test_display_state_without_vast():
-    rec = record(last_seen={"message": "epoch 3/10"})
-    assert agents.display_state(rec, None, None, False, vast_down=True)[0] == "unknown"
+TFA = "Vast wants a fresh 2FA login before it will list your machines."
+
+
+def vast_down(monkeypatch, why: str = TFA) -> None:
+    """Vast cannot be asked (an expired 2FA login, or no connection)."""
+
+    def refuse():
+        raise vast.VastError(why, 401)
+
+    monkeypatch.setattr(vast, "instances", refuse)
+
+
+def test_without_vast_the_machines_own_answer_or_what_was_last_seen_decides():
+    seen = {"message": "epoch 3/10", "used_hours": 2.0}
+    state, message = agents.display_state(record(last_seen=seen), None, None, False, TFA)
+    assert state == "unknown" and message.startswith(TFA) and "epoch 3/10" in message
+    done = status("done", "see REPORT")
+    assert agents.display_state(record(), None, done, False, TFA) == ("done", "see REPORT")
+    stopped = record(last_seen={**seen, "stop_reason": "done"}, stopped_since=time.time() - 7200)
+    state, message = agents.display_state(stopped, None, None, False, TFA)
+    assert state == "stopped" and "finished" in message
+
+
+def test_without_vast_machines_are_still_asked_over_ssh_and_the_reason_is_kept(
+    fake_vast, machines, monkeypatch
+):
+    address = {"host": "a.example", "port": 22}
+    agent(fake_vast, "a", ssh=address)
+    agent(fake_vast, "b", ssh=address, stopped_since=time.time() - 3600, last_seen={"stop_reason": "idle"})
+    agent(fake_vast, "c", ssh=address)
+    machines.replies[("a", "status")] = status("done", "see REPORT")
+    machines.replies[("c", "status")] = status("done", stopping="done", stop_sent_for=400)  # (a stuck stop)
+    vast_down(monkeypatch)
+    seen, orphans, problem = agents.listing()
+    states = {v.name: v.state for v in seen}
+    assert problem == TFA and orphans == [] and states == {"a": "done", "b": "stopped", "c": "stopped"}
+    assert sorted(call[0] for call in machines.calls) == ["a", "c"]  # (b was last seen stopped: not asked)
+    assert core.load("a")["last_seen"]["state"] == "done" and not fake_vast.calls("PUT", "/")
+
+
+def test_without_vast_an_agent_that_does_not_answer_is_unknown_and_its_record_stays_as_it_was(
+    fake_vast, machines, monkeypatch
+):
+    agent(fake_vast, ssh={"host": "a.example", "port": 22}, last_seen={"state": "working", "used_hours": 1.0})
+    machines.replies[("job1", "status")] = machine.Unreachable("could not reach job1 over ssh")
+    before = core.load("job1")
+    vast_down(monkeypatch)
+    v = agents.views()[0]
+    assert v.state == "unknown" and TFA in v.message and core.load("job1") == before
+
+
+# ---- what an agent has cost ----------------------------------------------------------------------
+
+
+def test_time_and_money_add_up_over_every_start_with_the_disk_of_a_stopped_machine(fake_vast, machines):
+    agent(fake_vast, "a", past_hours=2.0)
+    machines.replies[("a", "status")] = status("working", "epoch 3/10", used_hours=1.25)
+    day_ago = time.time() - 24 * 3600
+    agent(fake_vast, "b", status="exited", disk_usd_day=0.24, stopped_hours=24.0, stopped_since=day_ago,
+          last_seen={"used_hours": 1.0})  # fmt: skip
+    views = {v.name: v for v in agents.views()}
+    assert (views["a"].used_h, views["a"].spent) == (3.25, 1.3)
+    assert views["b"].used_h == 1.0 and views["b"].spent == pytest.approx(0.4 + 2 * 0.24, abs=0.01)
+
+
+def test_a_machine_seen_running_again_keeps_what_its_last_session_and_its_stop_cost(fake_vast, machines):
+    iid = agent(fake_vast, status="exited", last_seen={"used_hours": 3.0}, stopped_since=time.time() - 7200)
+    fake_vast.instances[iid].update(actual_status="running", intended_status="running", cur_state="running")
+    machines.replies[("job1", "status")] = status("working", "epoch 1/10", used_hours=0.1)
+    assert agents.views()[0].used_h == pytest.approx(3.1)
+    rec = core.load("job1")
+    assert rec["past_hours"] == 3.0 and rec["stopped_hours"] == pytest.approx(2.0, abs=0.01)
+    agents.views()
+    assert core.load("job1")["past_hours"] == 3.0  # (counted once)
+
+
+def test_a_machine_whose_own_clock_went_back_was_stopped_and_started_unseen(fake_vast, machines):
+    started = time.time() - 5 * 3600
+    agent(fake_vast, last_seen={"used_hours": 3.0}, last_start=started)
+    machines.replies[("job1", "status")] = status("working", "epoch 1/10", used_hours=0.2)
+    assert agents.views()[0].used_h == pytest.approx(3.2)
+    rec = core.load("job1")
+    assert rec["past_hours"] == 3.0 and rec["last_start"] > started  # (a stop note from before is stale now)
+
+
+def test_two_looks_that_save_out_of_order_do_not_count_the_hours_twice(fake_vast, machines):
+    """(A wait in the background and a list: the one that asked the machine first may save last.)"""
+    agent(fake_vast, last_seen={"used_hours": 10.05})  # (saved by the look that asked second)
+    machines.replies[("job1", "status")] = status("working", "epoch 9/10", used_hours=10.0)
+    assert agents.views()[0].used_h == pytest.approx(10.0) and not core.load("job1").get("past_hours")
+
+
+def test_a_deleted_agents_cost_is_kept_for_spend(fake_vast, machines):
+    agent(fake_vast, past_hours=1.0, last_seen={"used_hours": 0.5})
+    agent(fake_vast, "job2")
+    core.save(record("job3", phase="failed", dph=None))  # (it never had a machine)
+    machines.replies[("job1", "check")] = CLEAN
+    machines.replies[("job2", "status")] = status("working", "epoch 3/10", used_hours=2.0)
+    agents.delete("job1", False, out())
+    agents.delete("job3", False, out())
+    res = agents.spending()
+    assert [(d["name"], d["hours"], d["usd"]) for d in res["deleted"]] == [("job1", 1.5, 0.6)]
+    assert [(a["name"], a["usd"]) for a in res["agents"]] == [("job2", 0.8)] and res["total_usd"] == 1.4
 
 
 def test_views_use_live_status_and_remember_what_they_saw(fake_vast, machines):
@@ -513,3 +613,251 @@ def test_open_one_of_an_interactive_agent_opens_vs_code_and_attaches_after_its_h
     monkeypatch.setattr(machine, "wait_for_handoff", lambda name: handed_off)
     assert agents.open_one("b") == 0 and vscode == ["b"] and opened == (["b"] if attached else [])
     assert agents.open_one("a") == 0 and vscode == ["b"] and opened[-1] == "a"
+
+
+# ---- fetch, and delete after it ------------------------------------------------------------------
+
+OUTPUTS = {
+    "files": 3,
+    "bytes": 5_100_000_000,
+    "sample": ["best.pt"],
+}  # (what the machine's check says it holds)
+SENT = {"files": 3, "bytes": 5_100_000_000, "digest": "d1"}  # (the machine's account of what it sent)
+FETCHED = {**SENT, "to": "C:/results", "at": "2026-10-10T14:30:00Z"}  # (what the record keeps of a copy)
+ADDRESS = {"host": "a.example", "port": 22}
+
+
+def copying(monkeypatch, write: int = 3, **got) -> list:
+    """machine.fetch_outputs replaced: the (name, folder) of each copy. It writes `write` files and answers
+    with a complete copy of what the machine sent (SENT), changed by `got`; an exception in `got` is raised
+    after the files are written."""
+    calls = []
+
+    def fetch_outputs(name, dest, on_progress):
+        calls.append((name, dest))
+        for i in range(write):
+            (dest / f"{i}.pt").write_bytes(b"x")
+        on_progress(write, 1000)
+        if isinstance(got.get("raises"), Exception):
+            raise got["raises"]
+        return {"files": 3, "bytes": 5_100_000_000, "sent": dict(SENT), "refused": [], **got}
+
+    monkeypatch.setattr(machine, "fetch_outputs", fetch_outputs)
+    return calls
+
+
+def test_fetch_copies_the_outputs_into_a_new_folder_and_the_record_keeps_what_was_copied(
+    monkeypatch, tmp_path
+):
+    core.save(record(ssh=ADDRESS))
+    calls = copying(monkeypatch)
+    dest = (tmp_path / "results").resolve()
+    res = agents.fetch("job1", tmp_path / "results", out())
+    kept = core.load("job1")["fetched"]
+    assert calls == [("job1", dest)] and res["files"] == 3 and len(list(dest.iterdir())) == 3
+    assert {k: kept[k] for k in SENT} == SENT and kept["to"] == str(dest)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "job1-outputs").mkdir()  # (an empty folder is as good as none)
+    agents.fetch("job1", None, out())
+    agents.fetch("job1", None, out())  # (again later: the first copy stays, the new one goes beside it)
+    assert [c[1].name for c in calls[1:]] == ["job1-outputs", "job1-outputs-2"]
+    assert all(len(list((tmp_path / name).iterdir())) == 3 for name in ("job1-outputs", "job1-outputs-2"))
+    assert core.load("job1")["fetched"]["to"] == str((tmp_path / "job1-outputs-2").resolve())
+
+
+def test_fetch_never_writes_into_a_folder_that_holds_something_or_into_crab_students_own(
+    monkeypatch, tmp_path
+):
+    """(The machine chooses the names: in a repo they could be .git/hooks, in ~/.crab-student the settings.)"""
+    core.save(record(ssh=ADDRESS))
+    calls = copying(monkeypatch)
+    (tmp_path / "mine.txt").write_text("keep me\n")
+    a_file = tmp_path / "mine.txt"
+    for dest in (tmp_path, a_file, core.home(), core.home() / "new-folder"):
+        fails(2, agents.fetch, "job1", dest, out())
+    assert not calls and a_file.read_text() == "keep me\n" and not core.load("job1").get("fetched")
+
+
+@pytest.mark.parametrize(
+    "got", [{"sent": {**SENT, "files": 4}}, {"files": 2}, {"refused": [("a:b.txt", "not a name")]}]
+)
+def test_a_copy_that_is_not_complete_fails_and_is_not_kept_in_the_record(got, monkeypatch, tmp_path):
+    core.save(record(ssh=ADDRESS))
+    copying(monkeypatch, **got)
+    fails(1, agents.fetch, "job1", tmp_path / "results", out())
+    assert not core.load("job1").get("fetched") and (tmp_path / "results").exists()  # (what arrived stays)
+
+
+def test_a_copy_that_is_cut_off_leaves_nothing_behind_so_that_it_can_be_run_again(monkeypatch, tmp_path):
+    core.save(record(ssh=ADDRESS))
+    copying(monkeypatch, write=2, raises=core.CrabError("the copy from job1 was cut off (unexpected end)."))
+    fails(1, agents.fetch, "job1", tmp_path / "results", out())
+    assert not (tmp_path / "results").exists() and not core.load("job1").get("fetched")
+    copying(monkeypatch)
+    agents.fetch("job1", tmp_path / "results", out())
+    assert core.load("job1")["fetched"]["digest"] == "d1"
+
+
+def test_fetch_needs_a_machine_that_answers(monkeypatch, tmp_path):
+    core.save(record())  # (it never had an address)
+    fails(1, agents.fetch, "job1", tmp_path / "results", out())
+    core.save(record(ssh=ADDRESS))
+    copying(monkeypatch, write=0, raises=machine.Unreachable("could not reach job1 over ssh (timed out)."))
+    assert "crab-student start job1" in fails(1, agents.fetch, "job1", tmp_path / "results", out()).message
+
+
+def test_fetch_of_an_agent_without_outputs_keeps_no_record_and_no_folder(monkeypatch, tmp_path):
+    core.save(record(ssh=ADDRESS))
+    copying(monkeypatch, write=0, files=0, bytes=0, sent={"files": 0, "bytes": 0, "digest": "d0"})
+    agents.fetch("job1", tmp_path / "results", out())
+    assert not (tmp_path / "results").exists() and not core.load("job1").get("fetched")
+
+
+def outputs_now(monkeypatch, answer) -> list:
+    """machine.outputs_state replaced: what the machine says its /root/outputs is now (or an error)."""
+    asked = []
+
+    def outputs_state(name):
+        asked.append(name)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(machine, "outputs_state", outputs_state)
+    return asked
+
+
+@pytest.mark.parametrize(
+    "fetched, now, goes",
+    [
+        (FETCHED, SENT, True),
+        (FETCHED, {**SENT, "digest": "d2"}, False),  # (as many files and bytes, but not the same ones)
+        (FETCHED, machine.Unreachable("could not reach job1 over ssh"), False),
+        (None, SENT, False),
+    ],
+)
+def test_delete_lets_go_of_outputs_only_while_every_file_is_as_it_was_fetched(
+    fetched, now, goes, fake_vast, machines, monkeypatch
+):
+    iid = agent(fake_vast, fetched=fetched)
+    machines.replies[("job1", "check")] = {**CLEAN, "outputs": OUTPUTS}
+    asked = outputs_now(monkeypatch, now)
+    if goes:
+        agents.delete("job1", False, out())
+    else:
+        assert "crab-student fetch job1" in fails(3, agents.delete, "job1", False, out()).message
+    assert (iid in fake_vast.instances) is not goes and asked == (["job1"] if fetched else [])
+
+
+@pytest.mark.parametrize("noted, goes", [("d1", True), ("d2", False), (None, False)])
+def test_a_stopped_agents_outputs_go_only_when_its_stop_note_says_they_are_as_fetched(
+    noted, goes, fake_vast, fake_github, machines, repo, tmp_path, monkeypatch
+):
+    """(None: a machine set up before stop notes carried the fingerprint cannot say.)"""
+    iid = agent(fake_vast, status="exited", repo=repo, fetched=FETCHED)
+    left = {**OUTPUTS, "digest": noted} if noted else OUTPUTS
+    push_to_branch(fake_github, tmp_path, NOTE, json.dumps(note(outputs=left)))
+    asked = outputs_now(monkeypatch, SENT)
+    if goes:
+        agents.delete("job1", False, out())
+    else:
+        assert FETCHED["to"] in fails(3, agents.delete, "job1", False, out()).message  # (where the copy is)
+    assert (iid in fake_vast.instances) is not goes and not asked and not machines.calls  # (never started)
+
+
+# ---- wait ----------------------------------------------------------------------------------------
+
+
+def seen(name: str, state: str, message: str = "") -> agents.View:
+    return agents.View(name=name, state=state, message=message, used_h=1.0, spent=0.4, idle_min=0, machine="",
+                       dph=0.4, branch=f"agent/{name}", repo="ada/proj", git=None, vast_status=None, pending=None,
+                       error=None, stopped_h=None, disk_usd_day=None, mode="colleague", frontend="tmux",
+                       settings={})  # fmt: skip
+
+
+def looks(monkeypatch, *rounds, problem: str | None = None) -> list:
+    """agents.listing replaced: each look answers with the next of `rounds` ({name: state}), the last one from
+    then on. Returns the names each look asked for. wait looks again at once."""
+    asked: list = []
+
+    def listing(names=None):
+        asked.append(names)
+        states = rounds[min(len(asked), len(rounds)) - 1]
+        return [seen(n, s) for n, s in states.items() if names is None or n in names], [], problem
+
+    monkeypatch.setattr(agents, "listing", listing)
+    monkeypatch.setattr(agents, "WAIT_POLL", 0.01)
+    for name in {n for states in rounds for n in states}:
+        core.save(record(name))
+    return asked
+
+
+def test_wait_ends_when_an_agent_needs_the_user(monkeypatch):
+    working = {"a": "working", "b": "starting"}
+    asked = looks(monkeypatch, working, working, {"a": "done", "b": "working"})
+    res = agents.wait(["a", "b"], 60)
+    assert [v["name"] for v in res["attention"]] == ["a"] and res["waiting"] == ["b"]
+    assert (res["exit_code"], res["timed_out"]) == (0, False) and "a: done" in res["result_line"]
+    assert asked == [["a", "b"]] * 3
+
+
+def test_wait_without_names_watches_every_agent_so_one_that_finished_meanwhile_is_not_passed_over(
+    monkeypatch,
+):
+    """(After a wait that ended for a, the lead looks at a's results; b finishes meanwhile.)"""
+    asked = looks(monkeypatch, {"a": "done", "b": "done", "c": "working"})
+    res = agents.wait([], 60)
+    assert [v["name"] for v in res["attention"]] == ["a", "b"] and res["waiting"] == ["c"] and asked == [None]
+    asked = looks(monkeypatch, {"a": "working", "b": "working"}, {"a": "working", "b": "failed"})
+    assert [v["name"] for v in agents.wait([], 60)["attention"]] == ["b"] and asked == [None, ["a", "b"]]
+    looks(monkeypatch, {})
+    fails(1, agents.wait, [], 60)  # (there is no agent)
+
+
+def test_wait_keeps_saying_that_the_vast_login_ended_until_there_is_a_new_one(monkeypatch):
+    """(Vast may answer a list with the plain key again once the ended session's key is gone.)"""
+    ended = f"Vast wants a fresh 2FA login. Run: {vast.TFA_LOGIN}"
+    rounds = [({"a": "working"}, ended), ({"a": "working"}, None), ({"a": "done"}, None)]
+    asked = []
+
+    def listing(names=None):
+        asked.append(names)
+        states, problem = rounds[min(len(asked), len(rounds)) - 1]
+        return [seen(n, s) for n, s in states.items()], [], problem
+
+    monkeypatch.setattr(agents, "listing", listing)
+    monkeypatch.setattr(agents, "WAIT_POLL", 0.01)
+    core.save(record("a"))
+    assert agents.wait(["a"], 60)["vast_problem"] == ended
+    core.write_private(core.vast_session_file(), "a-new-session\n")  # (the user logged in again meanwhile)
+    asked.clear()
+    assert agents.wait(["a"], 60)["vast_problem"] is None
+
+
+def test_wait_on_an_agent_that_already_needs_the_user_ends_at_once(monkeypatch):
+    asked = looks(monkeypatch, {"a": "needs you"})
+    assert agents.wait(["a"], 60)["attention"][0]["state"] == "needs you" and len(asked) == 1
+    fails(1, agents.wait, ["nobody"], 60)  # (no such agent)
+
+
+def test_wait_comes_back_when_the_time_is_up(monkeypatch):
+    looks(monkeypatch, {"a": "working"})
+    res = agents.wait(["a"], 0.05)
+    assert (res["timed_out"], res["exit_code"], res["attention"], res["waiting"]) == (True, 0, [], ["a"])
+
+
+def test_wait_gives_up_on_an_agent_nobody_can_see_and_says_why(monkeypatch):
+    monkeypatch.setattr(agents, "UNSEEN_LIMIT", 0.05)
+    looks(monkeypatch, {"a": "unknown", "b": "working"}, problem=TFA)
+    res = agents.wait(["a", "b"], 60)
+    assert res["exit_code"] == 1 and [v["name"] for v in res["unseen"]] == ["a"] and res["waiting"] == ["b"]
+    assert res["vast_problem"] == TFA
+    blip = [{"a": "unknown"}, {"a": "working"}, {"a": "unknown"}, {"a": "done"}]
+    looks(monkeypatch, *blip)
+    assert agents.wait(["a"], 60)["exit_code"] == 0  # (seen again in between: no alarm)
+
+
+def test_wait_says_when_an_agent_was_deleted_meanwhile(monkeypatch):
+    looks(monkeypatch, {"a": "working", "b": "working"}, {"b": "working"})
+    res = agents.wait(["a", "b"], 60)
+    assert res["deleted"] == ["a"] and res["exit_code"] == 0 and res["waiting"] == ["b"]

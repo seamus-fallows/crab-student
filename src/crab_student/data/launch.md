@@ -38,6 +38,9 @@ and then say so in the brief (under Context; for interactive, in a short sentenc
   there is no GitHub repo.
 - Uncommitted changes to tracked files are carried over to the agent automatically; untracked files and
   Git LFS files are not. If the task needs one, say so in a warning line; never commit for the user.
+- `--committed-only` leaves the uncommitted changes behind (the agent starts from the last commit). Use
+  it when the user asks for that, or said that other work is going on in this checkout (other agents or
+  people editing it): half-finished edits would otherwise become the agent's starting point.
 
 ## 5. Pick the machine
 

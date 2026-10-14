@@ -7,6 +7,7 @@ import io
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -307,6 +308,17 @@ def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_githu
     assert (rec["repo"]["carried"], rec["repo"]["untracked"]) == (["README.md"], ["notes.txt"])
     assert len(res["warnings"]) == 1 and "notes.txt" in res["warnings"][0]
     assert user_state(user_repo) == before
+
+
+def test_committed_only_leaves_the_uncommitted_changes_behind(fake_github, user_repo):
+    (user_repo / "README.md").write_text("changed\n")
+    go(args(committed_only=True))
+    rec, bare = core.load("job1"), fake_github.bare(AGENTS)
+    assert (
+        rec["repo"]["start_sha"] == git(user_repo, "rev-parse", "HEAD").strip() and not rec["repo"]["carried"]
+    )
+    assert git(bare, "rev-parse", "agent/job1").strip() == rec["repo"]["start_sha"]
+    assert "changed" not in git(bare, "show", "agent/job1:README.md")
 
 
 def test_no_repo_works_in_a_private_workspace_repo(fake_github, machines, tmp_path, monkeypatch):
@@ -661,6 +673,20 @@ def test_start_has_no_time_limit_and_never_waits_for_approval(fake_vast, machine
     res = launch.start("job1", out())
     assert res["state"] == "working" and res["exit_code"] == 0 and res.keys() >= RESULT_KEYS
     assert machine_runs(fake_vast) and len(starts(fake_vast)) == 1 and not machines.calls
+
+
+def test_start_keeps_what_the_last_session_and_the_stop_cost(fake_vast, machines):
+    go(args())
+    stop_machine(fake_vast)
+    rec = core.load("job1")
+    assert (rec["past_hours"], rec["stopped_hours"], rec["fetched"]) == (0, 0, None)
+    rec["last_seen"] = {"used_hours": 2.5, "stop_reason": "idle"}
+    rec["stopped_since"] = time.time() - 3 * 3600
+    core.save(rec)
+    launch.start("job1", out())
+    rec = core.load("job1")
+    assert rec["past_hours"] == 2.5 and rec["stopped_hours"] == pytest.approx(3.0, abs=0.01)
+    assert rec["last_seen"]["used_hours"] == 0 and rec["stopped_since"] is None
 
 
 def test_start_waits_while_the_machine_reads_exited_and_forgets_why_it_stopped(fake_vast, machines):

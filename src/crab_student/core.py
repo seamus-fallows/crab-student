@@ -281,6 +281,35 @@ def remove(name: str) -> None:
             (agents_dir() / f"{name}{suffix}").unlink(missing_ok=True)
 
 
+def new_session(rec: dict) -> None:
+    """The machine runs again after a stop, and counts its hours from 0 again: the record's totals take the
+    machine hours last seen and the time it sat stopped (its disk was billed), for what the agent has cost."""
+    last = rec.get("last_seen") or {}
+    rec["past_hours"] = (rec.get("past_hours") or 0) + (last.get("used_hours") or 0)
+    if last:
+        rec["last_seen"] = {**last, "used_hours": 0}
+    if rec.get("stopped_since"):
+        stopped = (time.time() - rec["stopped_since"]) / 3600
+        rec["stopped_hours"] = (rec.get("stopped_hours") or 0) + max(0.0, stopped)
+
+
+def spend_file() -> Path:
+    """What deleted agents cost: a JSON object per line (name, machine, created, deleted, hours, usd)."""
+    return home() / "spend.jsonl"
+
+
+def book_spend(entry: dict) -> None:
+    spend_file().parent.mkdir(parents=True, exist_ok=True)
+    with open(spend_file(), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def read_spend() -> list[dict]:
+    if not spend_file().exists():
+        return []
+    return [json.loads(line) for line in spend_file().read_text(encoding="utf-8").splitlines()]
+
+
 @contextlib.contextmanager
 def locked(name: str, wait: float = 0) -> Iterator[None]:
     """Hold the agent's OS lock (it dies with the process, so a lock that cannot be taken means another

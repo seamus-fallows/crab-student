@@ -1,34 +1,27 @@
 name: CI
 
+# Only when asked (the Actions tab, or: gh workflow run ci.yml). Changes are tested locally; this adds the
+# machine-side integration test, which needs Linux and tmux. Running on every push used up the free minutes.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: ${{ matrix.os }}, Python ${{ matrix.python }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install tmux (the machine-side integration test runs on Linux only)
-        if: runner.os == 'Linux'
+      - name: Install tmux (for the machine-side integration test)
         run: sudo apt-get update -q && sudo apt-get install -y -q tmux
 
       # (setup-uv publishes no floating major tag after v7: name an exact release)
       - uses: astral-sh/setup-uv@v10.2.0
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.11"
 
       - name: Lint
         run: uv run ruff check src tests

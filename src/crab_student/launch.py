@@ -82,6 +82,7 @@ class LaunchArgs:
     effort: str | None = None
     fast: bool | None = None
     setup: str | None = None  # the command installing the project's dependencies (None: detected; "none")
+    committed_only: bool = False  # start from HEAD: uncommitted changes to tracked files stay behind
 
 
 class Progress:
@@ -273,13 +274,16 @@ def plan_repo(a: LaunchArgs, cfg: dict, branch: str) -> tuple[dict, str, list[st
     r = github.local_repo(a.repo_path or Path.cwd())
     slug = github.agent_repo(r.slug, cfg["workspace_repo"])
     new = "" if github.check_agent_repo(slug, r.slug, branch) else " (new, private)"
-    sha, carried, untracked, local = github.snapshot(r, commit=not a.dry_run)
+    sha, carried, untracked, local = github.snapshot(r, commit=not (a.dry_run or a.committed_only))
     base = (
         github.git(r.top, "symbolic-ref", "-q", "--short", "HEAD", check=False).strip() or "a detached HEAD"
     )
     line = f"{r.slug} - {branch} on {slug}{new} starts from {r.head[:7]} (your HEAD on {base})"
     if local:
         line += f" + {local} local commit{'s' if local > 1 else ''} not on GitHub"
+    if carried and a.committed_only:
+        line += f", without the uncommitted changes to {_files(carried)}"
+        carried = []
     if carried:
         line += f" + uncommitted changes to {_files(carried)}"
     warnings = []
@@ -364,6 +368,9 @@ def new_record(a: LaunchArgs, cfg: dict, chosen: list[dict], repo: dict, reason:
         "last_start": None,
         "stopped_since": None,
         "last_seen": None,
+        "past_hours": 0.0,  # (machine hours before its last start, and hours it sat stopped before: what it cost)
+        "stopped_hours": 0.0,
+        "fetched": None,  # (the checked copy of /root/outputs on this computer: files, bytes, digest, to, at)
         "image": cfg["image"],
         "idle_minutes": cfg["idle_minutes"],
         "notify_url": cfg["notify_url"],
@@ -444,6 +451,7 @@ def resume_machine(rec: dict, out: Progress) -> None:
         )
     if not vast.running(inst):
         vast.set_state(rec["instance_id"], "running")
+        core.new_session(rec)
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
         rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)
@@ -870,6 +878,7 @@ def start(name: str, out: Progress, offer_ids: list[int] | None = None) -> dict:
             out.line(f"{name} is already running.")
             return result(rec, "working", [])
         vast.set_state(rec["instance_id"], "running")
+        core.new_session(rec)
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
         rec.update(last_start=time.time(), stopped_since=None)
         core.save(rec)

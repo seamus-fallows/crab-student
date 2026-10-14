@@ -7,6 +7,7 @@ context for the name."""
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -26,6 +27,9 @@ from pathlib import Path
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
 D = ROOT / "crab-student"
 OUTPUTS = ROOT / "outputs"
+COPYING = (
+    D / "copying"
+)  # touched every half minute while the user's computer copies OUTPUTS: that is activity
 BIN = Path(os.environ.get("CS_BIN", "/usr/local/bin"))
 PROFILE_D = Path(os.environ.get("CS_PROFILE_D", "/etc/profile.d"))
 CLAUDE = ROOT / ".local" / "bin" / "claude"
@@ -752,6 +756,14 @@ class Probe:
             return False
         return any(int(x) >= 10 for x in p.stdout.split() if x.strip().isdigit())
 
+    def copying(self) -> bool:
+        """The outputs are being copied off the machine right now (a copy that stalls stops counting, and a
+        time in the future is no copy)."""
+        try:
+            return 0 <= time.time() - COPYING.stat().st_mtime < 2 * TICK
+        except OSError:
+            return False
+
 
 def read_agent() -> dict:
     return read_json(D / "agent.json", {})
@@ -759,7 +771,8 @@ def read_agent() -> dict:
 
 def tick(st: dict, c: dict, now: float, probe) -> list:
     """One watchdog step: update the state, return the actions (notify:<state>, nudge, check-in, stop:<why>).
-    The one stop rule: `idle_minutes` with no CPU or GPU work and no conversation, done or not."""
+    The one stop rule: `idle_minutes` with no CPU or GPU work, no conversation and no copy of the outputs
+    under way, done or not."""
     actions = []
     dt = min(max(now - st["last_tick"], 0), 2 * TICK)
     st["last_tick"] = now
@@ -771,7 +784,7 @@ def tick(st: dict, c: dict, now: float, probe) -> list:
     work = cpu_busy or probe.gpu_busy()
     if size != st["transcript_bytes"]:
         st["last_talk"] = now
-    if size != st["transcript_bytes"] or work:
+    if size != st["transcript_bytes"] or work or probe.copying():
         st["last_activity"] = now
     # The reminders come again only once the agent itself did something (work, or a status update): they
     # grow the conversation too, so an agent that cannot answer (a usage limit, a revoked token) would
@@ -1071,6 +1084,21 @@ def files_under(top: Path, skip=()):
                 yield path.relative_to(top).as_posix(), info.st_size
 
 
+def fingerprint(top: Path, names) -> str:
+    """One hash for these files under `top` as they are now: each one's path, size and time of last change.
+    The user's computer takes the same of the outputs it copies (each file just before it is read), so an
+    equal fingerprint later means every file is still the one that was copied."""
+    seen = hashlib.sha256()
+    for name in sorted(names):
+        try:
+            info = (top / name).stat()
+        except OSError:  # (gone meanwhile)
+            continue
+        line = f"{name}\0{info.st_size}\0{info.st_mtime_ns}\n"
+        seen.update(line.encode("utf-8", "surrogateescape"))
+    return seen.hexdigest()
+
+
 def left_behind(repo: Path) -> dict:
     """What git will not save: the files in /root/outputs, and files of 100 MB+ in the repo that git does not
     track (ignored ones too)."""
@@ -1082,7 +1110,12 @@ def left_behind(repo: Path) -> dict:
         if n >= 100_000_000 and f not in tracked
     ]
     return {
-        "outputs": {"files": len(outputs), "bytes": sum(outputs.values()), "sample": list(outputs)[:5]},
+        "outputs": {
+            "files": len(outputs),
+            "bytes": sum(outputs.values()),
+            "sample": list(outputs)[:5],
+            "digest": fingerprint(OUTPUTS, outputs),
+        },
         "large_files": large,
     }
 

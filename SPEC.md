@@ -32,9 +32,11 @@ the code does it is in the modules named here.
    brief, records or git. They reach the machine only inside the upload stream, as 0600 files (and in
    its 0600 `~/.claude/settings.json`).
 7. **The launcher** cannot ask the user anything, and a command outside `setup.ALLOW` would raise a
-   permission prompt in the user's session. Whatever approves a pricier machine, forces a delete or
-   changes settings or secrets is in `setup.ASK` (a plain `delete` is allowed: it refuses to lose work);
-   editing `~/.crab-student` is denied (`setup.DENY`).
+   permission prompt in the user's session. Whatever approves a pricier machine, forces a delete,
+   changes settings or secrets, or copies a machine's files into a folder of the caller's choice
+   (`fetch --to`) is in `setup.ASK` (a plain `delete` is allowed: it refuses to lose work; a plain
+   `fetch` too: it only fills a new folder `NAME-outputs`); editing `~/.crab-student` is denied
+   (`setup.DENY`), and `fetch` refuses a folder inside it.
 8. **The remote agent never hears "crab-student".** Its rules, prompts, the watchdog's messages, hook
    and command output describe the situation plainly; its commands are `agent-status`, `agent-attach`
    and `agent-handoff`.
@@ -54,6 +56,7 @@ the code does it is in the modules named here.
   install_id             6 hex digits, made once: this computer's part of every rent label
   secrets.json           {"names": [...]}: names of stored task secrets
   secrets/<key>          0600, only when no system keyring works
+  spend.jsonl            a line per deleted agent: {name, machine, created, deleted, hours, usd} (5.6)
   agents/<name>.json     the record (3); agents/<name>.lock its OS lock
   agents/<name>.brief.md the brief
   agents/<name>.log      the launch's progress lines with the local time ("~ " marks a status line)
@@ -64,7 +67,9 @@ the code does it is in the modules named here.
   ssh/known_hosts        machines' host keys, under HostKeyAlias crab-student-<name>
   ssh/github_known_hosts GitHub's pinned ed25519 host key
 ~/.config/vastai/vast_api_key   the Vast key (the vastai CLI's file)
-~/.config/vastai/vast_tfa_key   the 2FA session key from `vastai tfa login`, sent instead while it exists
+~/.config/vastai/vast_tfa_key   the 2FA session key from `vastai tfa login`, sent instead while it exists;
+                                removed when Vast answers it with "Session expired" (left there, the vastai
+                                CLI would send it with the next `tfa login` too, which then fails)
 ~/.claude/settings.json         read for the model, effort and fast mode (4.4); init adds permission rules
 ~/.claude/skills/crab-student/SKILL.md   the skill
 VS Code's user settings.json    remote.SSH.remotePlatform "linux" for agents' hosts (only if plain JSON)
@@ -95,8 +100,10 @@ pick and up to four backups, in order: id, machine_id, dph_total, storage_cost, 
 Vast confirms the rent or the label is found), `dph`, `disk_usd_day`, `machine`, `short`, `ssh`,
 `uploaded` (all null, and `uploaded` false, while it has none: a `failed` record never has one);
 `pending` (`{reason, max_dph}`); `warnings`; `last_start` (last rented or started, or seen running again
-after a stop); `stopped_since`; `last_seen` (the last machine status, for display only); `image`,
-`idle_minutes`, `notify_url` (copied at launch).
+after a stop); `stopped_since`; `last_seen` (the last machine status, for display and for what it cost);
+`past_hours` and `stopped_hours` (machine hours before the last start, and hours it sat stopped before
+it: 5.6); `fetched` (`{files, bytes, digest, to, at}`: the checked copy of `/root/outputs` on this
+computer, 5.5); `image`, `idle_minutes`, `notify_url` (copied at launch).
 
 Names: 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `<owner>-<name>-<install id>-<4 hex>` (owner: the `owner` setting, else `crab-student`; new
@@ -141,7 +148,8 @@ login; two repos with one name share it), or the workspace `<login>/<workspace_r
 (`source` null). The branch must not exist there yet. The starting commit is HEAD plus, as one extra
 commit, what `git commit -a` would commit, built from a copy of the index (the user's checkout is
 untouched); untracked files are not carried (a warning names them), nor are Git LFS objects or
-relative-URL submodules. It is pushed from the user's computer with the agent repo's deploy key and
+relative-URL submodules; `--committed-only`: HEAD alone. It is pushed from the user's computer with
+the agent repo's deploy key and
 `push.negotiate` (the agent repo's branch tips are agents' commits the clone never saw): only the first
 push sends the history. In the workspace the branch is made through the API, from its default branch.
 `pull` fetches the branch into the clone the agent started from (or `--repo PATH`), which gets the agent
@@ -195,6 +203,16 @@ reporting another mode (after a hand-off) updates the record; a stopped machine 
 `last_start`. `list` warns on stderr about orphans: instances whose label ends in `-<install id>-<4 hex>`
 whose id and label no record has (a rent Vast did not confirm that went through after all).
 
+**Without Vast** (its API refuses or cannot be reached; `listing` returns the reason, and `list` warns
+with it on stderr): every ready agent with an ssh address that is not known to be stopped is asked over
+ssh, and its answer decides its state as usual. An agent already known to be stopped is shown so; any
+other is `unknown`, the reason in its message. A machine's stuck stop is not taken over without Vast.
+The first 2FA error after a session ended says how long ago that login was made (Vast does not say how
+long one lasts).
+
+**A look never hangs**: `list`, `status`, `spend` and each look of `wait` end the command with an error
+and exit code 1 after `LOOK_SECONDS` (180), whatever call is stuck.
+
 **5.2 stop** (a machine that received its files): `cs.py save --reason user --final` if it runs (best
 effort), then Vast `stopped`. **start** (stopped): Vast `running`, `last_start` set, a wait for ssh that
 never destroys. The boot starts the watchdog, which resumes the conversation.
@@ -202,11 +220,14 @@ never destroys. The boot starts the watchdog, which resumes the conversation.
 **5.3 delete.** Pending: removed. A machine that received its files is checked first: running, with
 `cs.py check`; stopped, with the stop note on its branch (6.7), counted only if `stopped_at` is at least
 5 minutes after `last_start`. No such note, GitHub unreachable, or a failed check: refused (exit 3)
-without `--force`. Refused too (exit 3, with the list and a copy command) for unpushed commits,
-uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. Then: destroy
-the machine (or, for a launch cut off before Vast confirmed its rent, the machine with its label),
-forget the host key and the record. GitHub is left alone: the branch and the agent repo's deploy key
-stay.
+without `--force`. Refused too (exit 3, with the list and the copy commands) for unpushed commits,
+uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outside git. The files in
+`/root/outputs` do not count when their fingerprint equals the record's `fetched.digest` (every file is
+as it was copied): a running machine is asked for it now (5.5), a stopped one's is in its stop note
+(6.7; a machine set up before notes had it cannot say, so its outputs count). The refusal names the
+copy. Then: destroy the machine (or, for a launch cut off before Vast confirmed its rent, the machine
+with its label), add the agent's cost to `spend.jsonl` (5.6), forget the host key and the record.
+GitHub is left alone: the branch and the agent repo's deploy key stay.
 
 **5.4 open.** On an agent that is not ready, `open NAME` first follows the launch log until the phase is
 ready, failed or pending, or nobody holds the lock (cut off). Frontend `tmux`: `agent-attach` over `ssh
@@ -216,6 +237,43 @@ by side (Windows Terminal panes, else a local tmux session with prefix Ctrl-a). 
 `code --remote ssh-remote+crab-student-<name>` on the repo folder; for a `vscode` frontend, 15 s later,
 `vscode://anthropic.claude-code/open?prompt=<the brief>` fills the Claude panel without sending (a
 brief over 5,000 characters becomes a pointer to `/root/BRIEF.md`).
+
+**5.5 wait and fetch.** `wait [NAME ...] [--timeout MINUTES]` looks (5.1) every `WAIT_POLL` (60 s) at
+the agents named, else at every agent there is at its first look (none: exit 1), so that an agent
+already in an `ATTENTION` state ends it at once and none is passed over. It ends when one is in such a
+state (done, failed, needs you, stopped, interrupted, approval) or was deleted, after the timeout
+(default 60 minutes), or, with exit code 1, when one has been `unknown` for `UNSEEN_LIMIT` (10 minutes)
+and nothing else is to report. `--json`: `{attention, unseen, deleted, waiting, timed_out,
+vast_problem, result_line, exit_code}`, the first two as views, `waiting` the names for the next
+`wait`. `vast_problem` is the last look's, or an ended 2FA login's while no new session key exists.
+
+The machine's `/root/outputs` is read by `machine.OUTPUTS_SCRIPT`, sent on stdin to its Python in `D`
+with the argument `state` or `copy` (no file on the machine changes for it). It goes through the files
+`cs.files_under(/root/outputs)` lists (what `check` and the stop note count: regular files, a link to a
+file as that file) and prints `{files, bytes, digest}` last on stderr; `digest` is a SHA-256 over each
+file's path, size and time of last change. `copy` also writes the files to stdout as a tar, and takes
+each file's size and time just before reading it, so a file changed during the copy or after it gives
+another digest.
+
+`fetch NAME [--to DIR]`, under the agent's lock and with ssh only. The default folder is the first of
+`./NAME-outputs`, `NAME-outputs-2`, ... that does not exist or is empty. `DIR` must not exist or be
+empty, and no folder may lie in `~/.crab-student` (exit 2): the machine chooses the names and contents.
+All flags must be written out (`allow_abbrev=False`): the ask rules look for `--to` and `--force`. The local side writes regular files only, each under `DIR`, never over an existing file (a
+name leading outside, one Windows cannot hold, or one that is the same file as another there is
+refused), with its mtime. The copy counts only if nothing was refused and the files and bytes found in
+`DIR` afterwards equal those sent; then the record's `fetched` keeps `{files, bytes, digest, to, at}`.
+A stream that was cut off removes `DIR` again (exit 1); a copy with refused files stays, unrecorded.
+While bytes flow, the script touches `D/copying` every half minute, which the watchdog takes for
+activity (6.3), so the idle stop does not cut a long copy (a machine set up before that ignores it).
+
+**5.6 What an agent cost** (`agents.spend`, a lower estimate). The machine counts `used_hours` from each
+container start. When a new start is known (`start`, a stopped machine seen running, or `used_hours`
+more than `CLOCK_SLACK` lower than last seen, which also moves `last_start`), `core.new_session` moves
+the hours last seen to `past_hours` and the time since `stopped_since` to `stopped_hours`. Hours =
+`past_hours` + the current `used_hours`; dollars = hours x `dph` + stopped hours (the current stop too)
+x `disk_usd_day` / 24. `list` and `status` show both; `delete` appends them (as last seen; nothing for
+an agent never seen running) to `spend.jsonl`; `spend` lists agents and deleted agents, with the
+total.
 
 ## 6. The machine (`remote/cs.py`)
 
@@ -264,7 +322,9 @@ stop with the container's key.
 **6.3 The watchdog** (`cs.py watch`, one per container by flock; `status` and `agent-attach` start it
 if it is not running). Every minute: while the frontend is `tmux`, keep the tmux session `agent`
 (running `cs.py claude`) alive; count `used_seconds`. Busy = the conversation files under
-`~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy. Colleague:
+`~/.claude/projects` changed (tmux or VS Code alike), the container's CPU or a GPU is busy, or the
+outputs are being copied off the machine (`D/copying` touched within the last two minutes: 5.5; a copy
+is not the agent doing something, so it brings no reminder back). Colleague:
 a nudge after half of `idle_minutes` while it says `needs-you`; autonomous and colleague: a check-in
 after 20 minutes without the conversation growing while it says `working`. Each comes again only once
 the agent itself did something: a status update (`agent.json`'s `at`), CPU or GPU work. (A reminder
@@ -312,8 +372,10 @@ reports the new mode and `tmux`.
 and untracked files up to 10 MB each (100 MB in all), commit `Autosave (<reason>)` unless the
 pre-commit hook refuses, push. A **final** save (every stop: the watchdog's and `crab-student stop`'s)
 puts the stop note `agent-runs/<name>/stopped.json` in the same commit: `{stopped_at (epoch seconds),
-reason, outputs {files, bytes, sample}, large_files [{path, bytes}], not_committed (first 50 paths),
-not_committed_count}`. A refused commit leaves no note. The note on the branch is the only record of a
+reason, outputs {files, bytes, sample, digest}, large_files [{path, bytes}], not_committed (first 50
+paths), not_committed_count}`. `digest` is `cs.fingerprint` of the outputs: the SHA-256 over each
+file's path, size and time of last change that `machine.OUTPUTS_SCRIPT` takes too (the two must stay
+the same formula). A refused commit leaves no note. The note on the branch is the only record of a
 stop; `delete` reads it.
 
 **6.8 Commands over ssh** (`cd D && ./python cs.py ...`; each prints one JSON object last; a failure
@@ -322,7 +384,8 @@ prints `{"error": ...}` and exits 1):
 - `status`: name, mode, frontend, agent `{state, message, at}` (`{}` until set), idle_seconds,
   used_hours, stopping, stop_reason, stop_sent_for, git `{branch, head, dirty, unpushed}`.
 - `save --reason R [--final]`: committed, pushed, skipped, dirty, unpushed, error, note, note_committed.
-- `check`: a save, then its fields (unpushed after a fetch) plus outputs and large_files.
+- `check`: a save, then its fields (unpushed after a fetch) plus outputs (as in the stop note) and
+  large_files.
 - `send`: stdin typed into the pane as one bracketed paste; refused while Claude is in VS Code.
 
 `open` runs `agent-attach` with `ssh -t`: `tmux -u attach` (waiting up to 30 s for the session), else a

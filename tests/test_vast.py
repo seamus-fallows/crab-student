@@ -72,6 +72,35 @@ def test_a_missing_or_expired_2fa_login_says_to_log_in_and_never_reads_as_gone(f
     assert len(fake_vast.calls("PUT", "/api/v0/asks/")) == 1  # (a refused rent is not retried)
 
 
+def test_an_expired_2fa_session_key_is_removed_so_that_logging_in_again_works(fake_vast):
+    """(The vastai CLI sends a session key left in place with `vastai tfa login` too, which then fails.)"""
+    core.write_private(core.vast_key_file(), "long-lived-key\n")
+    core.write_private(core.vast_session_file(), fake_vast.key + "\n")
+    made = (
+        time.time() - 26.5 * 3600
+    )  # (the login was 26 and a half hours ago: Vast does not say how long one lasts)
+    os.utime(core.vast_session_file(), (made, made))
+    answer_next(fake_vast, 1, 404, {"success": False, "msg": vast.SESSION_EXPIRED})
+    with pytest.raises(vast.VastError) as e:
+        vast.current_user()
+    assert vast.TFA_LOGIN in e.value.message and core.fmt_hours(26.5) in e.value.message
+    assert not core.vast_session_file().exists()
+    assert core.vast_key_file().read_text().strip() == "long-lived-key"
+
+
+def test_a_2fa_session_key_from_a_login_meanwhile_is_kept(fake_vast):
+    core.write_private(core.vast_session_file(), fake_vast.key + "\n")
+
+    def handle(method, path, query, body):  # (the old key's answer arrives after a new login)
+        core.write_private(core.vast_session_file(), "new-session-key\n")
+        return 404, {"success": False, "msg": vast.SESSION_EXPIRED}
+
+    fake_vast.handle = handle
+    with pytest.raises(vast.VastError):
+        vast.current_user()
+    assert core.vast_session_file().read_text().strip() == "new-session-key"
+
+
 def test_vast_url_overrides_the_address(fake_vast, monkeypatch):
     monkeypatch.setenv("VAST_URL", os.environ["VAST_URL"] + "/")
     assert vast.current_user()["id"] == 1

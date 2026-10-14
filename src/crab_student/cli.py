@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import json
 import math
@@ -11,15 +12,37 @@ import re
 import shutil
 import statistics
 import sys
+import threading
 import time
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 
 from crab_student import __version__, agents, core, github, launch, machine, offers, setup, vast
 
+LOOK_SECONDS = 180.0  # the longest a look at the agents (list, status, each look of wait) may take
+
 
 def say(text: str = "", err: bool = False) -> None:
     print(core.ascii_text(text), file=sys.stderr if err else sys.stdout, flush=True)
+
+
+@contextlib.contextmanager
+def deadline(seconds: float, what: str) -> Iterator[None]:
+    """Whatever watches the agents must hear back: if `what` is still going after `seconds` (a call to Vast,
+    ssh or GitHub that never returns), say so and end the command with exit code 1."""
+
+    def give_up() -> None:
+        say(f"error: {what} did not finish within {seconds:.0f} s. Try again.", err=True)
+        os._exit(1)
+
+    timer = threading.Timer(seconds, give_up)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
 
 
 def emit(result: dict, as_json: bool) -> None:
@@ -70,6 +93,12 @@ def _positive(text: str) -> int:
     if not text.isdigit() or int(text) < 1:
         raise argparse.ArgumentTypeError("must be a whole number, 1 or more")
     return int(text)
+
+
+def _minutes(text: str) -> float:
+    if not _amount(text):
+        raise argparse.ArgumentTypeError("must be a number of minutes above 0")
+    return float(text)
 
 
 # ---- commands ------------------------------------------------------------------------------------
@@ -241,6 +270,7 @@ def _launch_args(args: argparse.Namespace, brief: str) -> launch.LaunchArgs:
         effort=args.effort,
         fast=args.fast,
         setup=_setup(args.setup),
+        committed_only=args.committed_only,
     )
 
 
@@ -300,6 +330,48 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_delete(args: argparse.Namespace) -> int:
     emit(agents.delete(args.name, args.force, launch.Progress()), args.json)
+    return 0
+
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    emit(agents.fetch(args.name, Path(args.to) if args.to else None, launch.Progress()), args.json)
+    return 0
+
+
+def cmd_wait(args: argparse.Namespace) -> int:
+    def look(names: list[str] | None) -> tuple:
+        with deadline(LOOK_SECONDS, "looking at the agents"):
+            return agents.listing(names)
+
+    res = agents.wait(args.names, args.timeout * 60, look)
+    emit(res, args.json)
+    return res["exit_code"]
+
+
+def cmd_spend(args: argparse.Namespace) -> int:
+    with deadline(LOOK_SECONDS, "looking at the agents"):
+        res = agents.spending()
+    if args.json:
+        print(json.dumps(res))
+        return 0
+    rows = [(a["name"], a["machine"] or "-", a["hours"], a["usd"], a["state"]) for a in res["agents"]]
+    rows += [
+        (d["name"], d["machine"] or "-", d["hours"], d["usd"], f"deleted {d['deleted'][:10]}")
+        for d in res["deleted"]
+    ]
+    if not rows:
+        say("No agent has cost anything yet.")
+        return 0
+    name_w = max(4, *(len(r[0]) for r in rows)) + 2
+    machine_w = max(7, *(len(r[1]) for r in rows)) + 2
+    say(f"{'NAME':<{name_w}}{'MACHINE':<{machine_w}}{'TIME':<9}{'SPENT':<10}STATE")
+    for name, where, hours, usd, state in rows:
+        spent = "-" if usd is None else "~" + core.usd(usd)
+        say(f"{name:<{name_w}}{where:<{machine_w}}{core.fmt_hours(hours):<9}{spent:<10}{state}")
+    say(
+        f"\nAt least {core.usd(res['total_usd'])} in all: the machine time this computer saw, at each machine's "
+        "price, and the disk of machines it saw stopped (Vast's bill decides)."
+    )
     return 0
 
 
@@ -378,11 +450,14 @@ def table(views: list[agents.View]) -> list[str]:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    views, orphans = agents.listing()
+    with deadline(LOOK_SECONDS, "looking at the agents"):
+        views, orphans, problem = agents.listing()
     if args.json:
         print(json.dumps([asdict(v) for v in views]))
     else:
         say("\n".join(table(views)))
+    if problem and views:
+        say(f"warning: Vast could not be asked, so this is what ssh and the records say. {problem}", err=True)
     for inst in orphans:
         say(
             f"warning: machine {inst['id']} ({inst['label']}) belongs to no agent - Vast may not have confirmed "
@@ -393,7 +468,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    v = agents.view(args.name)
+    with deadline(LOOK_SECONDS, f"looking at {args.name}"):
+        v = agents.view(args.name)
     rec = core.load(args.name)
     headline = f"{v.name}: {v.state} - {v.message}"
     if args.json:
@@ -474,7 +550,8 @@ def cmd_open(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    # (no abbreviated flags: Claude Code's permission rules ask before `delete --force`, which `--fo` would dodge)
+    # No shortened flags (allow_abbrev): the permission rules that ask before `delete --force` and `fetch --to`
+    # look for those words, and would not see `--f` or `--t`.
     p = argparse.ArgumentParser(
         prog="crab-student", description="Claude Code agents on rented Vast.ai machines.", allow_abbrev=False
     )
@@ -545,6 +622,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--brief-file", metavar="PATH", help="the task brief (else read from stdin)")
     c.add_argument("--repo", metavar="PATH", help="your repo (default: the current folder)")
     c.add_argument("--no-repo", action="store_true", help="work in your private workspace repo instead")
+    c.add_argument(
+        "--committed-only",
+        action="store_true",
+        help="start from your last commit: leave out the uncommitted changes to tracked files (else carried over)",
+    )
     _agent_args(c)
     c.add_argument("--fake-claude", action="store_true", help="run a stand-in for Claude Code (tests)")
     c.add_argument("--dry-run", action="store_true", help="plan only: rent nothing")
@@ -562,6 +644,26 @@ def build_parser() -> argparse.ArgumentParser:
     cmd("decline", cmd_decline, "drop a launch waiting for your approval").add_argument("name")
     cmd("list", cmd_list, "every agent at a glance", json_flag=True)
     cmd("status", cmd_status, "one agent in detail", json_flag=True).add_argument("name")
+    c = cmd(
+        "wait",
+        cmd_wait,
+        "wait until an agent needs you (done, failed, needs you, stopped, a launch cut off or waiting for "
+        "approval, or deleted) or the time is up; exit code 1 when an agent could not be seen for 10 minutes",
+        json_flag=True,
+    )
+    c.add_argument(
+        "names",
+        nargs="*",
+        metavar="NAME",
+        help="the agents to watch (default: every agent, so one that already needs you ends the wait at once)",
+    )
+    c.add_argument(
+        "--timeout",
+        type=_minutes,
+        default=60,
+        metavar="MINUTES",
+        help="come back after this long even if nothing changed (default 60)",
+    )
     c = cmd(
         "open",
         cmd_open,
@@ -583,6 +685,26 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("name")
     c.add_argument(
         "--repo", metavar="PATH", help="your clone to fetch into (default: the one it was launched from)"
+    )
+    c = cmd(
+        "fetch",
+        cmd_fetch,
+        "copy a running agent's /root/outputs into a new folder here and check the copy (delete then lets the "
+        "files go while they stay as copied)",
+        json_flag=True,
+    )
+    c.add_argument("name")
+    c.add_argument(
+        "--to",
+        metavar="DIR",
+        help="the folder, which must be new or empty (default: ./NAME-outputs, or NAME-outputs-2, -3, ... "
+        "beside an earlier copy)",
+    )
+    cmd(
+        "spend",
+        cmd_spend,
+        "what your agents have cost so far, deleted ones too (an estimate from machine time)",
+        json_flag=True,
     )
     cmd("stop", cmd_stop, "save the agent's work, then stop its machine", json_flag=True).add_argument("name")
     c = cmd(

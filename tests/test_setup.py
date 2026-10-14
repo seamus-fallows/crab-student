@@ -161,8 +161,8 @@ def test_an_include_further_down_is_moved_first(isolated):
 
 
 def prefixes(rules: list[str]) -> list[str]:
-    assert all(re.fullmatch(r"Bash\(crab-student [a-z ]+(:\*| \*--force\*)\)", r) for r in rules), rules
-    return [re.sub(r"(:\*| \*--force\*)\)$", "", r[len("Bash(") :]) for r in rules]
+    assert all(re.fullmatch(r"Bash\(crab-student [a-z ]+(:\*| \*--[a-z]+\*)\)", r) for r in rules), rules
+    return [re.sub(r"(:\*| \*--[a-z]+\*)\)$", "", r[len("Bash(") :]) for r in rules]
 
 
 def matches(rule: str, line: str) -> bool:
@@ -174,12 +174,15 @@ def matches(rule: str, line: str) -> bool:
 
 
 def test_the_permission_rules():
-    # Spending beyond the gate, forcing a delete and changing settings or secrets always ask (an ask rule wins
-    # over an allow rule); the launcher, and a plain delete (it refuses to lose work), need no prompt.
+    # Spending beyond the gate, forcing a delete, changing settings or secrets, and copying a machine's files
+    # into a folder of the caller's choice always ask (an ask rule wins over an allow rule); the launcher, a
+    # plain delete (it refuses to lose work) and a fetch into its own new folder need no prompt.
     ask_first = ["approve job1", "delete job1 --force", "delete --force job1", "config idle_minutes 5", "init",
-                 "secret set HF_TOKEN", "secret delete HF_TOKEN"]  # fmt: skip
+                 "secret set HF_TOKEN", "secret delete HF_TOKEN", "fetch job1 --to data/job1",
+                 "fetch --to ~/.claude/skills/x job1"]  # fmt: skip
     allowed = ["guide launch", "offers --gpus 1", "list --json", "secret list", "launch job1 --hours 2",
-               "start job1 --json", "status job1 --json", "delete job1", "decline job1"]  # fmt: skip
+               "start job1 --json", "status job1 --json", "delete job1", "decline job1", "wait --json",
+               "wait job1 --timeout 90", "fetch job1 --json", "spend"]  # fmt: skip
     assert not any("extend" in rule for rule in setup.ALLOW + setup.ASK)  # (there is no time limit)
     for command in ask_first:
         assert any(matches(r, f"crab-student {command}") for r in setup.ASK), command
@@ -187,6 +190,17 @@ def test_the_permission_rules():
         line = f"crab-student {command}"
         assert any(matches(r, line) for r in setup.ALLOW), command
         assert not any(matches(r, line) for r in setup.ASK), command
+
+
+def test_a_flag_that_asks_first_is_not_taken_in_a_shorter_form():
+    """(The ask rules look for the whole word: `delete job1 --f` would force a delete without asking.)"""
+    parser = cli.build_parser()
+    asking = [re.fullmatch(r"Bash\(crab-student ([a-z]+) \*(--[a-z]+)\*\)", rule) for rule in setup.ASK]
+    flags = [m.groups() for m in asking if m]
+    assert ("delete", "--force") in flags and ("fetch", "--to") in flags
+    for command, flag in flags:
+        for short in (flag[:n] for n in range(3, len(flag))):
+            assert short in parser.parse_known_args([command, "job1", short])[1], (command, short)
 
 
 def test_the_skill_and_the_launch_guide():

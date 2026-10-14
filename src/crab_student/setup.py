@@ -54,18 +54,14 @@ NOT_A_TERMINAL = (
 )
 
 
-def interactive() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def _ask_secret(prompt: str) -> str:
-    if not interactive():
+    if not core.interactive():
         raise core.CrabError(f"init needs to ask you something, but {NOT_A_TERMINAL}", 2)
     return getpass.getpass(prompt).strip()
 
 
 def _say(label: str, text: str) -> None:
-    print(core.ascii_text(f"  {label:<11} {text}"), flush=True)
+    core.say(f"  {label:<11} {text}")
 
 
 def check_ready(fake_claude: bool = False) -> None:
@@ -79,13 +75,13 @@ def check_ready(fake_claude: bool = False) -> None:
 
 
 def init(renew_claude_token: bool = False) -> int:
-    print("crab-student setup")
+    core.say("crab-student setup")
     ok = all([_vast_step(), _github_step(), _ssh_step(), _claude_step(renew_claude_token)])
     install_claude_files()
     _say("Claude Code", "skill and permission rules installed in ~/.claude")
     ok = _tools_step() and ok
     if ok:
-        print(
+        core.say(
             'Ready. In Claude Code, ask for a task to run on a GPU, e.g. "run the ablation on a GPU with crab-student".'
         )
     return 0 if ok else 1
@@ -95,9 +91,9 @@ def _vast_step() -> bool:
     path = core.vast_key_file()
     saved = path.read_text(encoding="utf-8").strip() if path.exists() else ""
     if not saved:
-        print(
-            "  Vast        Create an API key at https://cloud.vast.ai/manage-keys/ (it is saved where the vastai "
-            "CLI keeps it)."
+        _say(
+            "Vast",
+            "Create an API key at https://cloud.vast.ai/manage-keys/ (it is saved where the vastai CLI keeps it).",
         )
     key = saved or _ask_secret("              Paste it here (it will not be shown): ")
     try:
@@ -125,7 +121,7 @@ def _github_step() -> bool:
         )
         return False
     if subprocess.run([gh, "auth", "status"], capture_output=True).returncode != 0:
-        if not interactive():
+        if not core.interactive():
             _say("GitHub", "not logged in: run gh auth login in a terminal, then init again.")
             return False
         _say("GitHub", "logging in with gh auth login:")
@@ -165,8 +161,8 @@ def _claude_step(renew: bool) -> bool:
     if core.get_secret(core.TOKEN) and not renew:
         _say("Claude", "ok - a token for agents is stored")
         return True
-    print("  Claude      Agents use your Claude subscription through a long-lived token.")
-    print("              In another terminal, run: claude setup-token")
+    _say("Claude", "Agents use your Claude subscription through a long-lived token.")
+    _say("", "In another terminal, run: claude setup-token")
     for _ in range(3):
         token = "".join(
             _ask_secret("              Paste the token (sk-ant-oat01-...), it will not be shown: ").split()

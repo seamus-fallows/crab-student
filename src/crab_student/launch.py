@@ -28,19 +28,22 @@ NO_MACHINE = {"label": None, "instance_id": None, "ssh": None, "uploaded": False
               "machine": None, "short": None}  # fmt: skip
 
 # Vast runs this as root at every container start. It saves the container's own Vast key (only this
-# machine can use it), starts the dead-man switch (stop the machine once neither this start nor the
-# watchdog's heartbeat is newer than 45 minutes) and starts the watchdog once setup has been done.
-# Every command ends in ";" or "&", so it works whether Vast keeps the line breaks or not.
+# machine can use it), and the stop call's header with it, starts the dead-man switch (stop the machine
+# once neither this start nor the watchdog's heartbeat is newer than 45 minutes) and starts the watchdog
+# once setup has been done. The key stays off every command line: printf is the shell's own, and curl
+# reads the header from its file. Every command ends in ";" or "&", so it works whether Vast keeps the
+# line breaks or not.
 _STOP_CALL = (
-    'curl -s -m 30 -X PUT -H "Authorization: Bearer $CONTAINER_API_KEY" -H "Content-Type: application/json" '
+    'curl -s -m 30 -X PUT -H @vast.header -H "Content-Type: application/json" '
     '-d "{\\"state\\":\\"stopped\\"}" "${CS_VAST_URL:-https://console.vast.ai}/api/v0/instances/$CONTAINER_ID/"'
 )
 ONSTART = "\n".join(
     [
-        "D=/root/crab-student; mkdir -p $D/logs; cd $D; umask 077;",
+        f"D={machine.REMOTE_DIR}; mkdir -p $D/logs; cd $D; umask 077;",
         "env | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY|CS_VAST_URL)=' | sed 's/^/export /' > vast.env;",
+        "printf 'Authorization: Bearer %s\\n' \"$CONTAINER_API_KEY\" > vast.header;",
         "date +%s > booted;",
-        "nohup bash -c 'cd /root/crab-student; while sleep 60; do t=$(cat booted); "
+        "nohup bash -c 'while sleep 60; do t=$(cat booted); "  # (in D: it starts where onstart is)
         'h=$(stat -c %Y heartbeat 2>/dev/null || echo 0); [ "$h" -gt "$t" ] && t=$h; '
         f"if [ $(( $(date +%s) - t )) -gt 2700 ]; then . ./vast.env; {_STOP_CALL}; fi; done' "
         "> logs/deadman.log 2>&1 &",
@@ -449,7 +452,15 @@ def resume_machine(rec: dict, out: Progress) -> None:
         raise core.CrabError(
             f"{name}'s machine no longer exists on Vast. Try again: crab-student start {name}"
         )
+    start_again(rec, inst, out)
+
+
+def start_again(rec: dict, inst: dict, out: Progress) -> None:
+    """Start the agent's machine again unless it runs (a new start: why it last stopped no longer holds), and wait
+    until it answers ssh."""
+    name = rec["name"]
     if not vast.running(inst):
+        out.line(f"Starting {name}...")
         vast.set_state(rec["instance_id"], "running")
         core.new_session(rec)
         rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
@@ -457,7 +468,8 @@ def resume_machine(rec: dict, out: Progress) -> None:
         core.save(rec)
     if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
         raise core.CrabError(
-            f"{name}'s machine did not come back up ({why}). Try again later: crab-student start {name}"
+            f"{name} did not come back up ({why}). Vast keeps trying: check again with "
+            f"crab-student status {name}, or stop it with crab-student stop {name}."
         )
 
 
@@ -877,17 +889,7 @@ def start(name: str, out: Progress, offer_ids: list[int] | None = None) -> dict:
         if vast.running(inst):
             out.line(f"{name} is already running.")
             return result(rec, "working", [])
-        vast.set_state(rec["instance_id"], "running")
-        core.new_session(rec)
-        rec["last_seen"] = {**(rec.get("last_seen") or {}), "stop_reason": None}
-        rec.update(last_start=time.time(), stopped_since=None)
-        core.save(rec)
-        out.line(f"Starting {name}...")
-        if why := wait_boot(rec, out, time.time() + BOOT_TIMEOUT):
-            raise core.CrabError(
-                f"{name} did not come back up ({why}). Vast keeps trying: check again with "
-                f"crab-student status {name}, or stop it with crab-student stop {name}."
-            )
+        start_again(rec, inst, out)
         machine.write_ssh_config()
         return result(rec, "working", [])
 

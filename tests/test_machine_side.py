@@ -28,7 +28,6 @@ CS_PY, FAKE_CLAUDE = REMOTE / "cs.py", REMOTE / "fake_claude.py"
 T0 = 1_700_000_000.0
 HF = "hf_" + "Zq8x" * 8  # a task secret's value
 TOKEN = "sk-ant-oat01-" + "Tk7w" * 20  # the Claude token
-KEY_LINE = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"  # (deploy key, line 1)
 NOTE = "agent-runs/job1/stopped.json"  # the stop note, in the repo
 MACHINE_FILES = ("rules.md", "rules-autonomous.md", "rules-colleague.md", "handoff.md")
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX (flock, sh scripts, symlinks)")
@@ -586,12 +585,10 @@ def test_declare_alone_shows_the_status_and_the_machine_time(cs, capsys):
     assert "0h30m" in shown and "60 min" in shown  # the machine time, and when it stops by itself
 
 
-@pytest.mark.parametrize("secret", ["HF_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "the deploy key"])
+@pytest.mark.parametrize("secret", ["HF_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
 def test_pre_commit_refuses_a_secret_value_and_never_prints_it(cs, repo, capsys, secret):
     secret_files(cs, {"HF_TOKEN": HF})
-    key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{KEY_LINE}\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
-    (cs.D / "deploy_key").write_text(key)
-    value = {"HF_TOKEN": HF, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "the deploy key": KEY_LINE}[secret]
+    value = {"HF_TOKEN": HF, "CLAUDE_CODE_OAUTH_TOKEN": TOKEN}[secret]
     (repo / "train.py").write_text(f"print('hi')\nkey = '{value}'\n")
     git(repo, "add", "train.py")
     assert cs.cmd_hook("pre-commit", []) == 1
@@ -599,10 +596,24 @@ def test_pre_commit_refuses_a_secret_value_and_never_prints_it(cs, repo, capsys,
     assert secret in err and "train.py" in err and value not in err
 
 
+@pytest.mark.parametrize("kind", ["OPENSSH PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "PRIVATE KEY",
+                                  "ENCRYPTED PRIVATE KEY", "PGP PRIVATE KEY BLOCK"])  # fmt: skip
+def test_pre_commit_refuses_any_private_key_and_never_prints_it(cs, repo, capsys, kind):
+    body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW"
+    (repo / "id_test").write_text(f"-----BEGIN {kind}-----\n{body}\n-----END {kind}-----\n")
+    git(repo, "add", "id_test")
+    assert cs.cmd_hook("pre-commit", []) == 1
+    err = capsys.readouterr().err
+    assert "id_test" in err and body not in err
+
+
 def test_pre_commit_passes_ordinary_changes_and_refuses_a_file_over_50_mb(cs, repo, sized, capsys):
     secret_files(cs, {"SHORT": "abc"})  # (values under 8 characters are not looked for)
     (repo / "train.py").write_text("x = 'abc'\n")
-    git(repo, "add", "train.py")
+    (repo / "server.pub").write_text(
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n"
+    )
+    git(repo, "add", "train.py", "server.pub")
     assert cs.cmd_hook("pre-commit", []) == 0
     sized(repo / "data.bin", 51_000_000)
     git(repo, "add", "data.bin")
@@ -644,6 +655,21 @@ def test_nothing_the_agent_reads_names_the_tool(cs):
     assert not any("crab" in text.lower() or "worker" in text.lower() for text in texts)
     for message in (cs.RESTART_NOTE, cs.NUDGE, cs.CHECK_IN, cs.HANDOFF_PROMPT):
         assert message.startswith("Automated message from the machine:")
+
+
+def test_nothing_setup_leaves_where_the_agent_looks_names_the_tool(cs, bare, monkeypatch):
+    """The login profile, the agent's commands, the git hooks and git's settings name the machine's folder."""
+    monkeypatch.setattr(
+        cs, "PY", "/usr/bin/python3"
+    )  # (this test's own Python may live under the tool's name)
+    monkeypatch.setattr(cs.shutil, "which", lambda name: "/usr/bin/" + name)  # (tmux is there)
+    c = set_config(cs, mode="interactive", fake_claude=True)
+    cs.setup_environment(c, {})
+    cs.setup_repository(c, {})
+    written = [cs.PROFILE_D / "agent.sh", cs.ROOT / ".bashrc", cs.ROOT / ".tmux.conf", *cs.BIN.iterdir(),
+               *(cs.D / "hooks").iterdir()]  # fmt: skip
+    texts = [path.read_text() for path in written] + [git(c["repo_dir"], "config", "--list")]
+    assert not any("crab" in text.lower() for text in texts)
 
 
 # ---- notifications and the watchdog's stop -------------------------------------------------------
@@ -748,6 +774,34 @@ def test_a_watchdog_stop_pushes_the_stop_note_with_its_reason(cs, repo, bare, si
     assert pushed_note(bare)["reason"] == reason and last_commit_files(bare) == ["README.md", NOTE]
     assert head(bare, "agent/job1") == head(repo) and git(repo, "status", "--porcelain") == ""
     assert [r["method"] for r in sink] == ["PUT"]  # (then Vast is asked to stop the machine)
+
+
+@posix_only
+def test_the_dead_man_switch_stops_the_machine_with_its_key_on_no_command_line(tmp_path):
+    """Vast's onstart, run with stand-ins: the loop goes round once, 50 minutes after the start with no
+    heartbeat, and curl notes its arguments and the headers it reads from files."""
+    from crab_student import launch, machine
+
+    d, tools = tmp_path / "machine", tmp_path / "tools"
+    tools.mkdir()
+    fakes = {
+        "sleep": "[ -e slept ] && exit 1; touch slept",
+        "date": "n=$(cat dates 2>/dev/null || echo 0); echo $((n + 1)) > dates; echo $((1000 + 3000 * n))",
+        "curl": 'printf "%s\\n" "$@" > curl.args; for a in "$@"; do case $a in @*) cat "${a#@}";; esac; done'
+        " > curl.headers",
+    }
+    for name, script in fakes.items():
+        (tools / name).write_text(f"#!/bin/sh\n{script}\n")
+        (tools / name).chmod(0o755)
+    env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", CONTAINER_ID="42",
+               CONTAINER_API_KEY="key-42", CS_VAST_URL="http://vast.invalid")  # fmt: skip
+    onstart = launch.ONSTART.replace(machine.REMOTE_DIR, str(d))
+    subprocess.run(["bash", "-c", onstart], env=env, check=True, timeout=30)
+    assert wait_for(lambda: (d / "curl.headers").exists() and (d / "curl.headers").read_text(), 30)
+    args = (d / "curl.args").read_text().splitlines()
+    assert "http://vast.invalid/api/v0/instances/42/" in args and not any("key-42" in a for a in args)
+    assert "Authorization: Bearer key-42" in (d / "curl.headers").read_text().splitlines()
+    assert (d / "vast.header").stat().st_mode & 0o777 == 0o600
 
 
 # ---- Claude Code's environment and command line --------------------------------------------------

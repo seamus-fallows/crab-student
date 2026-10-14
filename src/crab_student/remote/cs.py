@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CS_ROOT", "/root"))
-D = ROOT / "crab-student"
+D = ROOT / ".machine"  # (machine.REMOTE_DIR on the local side)
 OUTPUTS = ROOT / "outputs"
 COPYING = (
     D / "copying"
@@ -46,6 +46,8 @@ PY = sys.executable or "python3"
 CPU_BUSY_CORES = 0.25
 QUIET_MINUTES = 20  # a "working" agent silent this long has likely ended its turn: it gets a check-in
 GIT_BUSY = ("MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD")
+# The first line of any private key (PEM, OpenSSH, PGP): the hooks keep keys out of git.
+PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY")
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".cache"}
 STEPS = ("environment", "repository", "dependencies", "Claude Code", "agent settings", "starting the agent")
 DEPS_TIMEOUT = 1800  # (30 minutes, room for CUDA wheels on a slow host, within the dead-man switch's 45)
@@ -1362,18 +1364,17 @@ def cmd_hook(name: str, args: list) -> int:
         read_env_file(D / "secrets.env"),
         CLAUDE_CODE_OAUTH_TOKEN=read_env_file(D / "claude.env").get("CLAUDE_CODE_OAUTH_TOKEN", ""),
     )
-    key_lines = (
-        [x for x in (D / "deploy_key").read_text().splitlines() if x and not x.startswith("-")][:1]
-        if (D / "deploy_key").exists()
-        else []
-    )
-    if key_lines:
-        secrets["the deploy key"] = key_lines[0]
     current = ""
     for line in git("diff", "--cached", "-U0", "--no-color").splitlines():
         if line.startswith("+++ "):
             current = line[6:] if line.startswith("+++ b/") else line[4:]
         elif line.startswith("+"):
+            if PRIVATE_KEY.search(line):  # (the machine's deploy key, or any other)
+                print(
+                    f"Refused: {current} contains a private key. Keep private keys out of git.",
+                    file=sys.stderr,
+                )
+                return 1
             for secret, value in secrets.items():
                 if len(value) >= 8 and value in line:
                     print(

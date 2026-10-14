@@ -277,7 +277,7 @@ total.
 
 ## 6. The machine (`remote/cs.py`)
 
-`D=/root/crab-student` (the onstart command names it); the repo at `/root/work/<repo>`; big outputs in
+`D=/root/.machine` (the onstart command names it); the repo at `/root/work/<repo>`; big outputs in
 `/root/outputs`; the brief at `/root/BRIEF.md` (the agent never needs `D`).
 
 **6.1 Upload and setup.** One ssh command, `mkdir -p D && tar -xzf - -C D --no-same-owner && cd D &&
@@ -314,7 +314,8 @@ waits for a long step. The steps:
    wait for the conversation file. Last, a wait for VS Code's server, whose failure is only a warning.
 
 **6.2 onstart** (run by Vast as root at every container start; each command ends in `;` or `&`): write
-`CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` (0600) and the start time to `booted`;
+`CONTAINER_ID`, `CONTAINER_API_KEY`, `CS_VAST_URL` to `vast.env` and the stop call's header to `vast.header`
+(both 0600: curl reads the key from that file) and the start time to `booted`;
 start the dead-man loop; start the watchdog (`./python cs.py watch`) if `setup-done` exists. **Dead-man
 loop:** every 60 s, if the newer of `booted` and `heartbeat`'s mtime is over 45 minutes old, call Vast
 stop with the container's key.
@@ -394,5 +395,5 @@ login shell with a hint.
 **6.9 The agent's tools.** `agent-status working|needs-you|done|failed "<message>"` writes `agent.json`;
 `done` is refused until `agent-runs/<name>/REPORT.md` is committed and nothing is uncommitted or
 unpushed. `agent-status` alone shows the status and the machine time. Hooks: `pre-commit` refuses staged
-lines containing a secret's value (the token and deploy key too) and files over 50 MB; `pre-push`
+lines containing a secret's value (the token's too) or a private key, and files over 50 MB; `pre-push`
 refuses any ref but `refs/heads/<branch>`, and deleting it.

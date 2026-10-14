@@ -49,13 +49,6 @@ class View:
     settings: dict  # the Claude Code settings the machine was given (model, effortLevel, fastMode)
 
 
-def _status(rec: dict) -> dict | None:
-    try:
-        return machine.remote(rec["name"], ["status"], timeout=20)
-    except core.CrabError:
-        return None
-
-
 def views(names: list[str] | None = None) -> list[View]:
     return listing(names)[0]
 
@@ -73,22 +66,30 @@ def listing(names: list[str] | None = None) -> tuple[list[View], list[dict], str
         except core.CrabError as e:
             insts, problem = None, e.message
     if insts is None:
-        live = [r for r in recs if r["phase"] == "ready" and r.get("ssh") and not r.get("stopped_since")]
+        live = [
+            r["name"] for r in recs if r["phase"] == "ready" and r.get("ssh") and not r.get("stopped_since")
+        ]
     else:
-        live = [r for r in recs if r["phase"] == "ready" and vast.running(insts.get(r["instance_id"]))]
+        live = [
+            r["name"] for r in recs if r["phase"] == "ready" and vast.running(insts.get(r["instance_id"]))
+        ]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        statuses = dict(zip([r["name"] for r in live], pool.map(_status, live), strict=True))
+        statuses = dict(zip(live, pool.map(machine.agent_status, live), strict=True))
     result, moved = [], False
     for rec in recs:
         inst = insts.get(rec.get("instance_id")) if insts else None
         st = statuses.get(rec["name"])
+        refused = ""
         if insts is not None and st and (st.get("stop_sent_for") or 0) > STOP_STUCK:
-            vast.set_state(rec["instance_id"], "stopped")  # (Vast did not take the machine's own stop call)
+            try:  # (Vast did not take the machine's own stop call)
+                vast.set_state(rec["instance_id"], "stopped")
+            except vast.VastError as e:  # (said in its line: it must not fail the whole list)
+                refused = f" - {e.message}"
         busy = core.is_locked(rec["name"])
         if not busy and (inst or st):
             moved |= _remember(rec, inst, st)
         state, message = display_state(rec, inst, st, busy, problem)
-        result.append(_view(rec, inst, st, state, message))
+        result.append(_view(rec, inst, st, state, message + refused))
     if moved:
         machine.write_ssh_config()
     # (records read again: a launch running alongside may have saved a rent since the first read)
@@ -396,7 +397,7 @@ def delete(name: str, force: bool, out: launch.Progress) -> dict:
                 )
             held = res.get("outputs") or {}
             if problems := _problems(res, _copy(rec, None if running else held) if held.get("files") else ""):
-                cfg = str(machine.config_file()).replace("\\", "/")
+                cfg = machine.config_file().as_posix()
                 start = [] if running else [f"  crab-student start {name}"]
                 raise core.CrabError(
                     "\n".join(
@@ -614,7 +615,7 @@ def send(name: str, text: str) -> dict:
         raise core.CrabError(
             f"{name} is not running, so it cannot get a message. Start it: crab-student start {name}"
         )
-    if (_status(rec) or {}).get("frontend") == "vscode":
+    if (machine.agent_status(name) or {}).get("frontend") == "vscode":
         raise core.CrabError(
             f"{name} is an interactive agent in VS Code: type to it there. {_vscode_hint(name)}"
         )
@@ -647,11 +648,10 @@ def open_one(name: str) -> int:
     """Attach the terminal to a running agent. An interactive agent whose Claude works in VS Code is opened there,
     and on a terminal this then waits for its hand-off and attaches to the agent in tmux."""
     rec = core.load(name)
-    status = machine.agent_status(rec)
-    if status["frontend"] != "vscode":
+    if not machine.in_vscode(rec):
         return machine.open_one(name)
-    machine.open_vscode(rec, status)
-    if not machine.interactive() or not machine.wait_for_handoff(name):
+    machine.open_vscode(rec, panel=True)
+    if not core.interactive() or not machine.wait_for_handoff(name):
         return 0
     return machine.open_one(name)
 
@@ -662,7 +662,7 @@ def open_all(names: list[str]) -> int:
     skipped = [v.name for v in shown if v.frontend == "vscode"]
     rest = [v.name for v in shown if v.frontend != "vscode"]
     if skipped:
-        print(f"Skipped {', '.join(skipped)}: interactive, in VS Code (crab-student open NAME --vscode).")
+        core.say(f"Skipped {', '.join(skipped)}: interactive, in VS Code (crab-student open NAME --vscode).")
     if not rest:
         raise core.CrabError(
             "every running agent is interactive and in VS Code: crab-student open NAME --vscode"
@@ -673,21 +673,21 @@ def open_all(names: list[str]) -> int:
 def follow_launch(name: str) -> bool:
     """Show an agent's launch as it happens: its log so far, then each new line, until it ends. True once the agent
     is ready; else False, after saying what happened and what to do."""
-    print(
+    core.say(
         f"Launching {name}. Closing this window does not stop the launch (see it again: crab-student open {name})."
     )
     shown, quiet = _LogView(name), 0
     while True:
         shown.update()
         if not core.record_path(name).exists():
-            print(f"{name} was deleted.")
+            core.say(f"{name} was deleted.")
             return False
         busy = core.is_locked(name)
         quiet = 0 if busy else quiet + 1
         rec = core.load(name)
         if not busy and (rec["phase"] in ("ready", "failed", "pending") or quiet >= QUIET_ENDS):
             shown.update()
-            print(core.ascii_text(_launch_outcome(rec)), flush=True)
+            core.say(_launch_outcome(rec))
             return rec["phase"] == "ready"
         time.sleep(FOLLOW_POLL)
 
@@ -726,4 +726,4 @@ class _LogView:
         self.pos += len(complete)
         for line in complete.decode("utf-8", "replace").splitlines():
             clock, _, text = line.partition(" ")
-            print(core.ascii_text(f"{clock} {text.removeprefix('~ ')}"), flush=True)
+            core.say(f"{clock} {text.removeprefix('~ ')}")

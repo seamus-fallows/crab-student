@@ -51,7 +51,7 @@ def terminal(fake_vast, fake_github, monkeypatch) -> tuple[list[str], list[list[
 
     logged_in = SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0), call=no_login)
     monkeypatch.setattr(setup, "subprocess", logged_in)  # (gh auth status)
-    monkeypatch.setattr(setup, "interactive", lambda: True)
+    monkeypatch.setattr(core, "interactive", lambda: True)
     monkeypatch.setattr(setup.getpass, "getpass", ask)
     monkeypatch.setattr(core, "tool", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(core, "run", keygen)

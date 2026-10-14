@@ -247,7 +247,7 @@ def test_setup_runs_on_the_first_new_enough_python_and_links_it_for_what_comes_a
     if Path("/venv/main/bin/python").exists():
         pytest.skip("this computer has the image's /venv/main")
     python3 = fake_python(tmp_path / "bin" / "python3", version)
-    d = tmp_path / "crab-student"
+    d = tmp_path / ".machine"
     d.mkdir()
     env = {"PATH": f"{python3.parent}{os.pathsep}/usr/bin{os.pathsep}/bin"}
     p = subprocess.run(
@@ -307,7 +307,7 @@ def outputs(tmp_path, monkeypatch):
     """A machine's /root/outputs (a temporary folder), reached through the stand-in for ssh."""
     root = tmp_path / "root"
     (root / "outputs").mkdir(parents=True)
-    (root / "crab-student").mkdir()
+    (root / Path(machine.REMOTE_DIR).name).mkdir()  # (the machine's own folder, cs.D)
     ssh = tmp_path / "fake_ssh.py"
     ssh.write_text(FAKE_SSH)
     monkeypatch.setenv("CS_ROOT", str(root))
@@ -367,7 +367,7 @@ def test_the_machine_takes_the_same_fingerprint_of_its_outputs_as_the_copy_and_s
 def test_a_machine_that_cannot_note_the_copy_still_sends_its_files(outputs, tmp_path):
     """(A full or read-only disk is when the outputs most need to come off the machine.)"""
     (outputs / "best.pt").write_bytes(b"w" * 1000)
-    (outputs.parent / "crab-student" / "copying").mkdir()  # (nothing can be written where the note goes)
+    (outputs.parent / Path(machine.REMOTE_DIR).name / "copying").mkdir()  # (no note can be written there)
     got = machine.fetch_outputs("job1", tmp_path / "copy", lambda files, size: None)
     assert (got["files"], got["sent"]["files"]) == (1, 1) and (tmp_path / "copy" / "best.pt").exists()
 
@@ -431,7 +431,7 @@ def test_only_names_that_stay_inside_the_folder_are_written(tmp_path):
 
 
 def test_open_without_a_terminal_asks_for_one(monkeypatch):
-    monkeypatch.setattr(machine, "interactive", lambda: False)
+    monkeypatch.setattr(core, "interactive", lambda: False)
     fails(2, machine.open_one, "job1")
 
 
@@ -496,46 +496,54 @@ def panel_prompt(url: str) -> str:
     return urllib.parse.parse_qs(query)["prompt"][0]
 
 
-def test_open_vscode_types_an_interactive_agents_task_into_the_claude_panel(machines, vscode):
+def test_open_vscode_types_an_interactive_agents_task_into_the_claude_panel(vscode):
     brief = "Fix the flaky test in tests/test_io.py & get CI to 100% green.\n\nUse pytest -x + the logs."
-    machines.replies[("job1", "status")] = {"frontend": "vscode"}
-    assert machine.open_vscode(agent_record(brief=brief)) == 0
+    assert machine.open_vscode(agent_record(brief=brief), panel=True) == 0
     assert vscode["code"] == [
         ["/usr/bin/code", "--remote", "ssh-remote+crab-student-job1", "/root/work/proj"]
     ]
     [url] = vscode["urls"]
     assert panel_prompt(url) == brief.strip()
+    assert machine.open_vscode(agent_record("colleague", brief=brief), panel=False) == 0
+    assert len(vscode["code"]) == 2 and len(vscode["urls"]) == 1  # (Claude works in tmux: no panel)
 
 
-@pytest.mark.parametrize("mode, status, panel", [
+@pytest.mark.parametrize("mode, status, works_there", [
+    ("interactive", {"frontend": "vscode"}, True),
     ("interactive", {"frontend": "tmux"}, False),  # (handed off since the record was written)
     ("colleague", {"frontend": "tmux"}, False),
     ("interactive", machine.Unreachable("no answer"), True),  # (the machine cannot say: the record does)
     ("colleague", machine.Unreachable("no answer"), False),
 ])  # fmt: skip
-def test_open_vscode_opens_the_claude_panel_only_while_claude_works_there(
-    machines, vscode, mode, status, panel
+def test_claude_works_in_vs_code_as_the_machine_says_else_as_the_record_says(
+    machines, mode, status, works_there
 ):
     machines.replies[("job1", "status")] = status
-    assert machine.open_vscode(agent_record(mode, brief="Train the model.")) == 0
-    assert len(vscode["code"]) == 1 and bool(vscode["urls"]) == panel
+    assert machine.in_vscode(agent_record(mode)) is works_there
 
 
-def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(machines, vscode):
-    machines.replies[("job1", "status")] = {"frontend": "vscode"}
-    machine.open_vscode(agent_record(brief="Train the model. " * 400))
+def test_a_brief_too_long_for_the_panel_is_pointed_to_instead(vscode):
+    machine.open_vscode(agent_record(brief="Train the model. " * 400), panel=True)
     assert "/root/BRIEF.md" in panel_prompt(vscode["urls"][0])
+
+
+def test_what_open_vscode_prints_is_ascii(vscode, monkeypatch, tmp_path, capsys):
+    settings = (
+        tmp_path / "Zoë" / "settings.json"
+    )  # (VS Code's settings under a home folder named outside ASCII)
+    settings.parent.mkdir()
+    settings.write_text("{\n    // a comment\n}\n", encoding="utf-8")
+    monkeypatch.setattr(core, "vscode_settings_file", lambda: settings)
+    rec = {"name": "job1", "mode": "interactive", "repo": {"dir": "/root/work/café"}}
+    assert machine.open_vscode(rec, panel=False) == 0
+    out = capsys.readouterr().out
+    assert out.isascii() and out.count("\n") == 2  # (the platform it will ask about, and what opens)
 
 
 def test_open_vscode_without_the_code_command_says_how_to_get_it(monkeypatch, vscode):
     monkeypatch.setattr(core, "tool", lambda name: None)
-    assert "'code' command" in fails(1, machine.open_vscode, agent_record()).message
+    assert "'code' command" in fails(1, machine.open_vscode, agent_record(), True).message
     assert vscode == {"code": [], "urls": []}
-
-
-def test_open_vscode_on_an_agent_whose_status_is_known_does_not_ask_the_machine_again(machines, vscode):
-    machine.open_vscode(agent_record(brief="Train the model."), {"frontend": "vscode"})
-    assert machines.calls == [] and vscode["urls"]
 
 
 def test_the_users_vs_code_commit_goes_to_the_machine(monkeypatch):

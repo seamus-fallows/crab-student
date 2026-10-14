@@ -43,7 +43,7 @@ def ssh_path(path: Path) -> str:
     try:
         return "~/" + path.relative_to(Path.home()).as_posix()
     except ValueError:
-        return '"' + str(path).replace("\\", "/") + '"'
+        return f'"{path.as_posix()}"'
 
 
 def agents_dir() -> Path:
@@ -524,3 +524,16 @@ def fmt_hours(h: float | None) -> str:
 
 def ascii_text(text: str) -> str:
     return text.encode("ascii", "replace").decode("ascii")
+
+
+# ---- the terminal --------------------------------------------------------------------------------
+
+
+def interactive() -> bool:
+    """Someone is at this terminal (stdin and stdout are both one)."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def say(text: str = "", err: bool = False) -> None:
+    """A line on the terminal (stderr with `err`), in ASCII."""
+    print(ascii_text(text), file=sys.stderr if err else sys.stdout, flush=True)

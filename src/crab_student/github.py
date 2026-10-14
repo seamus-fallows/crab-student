@@ -76,10 +76,10 @@ def ssh_command(key_path: Path) -> str:
     """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key. git runs it with sh, so every
     argument is quoted for sh; ssh splits an option's value on spaces itself, so the known-hosts path is one ssh
     reads whole (core.ssh_path)."""
-    ssh = (core.tool("ssh") or "ssh").replace("\\", "/")
+    ssh = Path(core.tool("ssh") or "ssh").as_posix()
     hosts = f"UserKnownHostsFile={core.ssh_path(known_hosts_file())}"
     return shlex.join(
-        [ssh, "-i", str(key_path).replace("\\", "/"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+        [ssh, "-i", key_path.as_posix(), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
          "-o", hosts, "-o", "StrictHostKeyChecking=yes"]
     )  # fmt: skip
 

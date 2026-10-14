@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 
 from crab_student import core
 
-REMOTE_DIR = "/root/crab-student"
+REMOTE_DIR = "/root/.machine"  # (hidden, and not named after the tool: the agent never hears its name)
 MIN_PYTHON = (3, 11)  # (the local side's too: the tests run the machine code on it)
 # The machine code runs on the first Python new enough among the image's python3 and /venv/main's. Setup links
 # it as D/python, and everything after runs that link (the commands over ssh, the watchdog Vast's onstart
@@ -414,18 +414,14 @@ def _target(dest: Path, name: str) -> Path | None:
 # ---- terminals -----------------------------------------------------------------------------------
 
 
-def interactive() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def open_one(name: str) -> int:
     argv = [*ssh_cmd(name, tty=True), "agent-attach"]
-    if interactive():
-        print(f"Attaching to {name} (detach: Ctrl-b d - the agent keeps running).", flush=True)
+    if core.interactive():
+        core.say(f"Attaching to {name} (detach: Ctrl-b d - the agent keeps running).")
         return subprocess.call(argv)
     if os.name == "nt" and (wt := core.tool("wt")):
         subprocess.Popen([wt, "-w", "new", "new-tab", "--title", name, *argv])
-        print(f"Opened {name} in a new Windows Terminal window.")
+        core.say(f"Opened {name} in a new Windows Terminal window.")
         return 0
     raise core.CrabError(f'open needs a terminal: run "crab-student open {name}" in your terminal.', 2)
 
@@ -496,7 +492,9 @@ def open_all(names: list[str]) -> int:
         if right:
             args += [";", "move-focus", "right", *_wt_column(right[1:])]
         subprocess.Popen([wt, *args])
-        print(f"Opened {len(names)} agent{'s' if len(names) > 1 else ''} in a new Windows Terminal window.")
+        core.say(
+            f"Opened {len(names)} agent{'s' if len(names) > 1 else ''} in a new Windows Terminal window."
+        )
         return 0
     return _tmux_all(names)
 
@@ -508,7 +506,7 @@ def _tmux_all(names: list[str]) -> int:
             "open --all needs tmux on this computer (e.g. brew install tmux, or apt install tmux). "
             "Or open agents one at a time: crab-student open NAME"
         )
-    if not interactive():
+    if not core.interactive():
         raise core.CrabError(
             'open --all needs a terminal: run "crab-student open --all" in your terminal.', 2
         )
@@ -550,9 +548,9 @@ def local_vscode() -> str | None:
     return commit if re.fullmatch(r"[0-9a-f]{40}", commit) else None
 
 
-def open_vscode(rec: dict, status: dict | None = None) -> int:
-    """The machine in VS Code (Remote-SSH, the repo folder). For an interactive agent not handed off yet, also
-    the Claude panel, with the task typed in but not sent, once VS Code is connected."""
+def open_vscode(rec: dict, panel: bool) -> int:
+    """The machine in VS Code (Remote-SSH, the repo folder). With `panel` (Claude works in VS Code), also the
+    Claude panel, with the task typed in but not sent, once VS Code is connected."""
     code = core.tool("code")
     if not code:
         raise core.CrabError(
@@ -562,15 +560,13 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
     name, folder = rec["name"], rec["repo"]["dir"]
     remember_linux_host(name)
     subprocess.Popen([code, "--remote", f"ssh-remote+{alias(name)}", folder])
-    status = status or agent_status(rec)
-    if status.get("frontend") != "vscode":
-        print(f"Opening {name} in VS Code ({folder}). Its terminal shows the agent (tmux).")
+    if not panel:
+        core.say(f"Opening {name} in VS Code ({folder}). Its terminal shows the agent (tmux).")
         return 0
-    print(
+    core.say(
         f"Opening {name} in VS Code ({folder}). In a few seconds the task is typed into the Claude panel: check "
         "it and press Enter. To leave the agent working on its own when you are done, type /handoff in the chat "
-        '(or "/handoff autonomous <what to do next>").',
-        flush=True,
+        '(or "/handoff autonomous <what to do next>").'
     )
     time.sleep(VSCODE_URL_DELAY)
     # (through the OS URL handler: on Windows `code` is a batch file, which mangles the % escapes)
@@ -581,9 +577,8 @@ def open_vscode(rec: dict, status: dict | None = None) -> int:
 def wait_for_handoff(name: str) -> bool:
     """Wait until the interactive agent is handed off to tmux, asking its machine every few seconds: True then;
     False when the machine cannot be asked for a minute, or the user closes the wait with Ctrl+C."""
-    print(
-        f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close).",
-        flush=True,
+    core.say(
+        f"{name} is working in VS Code; this window becomes the agent's terminal after /handoff (Ctrl+C to close)."
     )
     misses = 0
     try:
@@ -595,7 +590,7 @@ def wait_for_handoff(name: str) -> bool:
             except core.CrabError as e:
                 misses += 1
                 if misses >= HANDOFF_MISSES:
-                    print(f"Stopped waiting: {e.message}")
+                    core.say(f"Stopped waiting: {e.message}")
                     return False
             time.sleep(HANDOFF_POLL)
     except KeyboardInterrupt:
@@ -611,7 +606,7 @@ def remember_linux_host(name: str) -> None:
         return
     settings = core.read_vscode_settings(path)
     if settings is None:
-        print(
+        core.say(
             f"VS Code will ask which platform {name}'s machine runs: pick Linux. ({path} has comments, so "
             "crab-student does not edit it; without them, it records each agent's platform.)"
         )
@@ -626,17 +621,19 @@ def remember_linux_host(name: str) -> None:
         core.write_vscode_settings(path, {**settings, REMOTE_PLATFORM: wanted})
 
 
-def agent_status(rec: dict) -> dict:
-    """The machine's status; `frontend` (where the agent's Claude works now: a hand-off moves it to tmux) comes
-    from the record when the machine cannot be asked."""
+def agent_status(name: str) -> dict | None:
+    """The machine's status (`cs.py status`), or None when it cannot be asked."""
     try:
-        st = remote(rec["name"], ["status"], timeout=20)
+        return remote(name, ["status"], timeout=20)
     except core.CrabError:
-        st = {}
-    return {
-        **st,
-        "frontend": st.get("frontend") or ("vscode" if rec.get("mode") == "interactive" else "tmux"),
-    }
+        return None
+
+
+def in_vscode(rec: dict) -> bool:
+    """Whether the agent's Claude works in VS Code (an interactive agent not handed off yet): as its machine says
+    (a hand-off moves it to tmux), or as its record's mode says when the machine cannot be asked."""
+    status = agent_status(rec["name"])
+    return status["frontend"] == "vscode" if status else rec["mode"] == "interactive"
 
 
 def _task_prompt(name: str) -> str:

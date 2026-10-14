@@ -23,17 +23,13 @@ from crab_student import __version__, agents, core, github, launch, machine, off
 LOOK_SECONDS = 180.0  # the longest a look at the agents (list, status, each look of wait) may take
 
 
-def say(text: str = "", err: bool = False) -> None:
-    print(core.ascii_text(text), file=sys.stderr if err else sys.stdout, flush=True)
-
-
 @contextlib.contextmanager
 def deadline(seconds: float, what: str) -> Iterator[None]:
     """Whatever watches the agents must hear back: if `what` is still going after `seconds` (a call to Vast,
     ssh or GitHub that never returns), say so and end the command with exit code 1."""
 
     def give_up() -> None:
-        say(f"error: {what} did not finish within {seconds:.0f} s. Try again.", err=True)
+        core.say(f"error: {what} did not finish within {seconds:.0f} s. Try again.", err=True)
         os._exit(1)
 
     timer = threading.Timer(seconds, give_up)
@@ -49,7 +45,7 @@ def emit(result: dict, as_json: bool) -> None:
     if as_json:
         print(json.dumps(result))
     else:
-        say(result["result_line"])
+        core.say(result["result_line"])
 
 
 # ---- argument types ------------------------------------------------------------------------------
@@ -112,17 +108,17 @@ def cmd_config(args: argparse.Namespace) -> int:
     cfg = core.load_config()
     if args.key and (args.reset or args.value is not None):
         value = core.set_config(args.key, None if args.reset else args.value)
-        say(json.dumps(value) if args.json else f"{args.key} = {_show(value)}")
+        core.say(json.dumps(value) if args.json else f"{args.key} = {_show(value)}")
     elif args.key:
         if args.key not in core.DEFAULTS:
             core.parse_value(args.key, "")  # (raises: unknown setting)
-        say(json.dumps(cfg[args.key]) if args.json else _show(cfg[args.key]))
+        core.say(json.dumps(cfg[args.key]) if args.json else _show(cfg[args.key]))
     elif args.json:
         print(json.dumps(cfg))
     else:
         width = max(map(len, cfg)) + 2
         for key, value in cfg.items():
-            say(f"{key:<{width}}{_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
+            core.say(f"{key:<{width}}{_show(value)}{'   (default)' if value == core.DEFAULTS[key] else ''}")
     return 0
 
 
@@ -163,13 +159,15 @@ def cmd_offers(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"kinds": kinds} if kinds else {"count": len(found), "offers": found[: args.limit]}))
         return 0
-    say("\n".join(kinds_table(kinds, f.cpu_task) if kinds else map(offer_line, found[: args.limit])))
+    core.say("\n".join(kinds_table(kinds, f.cpu_task) if kinds else map(offer_line, found[: args.limit])))
     floor = (
         f" (no GPU used: at least {offers.CPU_TASK_CPUS} vCPUs and {offers.CPU_TASK_RAM_GB} GB of RAM)"
         if f.cpu_task
         else ""
     )
-    say(f"\n{len(found)} offers fit{floor}. Prices include {f.disk_gb:g} GB of disk. Nothing was rented.")
+    core.say(
+        f"\n{len(found)} offers fit{floor}. Prices include {f.disk_gb:g} GB of disk. Nothing was rented."
+    )
     return 0
 
 
@@ -313,7 +311,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_decline(args: argparse.Namespace) -> int:
-    say(launch.decline(args.name))
+    core.say(launch.decline(args.name))
     return 0
 
 
@@ -360,15 +358,15 @@ def cmd_spend(args: argparse.Namespace) -> int:
         for d in res["deleted"]
     ]
     if not rows:
-        say("No agent has cost anything yet.")
+        core.say("No agent has cost anything yet.")
         return 0
     name_w = max(4, *(len(r[0]) for r in rows)) + 2
     machine_w = max(7, *(len(r[1]) for r in rows)) + 2
-    say(f"{'NAME':<{name_w}}{'MACHINE':<{machine_w}}{'TIME':<9}{'SPENT':<10}STATE")
+    core.say(f"{'NAME':<{name_w}}{'MACHINE':<{machine_w}}{'TIME':<9}{'SPENT':<10}STATE")
     for name, where, hours, usd, state in rows:
         spent = "-" if usd is None else "~" + core.usd(usd)
-        say(f"{name:<{name_w}}{where:<{machine_w}}{core.fmt_hours(hours):<9}{spent:<10}{state}")
-    say(
+        core.say(f"{name:<{name_w}}{where:<{machine_w}}{core.fmt_hours(hours):<9}{spent:<10}{state}")
+    core.say(
         f"\nAt least {core.usd(res['total_usd'])} in all: the machine time this computer saw, at each machine's "
         "price, and the disk of machines it saw stopped (Vast's bill decides)."
     )
@@ -377,7 +375,7 @@ def cmd_spend(args: argparse.Namespace) -> int:
 
 def cmd_send(args: argparse.Namespace) -> int:
     text = " ".join(args.text) if args.text else ("" if sys.stdin.isatty() else sys.stdin.read())
-    say(agents.send(args.name, text)["result_line"])
+    core.say(agents.send(args.name, text)["result_line"])
     return 0
 
 
@@ -389,19 +387,19 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    say(github.pull(core.load(args.name), Path(args.repo) if args.repo else None))
+    core.say(github.pull(core.load(args.name), Path(args.repo) if args.repo else None))
     return 0
 
 
 def cmd_guide(args: argparse.Namespace) -> int:
-    say(setup.guide(args.topic))
+    core.say(setup.guide(args.topic))
     return 0
 
 
 def cmd_secret(args: argparse.Namespace) -> int:
     names = core.secret_names()
     if args.action == "list":
-        print(json.dumps(names)) if args.json else say("\n".join(names) or "No secrets stored.")
+        print(json.dumps(names)) if args.json else core.say("\n".join(names) or "No secrets stored.")
         return 0
     if not args.name or not core.SECRET_NAME_RE.fullmatch(args.name):
         raise core.CrabError(
@@ -414,7 +412,7 @@ def cmd_secret(args: argparse.Namespace) -> int:
         core.set_secret_names([n for n in names if n != args.name])
         emit({"name": args.name, "result_line": f"Deleted {args.name}."}, args.json)
         return 0
-    if not setup.interactive():
+    if not core.interactive():
         raise core.CrabError(f"secret set asks for the value, but {setup.NOT_A_TERMINAL}", 2)
     value = getpass.getpass(f"Value of {args.name} (it will not be shown): ").strip()
     if not value:
@@ -455,11 +453,13 @@ def cmd_list(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps([asdict(v) for v in views]))
     else:
-        say("\n".join(table(views)))
+        core.say("\n".join(table(views)))
     if problem and views:
-        say(f"warning: Vast could not be asked, so this is what ssh and the records say. {problem}", err=True)
+        core.say(
+            f"warning: Vast could not be asked, so this is what ssh and the records say. {problem}", err=True
+        )
     for inst in orphans:
-        say(
+        core.say(
             f"warning: machine {inst['id']} ({inst['label']}) belongs to no agent - Vast may not have confirmed "
             "its rent. Destroy it at https://cloud.vast.ai/instances/",
             err=True,
@@ -480,13 +480,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             line = launch.result(rec, v.state, [], (rec.get("pending") or {}).get("reason"))["result_line"]
         print(json.dumps({**asdict(v), "result_line": line}))
         return 0
-    say(headline)
+    core.say(headline)
     if v.machine:
-        say(
+        core.say(
             f"  machine   {v.machine} - ${v.dph:.2f}/hr (instance {rec['instance_id']}, {v.vast_status or 'unknown'})"
         )
     where = {"tmux": ", in tmux", "vscode": ", in VS Code"}.get(v.frontend or "", "")
-    say(f"  agent     {v.mode}{where} - Claude Code: {launch.settings_text(v.settings)}")
+    core.say(f"  agent     {v.mode}{where} - Claude Code: {launch.settings_text(v.settings)}")
     git = v.git or {}
     pushed = (
         ""
@@ -496,27 +496,27 @@ def cmd_status(args: argparse.Namespace) -> int:
         else f" ({git.get('dirty', 0)} uncommitted, {git.get('unpushed', 0)} unpushed)"
     )
     on = f" on {rec['repo']['slug']}" if rec["repo"]["source"] else ""
-    say(f"  repo      {v.repo}, branch {v.branch}{on}{pushed}")
+    core.say(f"  repo      {v.repo}, branch {v.branch}{on}{pushed}")
     if rec["phase"] == "ready":
         idle = f"; idle {v.idle_min} min" if v.idle_min is not None else ""
-        say(
+        core.say(
             f"  time      {core.fmt_hours(v.used_h)} of machine time{idle}; it stops after "
             f"{rec['idle_minutes']} min without activity"
         )
-        say(f"  money     ~{core.usd(v.spent)} so far at ${v.dph:.2f}/hr" if v.dph else "  money     -")
+        core.say(f"  money     ~{core.usd(v.spent)} so far at ${v.dph:.2f}/hr" if v.dph else "  money     -")
     if v.stopped_h is not None:
         disk = (
             f"; its disk costs about ${v.disk_usd_day:.2f}/day until you delete it" if v.disk_usd_day else ""
         )
-        say(f"  stopped   {core.fmt_hours(v.stopped_h)} ago{disk}")
+        core.say(f"  stopped   {core.fmt_hours(v.stopped_h)} ago{disk}")
     if rec["phase"] == "ready":
         if v.frontend == "vscode" or (v.frontend is None and v.mode == "interactive"):
-            say(
+            core.say(
                 f"  open      crab-student open {v.name} --vscode    (/handoff in its chat: it carries on alone)"
             )
         else:
-            say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
-        say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
+            core.say(f"  open      crab-student open {v.name}    (VS Code: --vscode)")
+        core.say(f"  results   crab-student report {v.name} | crab-student pull {v.name}")
     return 0
 
 
@@ -541,7 +541,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         raise core.CrabError("no agent is running.")
     if args.vscode:
         for r in live:
-            machine.open_vscode(r)
+            machine.open_vscode(r, panel=machine.in_vscode(r))
         return 0
     return agents.open_one(args.name) if args.name else agents.open_all([r["name"] for r in live])
 
@@ -733,13 +733,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args) or 0
     except core.CrabError as e:
-        say(f"error: {e.message}", err=True)
+        core.say(f"error: {e.message}", err=True)
         return e.code
     except KeyboardInterrupt:
-        say("interrupted", err=True)
+        core.say("interrupted", err=True)
         return 1
     except Exception as e:
         if os.environ.get("CRAB_STUDENT_DEBUG"):
             raise
-        say(f"error: unexpected {type(e).__name__}: {e} (please report this)", err=True)
+        core.say(f"error: unexpected {type(e).__name__}: {e} (please report this)", err=True)
         return 1

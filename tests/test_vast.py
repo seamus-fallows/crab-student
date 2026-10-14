@@ -206,7 +206,7 @@ def test_stop_start_ssh_key_and_destroy(fake_vast):
     vast.add_ssh_key(iid, "ssh-ed25519 AAAA me\n")
     answer_next(fake_vast, 1, 400, {"success": False, "msg": "SSH key already exists on this instance"})
     vast.add_ssh_key(iid, "ssh-ed25519 AAAA me\n")
-    assert fake_vast.ssh_keys[iid] == ["ssh-ed25519 AAAA me"]
+    assert fake_vast.ssh_keys[iid] == ["ssh-ed25519 AAAA"]  # (no comment: it would show on the machine)
     vast.destroy(iid)
     vast.destroy(iid)  # already gone: fine
     assert iid not in fake_vast.instances

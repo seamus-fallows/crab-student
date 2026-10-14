@@ -174,7 +174,7 @@ def wait_for(condition, seconds: float) -> bool:
 
 class FakeProbe:
     def __init__(self) -> None:
-        self.bytes, self.cpu, self.gpu = 0, 0.0, False
+        self.bytes, self.cpu, self.gpu, self.copy = 0, 0.0, False, False
 
     def transcript_bytes(self) -> int:
         return self.bytes
@@ -184,6 +184,9 @@ class FakeProbe:
 
     def gpu_busy(self) -> bool:
         return self.gpu
+
+    def copying(self) -> bool:
+        return self.copy
 
     def work(self, minute: int) -> None:
         self.bytes += 100  # the conversation grows
@@ -214,14 +217,18 @@ def first_stop(seen: dict):
     return next(((a, m) for m, actions in seen.items() for a in actions if a.startswith("stop:")), None)
 
 
-@pytest.mark.parametrize("activity, stop", [(None, 60), ("transcript", 110), ("cpu", 110), ("gpu", 110)])
+@pytest.mark.parametrize(
+    "activity, stop", [(None, 60), ("transcript", 110), ("cpu", 110), ("gpu", 110), ("copy", 110)]
+)
 def test_the_machine_stops_after_idle_minutes_of_quiet_ticks(cs, activity, stop):
-    """Quiet: an unchanged transcript, no GPU, and idle Claude Code, tmux and sshd under a quarter core."""
+    """Quiet: an unchanged transcript, no GPU, no copy of the outputs under way, and idle Claude Code, tmux and
+    sshd under a quarter core."""
     st, probe, c = watchdog(cs, idle_minutes=60)
 
     def minute(m):  # quiet, but for one kind of activity at minute 50
         probe.cpu += 15.0 if activity == "cpu" and m == 50 else 14.0
         probe.gpu = activity == "gpu" and m == 50
+        probe.copy = activity == "copy" and m == 50
         if activity == "transcript" and m == 50:
             probe.work(m)
 
@@ -347,6 +354,17 @@ def test_conversations_count_in_tmux_and_in_vs_code_subagents_too(cs):
     assert before < grown < probe.transcript_bytes()
 
 
+def test_a_copy_of_the_outputs_counts_as_activity_only_while_it_is_under_way(cs):
+    probe = cs.Probe()
+    assert not probe.copying()
+    cs.COPYING.parent.mkdir(parents=True, exist_ok=True)
+    cs.COPYING.write_text("")  # (the copy touches it every half minute while bytes flow)
+    assert probe.copying()
+    for when in (time.time() - 2 * cs.TICK - 1, time.time() + 86400):  # (stalled; a time yet to come)
+        os.utime(cs.COPYING, (when, when))
+        assert not probe.copying()
+
+
 # ---- save, check, status, send -------------------------------------------------------------------
 
 
@@ -419,7 +437,9 @@ def test_a_final_save_commits_a_note_of_what_the_machine_leaves_behind(cs, repo,
     note = pushed_note(bare)
     assert note == res["note"] and note["reason"] == "idle"
     assert time.time() - 60 < note["stopped_at"] <= time.time()
-    assert note["outputs"] == {"files": 1, "bytes": 2000, "sample": ["run1/model.pt"]}
+    left = note["outputs"]
+    assert (left["files"], left["bytes"], left["sample"]) == (1, 2000, ["run1/model.pt"])
+    assert left["digest"] == cs.fingerprint(cs.OUTPUTS, ["run1/model.pt"])  # (for a delete after a fetch)
     assert note["large_files"] == [{"path": "ckpt/last.pt", "bytes": 100_000_000}]
     assert (note["not_committed"], note["not_committed_count"]) == (["data/big.bin"], 1)
     assert git(bare, "log", "-1", "--format=%s", "agent/job1").strip() == "Autosave (idle)"
@@ -440,7 +460,7 @@ def test_save_final_commits_the_note_alone_when_nothing_else_changed(cs, repo, b
     note = res["note"]
     assert note["reason"] == "user" and res["note_committed"] and res["pushed"] and res["committed"] == 0
     assert last_commit_files(bare) == [NOTE] and pushed_note(bare) == note
-    assert note["outputs"] == {"files": 0, "bytes": 0, "sample": []}
+    assert {**note["outputs"], "digest": ""} == {"files": 0, "bytes": 0, "sample": [], "digest": ""}
     assert note["large_files"] == note["not_committed"] == [] and note["not_committed_count"] == 0
 
 

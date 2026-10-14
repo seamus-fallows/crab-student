@@ -13,9 +13,11 @@ from crab_student import core, github, vast
 DATA = Path(__file__).parent / "data"
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{60,}")
 
-# Allowed without asking: reading, actions within the user's price rule (a launch that would need a
-# pricier machine waits for `approve`), and deleting (`delete` refuses to lose work unless forced). Always
-# asked: approving, forcing a delete, changing settings and secrets.
+# Allowed without asking: reading (fetch copies an agent's output files into a new folder NAME-outputs here),
+# actions within the user's price rule (a launch that would need a pricier machine waits for `approve`), and
+# deleting (`delete` refuses to lose work unless forced). Always asked: approving, forcing a delete, changing
+# settings and secrets, and a fetch into a folder of the caller's choice (the machine chooses the file names
+# and what is in them, and some folders give files a meaning: ~/.claude, .github, a folder on the PATH).
 ALLOW = [
     f"Bash(crab-student {c}:*)"
     for c in (
@@ -24,8 +26,11 @@ ALLOW = [
         "launch",
         "list",
         "status",
+        "wait",
+        "spend",
         "report",
         "pull",
+        "fetch",
         "send",
         "open",
         "stop",
@@ -37,7 +42,8 @@ ALLOW = [
 ]
 ASK = [
     *(f"Bash(crab-student {c}:*)" for c in ("approve", "config", "init", "secret set", "secret delete")),
-    "Bash(crab-student delete *--force*)",  # (an ask rule wins over the allow rule for delete)
+    "Bash(crab-student delete *--force*)",  # (an ask rule wins over the allow rule for delete, and for fetch)
+    "Bash(crab-student fetch *--to*)",
 ]
 # Claude Code may not raise the limits by editing crab-student's files instead of asking.
 DENY = ["Edit(~/.crab-student/**)", "Write(~/.crab-student/**)"]

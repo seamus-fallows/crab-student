@@ -311,7 +311,7 @@ def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_githu
 def test_committed_only_leaves_the_uncommitted_changes_behind(fake_github, user_repo):
     (user_repo / "README.md").write_text("changed\n")
     go(args(committed_only=True))
-    rec, bare = core.load("job1"), fake_github.bare("ada/proj")
+    rec, bare = core.load("job1"), fake_github.bare(AGENTS)
     assert (
         rec["repo"]["start_sha"] == git(user_repo, "rev-parse", "HEAD").strip() and not rec["repo"]["carried"]
     )

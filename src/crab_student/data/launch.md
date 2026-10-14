@@ -125,7 +125,7 @@ for the user to read and send.
 
 ## 10. Launch
 
-```
+```bash
 crab-student launch NAME --offers PICK,BACKUP1,BACKUP2 --disk GB [flags] [--secret NAME ...] --json <<'BRIEF'
 <the brief>
 BRIEF

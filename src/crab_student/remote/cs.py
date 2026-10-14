@@ -56,10 +56,7 @@ SESSION = "agent"  # the tmux session Claude Code runs in
 CLAUDE_KEYS = ("model", "effortLevel", "modelSettings", "fastMode")
 
 MACHINE = "Automated message from the machine: "
-FIRST_PROMPT = (
-    f"Your task is in {BRIEF} and your rules for working on this machine are in ~/.claude/CLAUDE.md. Read "
-    'both, run agent-status working "<first step>", then start.'
-)
+FIRST_PROMPT = f'Your task is in {BRIEF}. Read it, run agent-status working "<first step>", then start.'
 LOST = (
     " Your previous conversation could not be restored: read your report and git log to see how far you "
     "got, then continue."

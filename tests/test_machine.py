@@ -412,19 +412,6 @@ def test_open_all_on_windows_makes_two_columns_of_equal_panes(monkeypatch):
     assert ["move-focus", "left"] in groups and ["move-focus", "right"] in groups
 
 
-def test_a_racing_machine_is_checked_at_its_address_without_keeping_its_host_key(monkeypatch):
-    ran = []
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **kw: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0)
-    )
-    assert machine.reachable("job1", ("203.0.113.9", 41022))
-    ((_, *argv),) = ran
-    assert "root@203.0.113.9" in argv and argv[argv.index("-p") + 1] == "41022" and argv[-1] == "true"
-    assert machine.alias("job1") not in argv  # (only the winner's host key is kept, under the alias)
-    known = next(a.split("=", 1)[1] for a in argv if a.startswith("UserKnownHostsFile="))
-    assert known != str(core.ssh_dir() / "known_hosts").replace("\\", "/")
-
-
 @pytest.mark.parametrize("system", ["windows", "macos", "linux", "windows without wt"])
 def test_a_launch_window_follows_the_agent(system, monkeypatch):
     monkeypatch.setattr(machine.os, "name", "nt" if system.startswith("windows") else "posix")

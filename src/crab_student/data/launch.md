@@ -62,10 +62,12 @@ the whole wait, not only the parts it runs.
    or by CPU for a CPU task); then list the promising ones (`--help` shows the filters). Prices include
    the disk. Every offer shown can run the agent, and a CPU task's have at least 24 vCPUs and 64 GB of
    RAM. Add `--hours H` for a job that may run over a day, so the host's lease outlasts it.
-3. **Choose the pick and 2-4 backups** on other machines (other `machine` numbers). The launch rents the
-   pick and the first backup at once and keeps whichever starts first, so make the first backup nearly
-   as good as the pick. Backups can be a different kind of machine: write the brief so it works on any
-   of them (for example, "use every GPU on the machine").
+3. **Choose the pick and 2-4 backups** on other machines (other `machine` numbers). The launch rents
+   the pick; a backup is rented only if the machine before it does not start, in your order, and then
+   does the whole task. Rank the backups by how fast they would finish it, and leave out any that would
+   take far longer than the pick (a task of 1 hour on the pick must not end up on a machine that takes
+   4). Backups can be a different kind of machine: write the brief so it works on any of them (for
+   example, "use every GPU on the machine").
 
 For several agents, give each its own offers, dealing out the best ones one per agent first; no offer may
 appear in two lists.
@@ -129,11 +131,10 @@ BRIEF
 ```
 
 Run it in a Bash tool call with `run_in_background: true` and wait for it to finish: a launch can take
-longer than a Bash call's 10 minutes, since setup installs the repo's dependencies. The launch rents
-two machines at once, keeps the first that starts and destroys the other, and opens a window on the
-user's screen that follows it (you need not do anything about that). If the call ends without a result
-(it was cut off), run `crab-student start NAME --json` the same way, which continues the same launch.
-Never run `launch` twice for one task: that would make a second agent.
+longer than a Bash call's 10 minutes, since setup installs the repo's dependencies. The launch opens a
+window on the user's screen that follows it (you need not do anything about that). If the call ends
+without a result (it was cut off), run `crab-student start NAME --json` the same way, which continues
+the same launch. Never run `launch` twice for one task: that would make a second agent.
 
 **Several agents** (a sweep, or several separate tasks you were given together): write one brief per
 agent, each with its own name and offers, and run one `crab-student launch NAME ... --json` per agent,

@@ -8,20 +8,22 @@ the code does it is in the modules named here.
 1. **Money.** The launcher picks the offers but is never told the price; the CLI checks it. A launch
    rents without asking only when its pick costs `approve_above_usd_per_hour` or less, and then rents
    no backup that costs more; otherwise it records `pending` and exits 3. Only `approve`, an ask-rule
-   command, launches it, at up to the highest price among its offers. A failed launch tried again with
-   `start` is checked again against the record's `max_dph` or the current setting, whichever is
-   higher. Starting a stopped agent has no gate. No time limit, no cost estimate: the approval, the
-   idle stop and the dead-man switch bound the bill.
-2. **Never rent twice.** A rent request is never retried. Its label is saved in `rents` before the
-   request; an unknown outcome (timeout, connection error, 5xx) is resolved only by finding that exact
-   label. The race (4) has at most two rents in flight, both within the price, and destroys every
-   machine but the one kept before anything is uploaded to it.
+   command, launches it, at up to the highest price among its offers. A launch that failed, or was cut
+   off before its upload, tried again with `start` is checked again against the record's `max_dph` or
+   the current setting, whichever is higher. Starting a stopped agent has no gate. No time limit, no
+   cost estimate: the approval, the idle stop and the dead-man switch bound the bill.
+2. **Never rent twice.** A rent request is never retried. Its label is saved in the record (`label`)
+   before the request; an unknown outcome (timeout, connection error, 5xx) is resolved only by finding
+   that exact label: the launch rents no other machine while it looks, and fails if the label has not
+   shown up within 2 minutes. A launch has at most one machine at a time: one that does not come up is
+   destroyed before the next offer is rented (4).
 3. **Own machines only.** Act only on instance ids in the records, or on an instance with the exact
    label of a record's rent. `list` points out other instances labelled with this computer's install
    id, never touching them; a teammate's machines on a shared Vast account carry another id.
-4. **Never destroy work.** Code destroys a machine by itself only before its upload (`uploaded` false)
-   or right after its setup failed. `start` on a stopped agent never destroys. `delete` checks for
-   unsaved work first (5.3).
+4. **Never destroy work.** Code destroys a machine by itself only before its upload (`uploaded` false:
+   a machine that does not come up, one whose launch fails on GitHub, or one whose launch was cut off
+   and is tried again by `start`) or right after its setup failed. `start` on a stopped agent never
+   destroys. `delete` checks for unsaved work first (5.3).
 5. **Stops are bounded.** In every mode the watchdog stops the machine after `idle_minutes` without
    activity, done or not, always saving first. The dead-man switch stops it if the watchdog never runs
    or dies; setup refuses a machine with no key to stop itself; `list`/`status` stop a machine whose own
@@ -63,7 +65,6 @@ the code does it is in the modules named here.
   ssh/id_ed25519(.pub)   the key added to machines
   ssh/config             generated Host entries (crab-student-<name>), included from ~/.ssh/config
   ssh/known_hosts        machines' host keys, under HostKeyAlias crab-student-<name>
-  ssh/known_hosts_racing throwaway host keys of machines racing for a launch
   ssh/github_known_hosts GitHub's pinned ed25519 host key
 ~/.config/vastai/vast_api_key   the Vast key (the vastai CLI's file)
 ~/.config/vastai/vast_tfa_key   the 2FA session key from `vastai tfa login`, sent instead while it exists;
@@ -84,8 +85,7 @@ One JSON file per agent, written only by the command holding the agent's lock. `
 | phase | meaning |
 |---|---|
 | `pending` | waiting for approval: nothing rented, nothing on GitHub |
-| `renting` | machines racing (`rents`) |
-| `booting` | the machine kept (`instance_id`, its rent in `rent`) answers ssh; the upload comes next |
+| `renting` | renting its machine (`label`, then `instance_id`) and waiting for it to boot; the upload comes next |
 | `setup` | `uploaded` is true: the upload and setup are under way, or were cut off |
 | `ready` | the launch finished; whether the machine runs comes from Vast |
 | `failed` | `error` says why; it holds no machine |
@@ -96,8 +96,9 @@ without asking again); `fake_claude`; `setup` (a command, `none`, or null to det
 `session_id`; `repo` (slug: the agent repo; source: the user's repo, null for `--no-repo`; branch,
 start_sha, local_dir, carried, untracked, branch_created, dir on the machine); `offers` (the launcher's
 pick and up to four backups, in order: id, machine_id, dph_total, storage_cost, summary, short);
-`failed_offers`; `rents` (while racing: `{label, offer_id, at, instance_id (null while unconfirmed),
-running_at}`); `rent`, `instance_id`, `dph`, `disk_usd_day`, `machine`, `short`, `ssh`; `uploaded`;
+`failed_offers`; its machine: `label` (its rent's, saved before the request), `instance_id` (null until
+Vast confirms the rent or the label is found), `dph`, `disk_usd_day`, `machine`, `short`, `ssh`,
+`uploaded` (all null, and `uploaded` false, while it has none: a `failed` record never has one);
 `pending` (`{reason, max_dph}`); `warnings`; `last_start` (last rented or started, or seen running again
 after a stop); `stopped_since`; `last_seen` (the last machine status, for display and for what it cost);
 `past_hours` and `stopped_hours` (machine hours before the last start, and hours it sat stopped before
@@ -106,37 +107,38 @@ computer, 5.5); `image`, `idle_minutes`, `notify_url` (copied at launch).
 
 Names: 3-40 characters of a-z, 0-9 and "-". Branch `agent/<name>`; ssh alias `crab-student-<name>`;
 rent label `<owner>-<name>-<install id>-<4 hex>` (owner: the `owner` setting, else `crab-student`; new
-per rent request, unlike the record's rents in flight); agent repo `<login>/<repo>-agents`; deploy key
-title `crab-student`; tmux session `agent` on the machine.
+per rent request); agent repo `<login>/<repo>-agents`; deploy key title `crab-student`; tmux session
+`agent` on the machine.
 
 ## 4. The launch (`launch.py`)
 
 1. **Plan** (writes nothing): name, brief, secrets, mode and Claude's settings (4.4), repo (4.1), the
    offers given with `--offers` (4.3). `--dry-run` stops here.
-2. **Record**, under the agent's lock: `pending` (exit 3) when the pick costs more than the price, else
-   `renting` (backups over the price dropped).
-3. **The race** (`Race`): two offers are rented at once and the first machine running and answering ssh
-   is kept (`booting`), the others destroyed first; a machine that fails or does not start in time is
-   destroyed and the next offer rented in its place. An unconfirmed rent keeps its slot while it is
-   looked for by label: one not found when another machine wins becomes a warning, and when only such
-   rents are left for 2 minutes the launch fails. Every offer failed: exit 4. Meanwhile the agent repo,
-   its deploy key (4.2) and the branch go on GitHub; a failure there destroys the launch's machines and
-   fails it.
+2. **Record**, under the agent's lock (held until the launch ends): `pending` (exit 3) when the pick
+   costs more than the price, else `renting` (backups over the price dropped).
+3. **The machine** (`rent_machine`): the offers are rented one at a time, in order, until a machine runs
+   and answers ssh; one that fails, is not running 10 minutes after its rent, or does not answer ssh 3
+   minutes after it runs is destroyed before the next offer is rented. A rent whose outcome is unknown
+   is looked for by its label for 2 minutes: found, it is the launch's machine; not found, the launch
+   fails, naming the label. Vast out of reach meanwhile is waited out (the timeouts decide). Every
+   offer failed: exit 4. While the machine boots, the agent repo, its deploy key (4.2) and the branch go
+   on GitHub; a failure there destroys the machine and fails the launch.
 4. **Upload and setup** in one ssh call (6.1), `uploaded` saved true first. Setup's own failure destroys
    the machine and fails the launch (exit 5); a lost connection leaves `setup`.
 5. **`start` on an unfinished launch**: `setup` starts the machine if it stopped and repeats the upload
-   and setup, which resumes; `renting`/`booting` with machines destroys them (nothing was uploaded) and
-   tries again; `failed` tries again. Trying again takes the record's offers that have not failed, or
-   those given with `start NAME --offers IDS`, looks them up again, and has the same price check (1.1);
-   none left: exit 4, the error naming `start NAME --offers`. `--offers` on a launch that has its machine
-   (set up, or cut off during setup): exit 2. `approve` looks the record's offers up again and races
-   those at or under the price it showed; all pricier by now: it waits again; none left: exit 4.
+   and setup, which resumes. Any other (`renting`, `failed`) is tried again, its machine destroyed first
+   if it has one (by id, or found by its label; nothing was uploaded to it). Trying again takes the
+   record's offers that have not failed, or those given with `start NAME --offers IDS`, looks them up
+   again, and has the same price check (1.1); none left: exit 4, the error naming `start NAME --offers`.
+   `--offers` on a launch that has its machine (set up, or cut off during setup): exit 2. `approve`
+   looks the record's offers up again and rents those at or under the price it showed; all pricier by
+   now: it waits again; none left: exit 4.
 6. **Progress**: plain lines on stderr, also in `agents/<name>.log` (a failure as `Launch failed: ...`).
    Once the record exists and the launch goes ahead, a window runs `crab-student open NAME` (5.4) unless
    `open_window` is `off`: a tab in the Windows Terminal window named crab-student (`wt -w crab-student
    new-tab`), or a macOS Terminal window; elsewhere the command is printed.
 
-Several agents are several `launch` processes, each with its own record, lock and race. The launcher
+Several agents are several `launch` processes, each with its own record, lock and machine. The launcher
 runs `launch`, `start` and `approve` as background Bash calls (setup can outlast 10 minutes).
 
 **4.1 The repo.** An agent's branch `agent/<name>` lives in its agent repo (`slug`), never in the user's
@@ -198,7 +200,7 @@ failed; unknown (Vast or ssh did not answer); stopped (why, how long ago, the di
 needs you; done; working; interactive (Claude in VS Code: active, or idle for how long). A `status`
 reporting another mode (after a hand-off) updates the record; a stopped machine seen running again moves
 `last_start`. `list` warns on stderr about orphans: instances whose label ends in `-<install id>-<4 hex>`
-that are no record's machine or rent.
+whose id and label no record has (a rent Vast did not confirm that went through after all).
 
 **Without Vast** (its API refuses or cannot be reached; `listing` returns the reason, and `list` warns
 with it on stderr): every ready agent with an ssh address that is not known to be stopped is asked over
@@ -222,9 +224,9 @@ uncommitted files, files in `/root/outputs`, or untracked files of 100 MB+ outsi
 `/root/outputs` do not count when their fingerprint equals the record's `fetched.digest` (every file is
 as it was copied): a running machine is asked for it now (5.5), a stopped one's is in its stop note
 (6.7; a machine set up before notes had it cannot say, so its outputs count). The refusal names the
-copy. Then: destroy the machine and any racing rents' machines, add the agent's cost to `spend.jsonl`
-(5.6), forget the host key and the record. GitHub is left alone: the branch and the agent repo's deploy
-key stay.
+copy. Then: destroy the machine (or, for a launch cut off before Vast confirmed its rent, the machine
+with its label), add the agent's cost to `spend.jsonl` (5.6), forget the host key and the record.
+GitHub is left alone: the branch and the agent repo's deploy key stay.
 
 **5.4 open.** On an agent that is not ready, `open NAME` first follows the launch log until the phase is
 ready, failed or pending, or nobody holds the lock (cut off). Frontend `tmux`: `agent-attach` over `ssh

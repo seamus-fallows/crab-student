@@ -357,8 +357,7 @@ def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast
     kept, lost = (
         f"crab-student-{name}-{core.install_id()}-{x}" for name, x in (("job1", "aaaa"), ("job2", "bbbb"))
     )
-    core.save(record(instance_id=fake_vast.add_instance(1, kept), rents=[],
-                     rent={"label": kept}, ssh=None, last_seen=None))  # fmt: skip
+    core.save(record(instance_id=fake_vast.add_instance(1, kept), label=kept, ssh=None, last_seen=None))
     orphan = fake_vast.add_instance(1, lost)  # (a rent Vast did not confirm)
     for argv in (["list"], ["list", "--json"]):
         rc, out, err = run(capsys, *argv)
@@ -446,7 +445,7 @@ def launching(
     """Agent job3, being launched: each look at its lock moves the launch on (a line, a status line, then the
     phase it ends in). Without `at_work`, no launch holds the lock (it was cut off)."""
     core.save(record("job3", phase="renting", mode=mode, instance_id=None))
-    launch.append_log("job3", "Renting two machines at once: offer 1 and offer 2")
+    launch.append_log("job3", "Renting offer 1 (1x RTX 4090 (Quebec, CA), $0.30/hr).")
 
     def finish() -> None:
         rec = core.load("job3")
@@ -466,7 +465,7 @@ def test_open_follows_a_launch_then_attaches_to_the_agent(opened, fake_vast, mon
     launching(fake_vast, monkeypatch)
     rc, out, _ = run(capsys, "open", "job3")
     assert rc == 0 and opened == [("terminal", "job3")]
-    for shown in ("Renting two machines at once", "Pull complete", "Ready after 1m30s"):
+    for shown in ("Renting offer 1", "Pull complete", "Ready after 1m30s"):
         assert shown in out
 
 

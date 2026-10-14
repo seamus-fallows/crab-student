@@ -30,6 +30,10 @@ class VastError(core.CrabError):
         self.status = status
 
 
+class VastDown(VastError):
+    """Vast could not be reached, or kept failing, through the retries: it may answer again soon."""
+
+
 class RentUnknown(Exception):
     """A rent request whose outcome is unknown: it may have rented a machine."""
 
@@ -152,7 +156,7 @@ def request(
             problem = str(getattr(e, "reason", "") or e) or type(e).__name__
         if delay is not None:
             time.sleep(delay)
-    raise VastError(f"Vast could not {what}: {problem}. Try again in a few minutes.")
+    raise VastDown(f"Vast could not {what}: {problem}. Try again in a few minutes.")
 
 
 def search(query: dict) -> list[dict]:
@@ -211,7 +215,7 @@ def instance(instance_id: int) -> dict | None:
         raise
     row = data.get("instances")
     if "instances" not in data:  # (a glitch must not look like "gone")
-        raise VastError(f"Vast sent an unexpected reply while looking up machine {instance_id}.")
+        raise VastDown(f"Vast sent an unexpected reply while looking up machine {instance_id}.")
     return row if isinstance(row, dict) and row.get("id") is not None else None
 
 

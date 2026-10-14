@@ -47,9 +47,8 @@ brief for each and launches them side by side (one launch each), each on a machi
 Keep talking with the user meanwhile. Tell them that once the launch starts, a window opens on their
 screen (Windows Terminal, or Terminal on macOS; a tab per agent) that shows its progress and then the
 agent itself; elsewhere, or with the setting `open_window` off, `crab-student open NAME` in their own
-terminal does the same. A launch rents two machines at once and keeps the first that starts (the other
-is destroyed at once). The launcher's permission prompts, if any, appear in this session: say what they
-are for. When it finishes, show the user the brief(s) it gave, then the result line(s) and any
+terminal does the same. The launcher's permission prompts, if any, appear in this session: say what
+they are for. When it finishes, show the user the brief(s) it gave, then the result line(s) and any
 `Warning:` lines, exactly as returned.
 
 If a result says a launch needs approval, tell the user the price per hour and why, and ask. Only after

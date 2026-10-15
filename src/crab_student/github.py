@@ -1,11 +1,12 @@
-"""GitHub through `gh`, and git: the user's repo, the starting commit, deploy keys, branches, pull."""
+"""GitHub through `gh`, and git: the user's repo and the starting commit, agent repos and their deploy keys, the
+agent's branch, pull."""
 
 from __future__ import annotations
 
 import json
 import os
 import re
-import secrets
+import shlex
 import shutil
 import tempfile
 import time
@@ -19,6 +20,9 @@ HOST_KEY = "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqK
 _REMOTE = re.compile(
     r"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
+# The start of an agent repo's description: crab-student writes only to repos it made for agents' branches.
+MARK = "crab-student agent branches"
+KEY_TITLE = "crab-student"  # (agent repos' deploy keys)
 
 
 class GhError(core.CrabError):
@@ -69,13 +73,15 @@ def known_hosts_file() -> Path:
 
 
 def ssh_command(key_path: Path) -> str:
-    """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key."""
+    """GIT_SSH_COMMAND for git with a deploy key: no prompts, GitHub's pinned host key. git runs it with sh, so every
+    argument is quoted for sh; ssh splits an option's value on spaces itself, so the known-hosts path is one ssh
+    reads whole (core.ssh_path)."""
     ssh = (core.tool("ssh") or "ssh").replace("\\", "/")
-    key, hosts = str(key_path).replace("\\", "/"), str(known_hosts_file()).replace("\\", "/")
-    return (
-        f'"{ssh}" -i "{key}" -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile="{hosts}" '
-        f"-o StrictHostKeyChecking=yes"
-    )
+    hosts = f"UserKnownHostsFile={core.ssh_path(known_hosts_file())}"
+    return shlex.join(
+        [ssh, "-i", str(key_path).replace("\\", "/"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+         "-o", hosts, "-o", "StrictHostKeyChecking=yes"]
+    )  # fmt: skip
 
 
 def git(
@@ -89,6 +95,12 @@ def parse_remote(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def remotes(top: Path) -> dict[str, str]:
+    """A clone's remotes and their URLs, origin first."""
+    names = sorted(git(top, "remote", check=False).split(), key=lambda r: r != "origin")
+    return {r: git(top, "config", "--get", f"remote.{r}.url", check=False).strip() for r in names}
+
+
 def local_repo(path: Path) -> Repo:
     p = core.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"], check=False)
     if p.returncode != 0:
@@ -96,15 +108,7 @@ def local_repo(path: Path) -> Repo:
             f"{path} is not in a git repo. Run from your repo, pass --repo PATH, or use --no-repo.", 2
         )
     top = Path(p.stdout.strip())
-    remotes = sorted(git(top, "remote").split(), key=lambda r: r != "origin")
-    slug = next(
-        (
-            s
-            for r in remotes
-            if (s := parse_remote(git(top, "config", "--get", f"remote.{r}.url", check=False)))
-        ),
-        None,
-    )
+    slug = next((s for url in remotes(top).values() if (s := parse_remote(url))), None)
     if not slug:
         raise core.CrabError(
             f"{top} has no GitHub remote. Add one, or use --no-repo for the workspace repo.", 2
@@ -118,24 +122,6 @@ def local_repo(path: Path) -> Repo:
 def branch_sha(slug: str, branch: str) -> str | None:
     refs = api(f"repos/{slug}/git/matching-refs/heads/{branch}") or []
     return next((r["object"]["sha"] for r in refs if r.get("ref") == f"refs/heads/{branch}"), None)
-
-
-def check_repo(slug: str, branch: str) -> None:
-    try:
-        info = api(f"repos/{slug}")
-    except GhError as e:
-        if e.not_found:
-            raise core.CrabError(
-                f"GitHub cannot find {slug}, or you cannot see it (gh auth status shows who you are)."
-            ) from None
-        raise
-    if not (info.get("permissions") or {}).get("admin"):
-        raise core.CrabError(
-            f"you need admin rights on {slug} so crab-student can add a deploy key for the agent. "
-            "Ask an owner, or run the task in your workspace repo with --no-repo."
-        )
-    if branch_sha(slug, branch):
-        raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
 
 
 def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str], int]:
@@ -175,33 +161,73 @@ def snapshot(repo: Repo, commit: bool = True) -> tuple[str, list[str], list[str]
     return sha, changed, untracked, local
 
 
-def check_workspace(slug: str, branch: str) -> bool:
-    """Before renting: whether the workspace repo exists; an existing one must be private and without the
-    branch."""
+# ---- agent repos ---------------------------------------------------------------------------------
+# Agents never get access to the user's repo. An agent's branch lives in its agent repo, a private repo on the
+# user's own account: `<repo name>-agents` for the user's repo (two repos with one name share it: it only holds
+# agents' branches), or the workspace for a task without a repo. One deploy key per agent repo, kept.
+
+
+def agent_repo(source: str | None, workspace: str) -> str:
+    """The agent repo for `source`, the user's repo (None: a task without a repo, in the workspace repo)."""
+    return f"{login()}/{source.split('/')[1] + '-agents' if source else workspace}"
+
+
+def _exists(slug: str, source: str | None) -> bool:
+    """Whether the agent repo exists. An existing one must carry the mark and be private: a repo of the user's that
+    happens to have its name is never written to."""
     try:
         info = api(f"repos/{slug}")
     except GhError as e:
         if e.not_found:
             return False
         raise
+    if not str(info.get("description") or "").startswith(MARK):
+        fix = "rename it on GitHub, or use --no-repo"
+        if source is None:
+            fix = "choose another name: crab-student config workspace_repo NAME"
+        raise core.CrabError(
+            f"{slug} exists, but crab-student did not make it for agents' branches (its description does not start "
+            f"with '{MARK}'), so it will not put agents' work there: {fix}."
+        )
     if not info.get("private"):
-        raise core.CrabError(f"{slug} is public, so crab-student will not put agents' work there. Make it "
-                             "private, or choose another name: crab-student config workspace_repo NAME")  # fmt: skip
-    if branch_sha(slug, branch):
-        raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
+        raise core.CrabError(
+            f"{slug} is public, so crab-student will not put agents' work there: make it private."
+        )
     return True
 
 
-def ensure_workspace(user: str, name: str) -> str:
-    """The private workspace repo, created if missing (check_workspace vetted an existing one)."""
-    slug = f"{user}/{name}"
-    try:
-        api(f"repos/{slug}")
-    except GhError as e:
-        if not e.not_found:
-            raise
-        api("user/repos", "-f", f"name={name}", "-F", "private=true", "-F", "auto_init=true", method="POST")
-    return slug
+def check_agent_repo(slug: str, source: str | None, branch: str) -> bool:
+    """Before renting (nothing is written): whether the agent repo exists. An existing one must be fit for agents'
+    work and not have the branch yet."""
+    exists = _exists(slug, source)
+    if exists and branch_sha(slug, branch):
+        raise core.CrabError(f"branch {branch} already exists on {slug}. Pick another name.", 2)
+    return exists
+
+
+def prepare_agent_repo(slug: str, source: str | None) -> Path:
+    """The agent repo, made private and marked the first time (with a first commit: the workspace's branches start
+    from it, and GitHub's API answers differently for an empty repo), and its deploy key: made the first time and
+    kept, and added to the repo whenever GitHub does not have it (the user may remove it). Parallel launches (a
+    sweep) wait under the repo's lock. Returns the key's path."""
+    with core.locked(f"_repo-{slug.replace('/', '--')}", wait=300):
+        if not _exists(slug, source):
+            api("user/repos", "-f", f"name={slug.split('/')[1]}", "-f",
+                f"description={MARK} for {source or 'tasks without a repo'}", "-F", "private=true",
+                "-F", "auto_init=true", method="POST")  # fmt: skip
+        path = key_file(slug)
+        if not path.exists():
+            core.keygen(path, KEY_TITLE)
+        public = Path(f"{path}.pub").read_text(encoding="utf-8").split()[:2]  # (type and key: no comment)
+        if not any(k["key"].split()[:2] == public for k in api(f"repos/{slug}/keys?per_page=100") or []):
+            api(f"repos/{slug}/keys", "-f", f"title={KEY_TITLE}", "-f", f"key={' '.join(public)}",
+                "-F", "read_only=false", method="POST")  # fmt: skip
+    return path
+
+
+def key_file(slug: str) -> Path:
+    """An agent repo's deploy key (its public half beside it, .pub)."""
+    return core.keys_dir() / slug.replace("/", "--")
 
 
 def default_head(slug: str) -> str:
@@ -215,101 +241,12 @@ def default_head(slug: str) -> str:
     raise AssertionError
 
 
-def add_deploy_key(slug: str, title: str, public_key: str) -> int:
-    data = api(
-        f"repos/{slug}/keys",
-        "-f",
-        f"title={title}",
-        "-f",
-        f"key={public_key.strip()}",
-        "-F",
-        "read_only=false",
-        method="POST",
-    )
-    return int(data["id"])
-
-
-def remove_deploy_key(slug: str, key_id: int) -> None:
-    try:
-        api(f"repos/{slug}/keys/{key_id}", method="DELETE")
-    except GhError as e:
-        if not e.not_found:
-            raise
-
-
-# ---- one deploy key per repo, shared by its agents --------------------------------------------------
-# GitHub emails the repo's admins about every key added, so the agents on a repo share one key. A record's
-# repo.deploy_key is {"id": GitHub's key id, "file": the private key's name in keys/, "created": when it
-# was added}. Claims and releases hold the repo's key lock, so a delete never removes a key a launch is
-# taking, and two deletes never each leave it to the other.
-
-
-def key_file(key: dict) -> Path:
-    return core.keys_dir() / key["file"]
-
-
-def key_title(key: dict) -> str:
-    return f"crab-student {key['created']}"
-
-
-def claim_deploy_key(rec: dict) -> None:
-    """Give the agent the deploy key another agent on its repo holds (its private key here), else a new
-    one. Saves the record."""
-    slug = rec["repo"]["slug"]
-    with _keys_lock(slug):
-        held = (k for k in _held_keys(slug, but=rec["name"]) if key_file(k).exists())
-        rec["repo"]["deploy_key"] = next(held, None) or _new_deploy_key(slug)
-        core.save(rec)
-
-
-def release_deploy_key(rec: dict) -> None:
-    """The agent is going: its record lets go of its deploy key, which is removed from GitHub and this
-    computer unless another agent holds it. Saves the record."""
-    repo, key = rec["repo"], rec["repo"]["deploy_key"]
-    if not key:
-        return
-    with _keys_lock(repo["slug"]):
-        repo["deploy_key"] = None
-        core.save(rec)
-        if any(k["id"] == key["id"] for k in _held_keys(repo["slug"])):
-            return
-        _delete_key_files(key)
-        remove_deploy_key(repo["slug"], key["id"])
-
-
-def _keys_lock(slug: str):
-    return core.locked(f"_keys-{slug.replace('/', '--')}", wait=300)
-
-
-def _held_keys(slug: str, but: str | None = None) -> list[dict]:
-    return [
-        r["repo"]["deploy_key"]
-        for r in core.all_records()
-        if r["name"] != but and r["repo"]["slug"] == slug and r["repo"]["deploy_key"]
-    ]
-
-
-def _new_deploy_key(slug: str) -> dict:
-    key = {"id": None, "file": f"{slug.replace('/', '--')}-{secrets.token_hex(4)}", "created": core.now_iso()}
-    core.keygen(key_file(key), key_title(key))
-    try:
-        public = Path(f"{key_file(key)}.pub").read_text(encoding="utf-8")
-        key["id"] = add_deploy_key(slug, key_title(key), public)
-    except core.CrabError:
-        _delete_key_files(key)
-        raise
-    return key
-
-
-def _delete_key_files(key: dict) -> None:
-    for path in (key_file(key), Path(f"{key_file(key)}.pub")):
-        path.unlink(missing_ok=True)
-
-
 def create_branch(repo: dict, key_path: Path) -> None:
-    """Put the agent's branch on GitHub: the starting commit pushed from the user's repo with the agent's
-    deploy key (no user credentials, so no prompt can block), or, for the workspace, made through the API."""
-    if repo["workspace"]:
+    """Put the agent's branch on its agent repo: the starting commit pushed from the user's clone with the repo's
+    deploy key (no user credentials, so no prompt can block), or, for the workspace, made through the API. The
+    push first works out what the agent repo already has (its branches' tips are agents' commits this clone never
+    saw), so only the first push sends the whole history."""
+    if repo["source"] is None:
         api(
             f"repos/{repo['slug']}/git/refs",
             "-f",
@@ -326,6 +263,8 @@ def create_branch(repo: dict, key_path: Path) -> None:
                 "git",
                 "-C",
                 repo["local_dir"],
+                "-c",
+                "push.negotiate=true",
                 "push",
                 "-q",
                 "--no-verify",  # (the user's own pre-push hooks are for their pushes, not this one)
@@ -334,21 +273,13 @@ def create_branch(repo: dict, key_path: Path) -> None:
             ],
             env=env,
             check=False,
-            timeout=180,
+            timeout=1800,  # (the first push sends the whole history)
         )
         if p.returncode == 0:
             return
         if attempt < 2:
             time.sleep(3)
     raise core.CrabError(f"could not push the starting point to {repo['slug']}: {core.last_line(p.stderr)}")
-
-
-def delete_branch_if_at(slug: str, branch: str, sha: str) -> bool:
-    """Delete a branch only while it still points at `sha` (nobody worked on it)."""
-    if branch_sha(slug, branch) != sha:
-        return False
-    api(f"repos/{slug}/git/refs/heads/{branch}", method="DELETE")
-    return True
 
 
 def read_file(slug: str, branch: str, path: str) -> str | None:
@@ -363,27 +294,39 @@ def read_file(slug: str, branch: str, path: str) -> str | None:
 
 
 def pull(rec: dict, path: Path | None) -> str:
-    """Fetch the agent's branch without touching the checkout: the remote-tracking ref always, and a local
-    branch of the same name when that is a fast-forward."""
+    """Fetch the agent's branch from its agent repo without touching the checkout: the remote-tracking ref always,
+    and a local branch of the same name when that is a fast-forward. Into the clone at `path`, else the one the
+    agent started from (the workspace has a clone of its own, made the first time). A clone without a remote for
+    the agent repo gets one, `agents`, reached the way the clone reaches GitHub (https or ssh), so the user's own
+    credentials work."""
     repo, branch = rec["repo"], rec["repo"]["branch"]
-    top = Path(path or Path.cwd())
-    if repo["workspace"] and path is None:  # (the workspace repo has a home of its own)
+    if path:
+        top = Path(path)
+    elif repo["source"]:
+        top = Path(repo["local_dir"])
+    else:
         top = Path.home() / repo["slug"].split("/")[1]
         if not (top / ".git").exists():
             gh("repo", "clone", repo["slug"], str(top))
     top = Path(git(top, "rev-parse", "--show-toplevel", check=False).strip() or top)
-    remote = next(
-        (
-            r
-            for r in git(top, "remote", check=False).split()
-            if parse_remote(git(top, "config", "--get", f"remote.{r}.url", check=False)) == repo["slug"]
-        ),
-        None,
-    )
+    urls, added = remotes(top), ""
+    remote = next((r for r, url in urls.items() if parse_remote(url) == repo["slug"]), None)
     if not remote:
-        raise core.CrabError(
-            f"{top} has no remote for {repo['slug']}. Run pull from a clone of it, or pass --repo PATH.", 2
-        )
+        template = next((url for url in urls.values() if parse_remote(url)), None)
+        if not template:
+            raise core.CrabError(
+                f"{top} is not a clone of a GitHub repo. Give yours: crab-student pull {rec['name']} --repo PATH",
+                2,
+            )
+        if "agents" in urls:
+            raise core.CrabError(
+                f"{top} has a remote named agents for another repo: rename it (git remote rename agents OTHER), "
+                "then pull again.",
+                2,
+            )
+        m = _REMOTE.match(template)
+        git(top, "remote", "add", "agents", template[: m.start(1)] + repo["slug"] + template[m.end(1) :])
+        remote, added = "agents", f"Added the remote agents ({repo['slug']}) to {top}.\n"
     git(top, "fetch", "-q", remote, f"refs/heads/{branch}:refs/remotes/{remote}/{branch}", timeout=300)
     sha = git(top, "rev-parse", "--short", f"{remote}/{branch}").strip()
     local = core.run(
@@ -395,4 +338,4 @@ def pull(rec: dict, path: Path | None) -> str:
         if local.returncode == 0
         else f"Your local {branch} was left as it is (checked out or changed); the fetched work is {remote}/{branch}."
     )
-    return f"Fetched {branch} ({sha}) into {top}.\n{note}"
+    return f"{added}Fetched {branch} ({sha}) into {top}.\n{note}"

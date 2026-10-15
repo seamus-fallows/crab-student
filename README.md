@@ -19,7 +19,8 @@ session you drive yourself on the machine (see Modes).
   long-lived token; no API key)
 - Python 3.11+, and [uv](https://docs.astral.sh/uv/) or [pipx](https://pipx.pypa.io) to install it
   (plain pip works too)
-- git, the GitHub CLI [`gh`](https://cli.github.com), and an OpenSSH client (Windows has one built in)
+- git, the GitHub CLI [`gh`](https://cli.github.com) logged in to your GitHub account (agents' branches
+  go to private repos crab-student makes there), and an OpenSSH client (Windows has one built in)
 - A Vast.ai account with some credit, and its [API key](https://cloud.vast.ai/manage-keys/)
 - For the window that follows a launch and for `open --all`: Windows Terminal on Windows (`open --all`
   needs `tmux` on macOS and Linux) (optional)
@@ -58,7 +59,8 @@ missing):
   uses that session too and says when it needs a new one. Vast ends a session after a while and does
   not say after how long; when yours ends, the error says how long ago you had logged in (see Trouble
   for what still works without it).
-- **GitHub.** It uses your `gh` login.
+- **GitHub.** It uses your `gh` login. Agents' branches go to private repos on that account (see Your
+  repo).
 - **SSH key.** It makes a key just for crab-student's machines and adds one `Include` line to
   `~/.ssh/config`, so `ssh crab-student-<name>` and VS Code can reach your agents' machines.
 - **Claude token.** You run `claude setup-token` in another terminal and paste the token; it is kept
@@ -141,8 +143,12 @@ Claude. `status` shows what an agent got.
 commits that are not on GitHub yet, and uncommitted changes to tracked files, go along (as one extra
 commit on the agent's branch; your own checkout is not touched). Untracked files do not; the launch
 warns about them. With `--committed-only` the uncommitted changes stay behind too: say so when other
-work is going on in the checkout, or its half-finished edits become the agent's starting point. A task
-that has nothing to do with a repo (`--no-repo`) goes to a private `crab-student-work` repo on your
+work is going on in the checkout, or its half-finished edits become the agent's starting point. The
+branch lives in the project's *agent repo*, `<repo>-agents`, a private repo on your own GitHub account
+(the first launch makes it and sends it your repo's history; later ones send little). Agents never get
+access to your repo, and crab-student never writes to it: `crab-student pull NAME` brings an agent's
+branch into your clone, and merging it, or pushing it to your repo for a pull request, is up to you. A
+task that has nothing to do with a repo (`--no-repo`) goes to a private `agent-workspace` repo on your
 GitHub.
 
 **Your project's dependencies.** Each machine starts from a Docker image (`image`; by default Ubuntu
@@ -218,7 +224,7 @@ crab-student list            # every agent: mode, state, its own status line, it
 crab-student status NAME     # one agent in detail
 crab-student wait [NAME ...] # come back when an agent needs you
 crab-student report NAME     # its REPORT.md
-crab-student pull NAME       # fetch its branch into your repo (your checkout is not touched)
+crab-student pull NAME       # fetch its branch into your clone (your checkout is not touched)
 crab-student fetch NAME      # copy its /root/outputs into a new folder here, and check the copy
 crab-student spend           # what your agents have cost, deleted ones too
 ```
@@ -258,8 +264,10 @@ machine hours at the machine's price, plus its disk for the time it sat stopped.
 adds the agents you deleted (each is written to `~/.crab-student/spend.jsonl` when it goes) and a
 total. They count only what this computer saw, so they run low rather than high; Vast's bill decides.
 
-(`pull` for a `--no-repo` agent uses `~/crab-student-work`, cloning it the first time, unless you give
-`--repo PATH`.)
+`pull` fetches into the clone the agent was launched from (`--repo PATH` for another). The first time,
+it adds the agent repo to that clone as the remote `agents`, reached the way the clone reaches GitHub
+(https or ssh), so your own credentials work. For a `--no-repo` agent it uses `~/agent-workspace`,
+cloning it the first time.
 
 An autonomous or colleague agent writes `agent-runs/<name>/REPORT.md` on its branch: a summary,
 results with evidence, what it did, the decisions it made without you (in autonomous mode, every real
@@ -289,7 +297,7 @@ machine stops, by itself or with `stop`, it saves its work and writes a note of 
 check a stopped agent for work that would be lost (unpushed commits, files in `/root/outputs`, large
 files outside git) without starting it again, and refuses, listing them, unless you add `--force`. If
 it cannot tell what is on the machine, it asks you to `start` it first (or to use `--force`). The
-branch stays on GitHub.
+branch stays in the agent repo (`pull` it first if you want it in your clone: `pull` needs the agent).
 
 ## Money and safety
 
@@ -327,11 +335,10 @@ branch stays on GitHub.
 - **Nothing is destroyed automatically** once an agent has run on it: crab-student destroys a machine
   by itself only before anything was uploaded to it (it lost its launch's race, failed to start, or its
   launch was cut off and is being started again) or when its setup failed.
-- **GitHub access** is a deploy key for the agent's one repo. GitHub emails you about every key
-  added, so the agents on a repo share one, and it is removed from GitHub when the last agent using it
-  is deleted. A deploy key can technically push to any branch of that repo, so git hooks on the machine
-  keep the agent on `agent/<name>`; for extra safety, protect your `main` branch on GitHub (deploy keys
-  obey it).
+- **GitHub access.** Agents never get access to your repo, and crab-student never writes to it. An
+  agent works in its agent repo (`<repo>-agents`, private, on your account), with that repo's deploy key:
+  one per agent repo, added the first time and kept (GitHub emails you when it is added). Within the
+  agent repo, git hooks on the machine keep each agent on its own branch `agent/<name>`.
 - **Permissions.** Agents run Claude Code without permission prompts, in every mode: the machine is
   disposable and the git hooks guard the repo.
 - **Secrets** for tasks (a Hugging Face or W&B token, say): `crab-student secret set HF_TOKEN` (in a
@@ -372,7 +379,7 @@ default.
 | `regions` | (anywhere) | Countries (`US`, `CA`, `DE`, ...) or continents (`north-america`, `europe`, `asia`, ...), comma-separated |
 | `home` | (none) | Your country code (`CA`, `US`, `DE`, ...): the launcher weighs how far a host is from you |
 | `owner` | (none) | How your machines' labels on Vast start, e.g. `SFALLOWS` (`SFALLOWS-train-lr-a1b2c3-1f2e`); empty: `crab-student` |
-| `workspace_repo` | `crab-student-work` | The repo for `--no-repo` tasks |
+| `workspace_repo` | `agent-workspace` | The private repo on your GitHub for `--no-repo` tasks (made the first time) |
 | `notify_url` | (none) | Where notifications go |
 | `open_window` | `on` | `off`: a launch opens no window that follows it (`crab-student open NAME` still does) |
 
@@ -383,11 +390,12 @@ after the change. `min_reliability`, `min_download_mbps` and `regions` are rules
 
 There is no background service: each `crab-student` command does its job and exits, keeping one small
 JSON record per agent in `~/.crab-student/`. It talks to Vast over its REST API, to GitHub through
-`gh` and `git`, and to machines through `ssh`. On each machine, one script sets things up (the repo,
-Claude Code and its settings, git hooks, your project's dependencies, the settings VS Code reads and,
-for an interactive agent, VS Code's server) and runs a watchdog that keeps the agent's Claude Code
-alive in tmux, measures activity, saves work, sends notifications and stops the machine. Vast's start
-command carries the dead-man switch, so it works before anything else is installed.
+`gh` and `git`, and to machines through `ssh`. Agents' branches live in private agent repos on your
+GitHub account, one per project, which the machines clone. On each machine, one script sets things up
+(the repo, Claude Code and its settings, git hooks, your project's dependencies, the settings VS Code
+reads and, for an interactive agent, VS Code's server) and runs a watchdog that keeps the agent's
+Claude Code alive in tmux, measures activity, saves work, sends notifications and stops the machine.
+Vast's start command carries the dead-man switch, so it works before anything else is installed.
 
 The agent itself is never told about crab-student: it is told that it works on a rented cloud machine
 that will be stopped when idle, and given plain commands (`agent-status` to say what state it is in,
@@ -408,6 +416,8 @@ that will be stopped when idle, and given plain commands (`agent-status` to say 
   `crab-student start NAME` tries again. A refused Claude token: `crab-student init --claude-token`.
 - **Claude in VS Code asks you to log in**: the extension could not find the token. In the Claude panel,
   log in with your subscription, or hand the agent over with `/handoff` (tmux always has the token).
+- **Git LFS files and submodules with relative URLs** do not reach the agent repo, so the agent does not
+  get them: say in the brief where it can download what it needs.
 - **"Vast wants a fresh 2FA login"**: your Vast session ended. Run `vastai tfa login --method-type totp
   -c <code>` (crab-student removes the ended session's key, which would otherwise make that very
   command fail with "Session expired"). Until you do, nothing can be rented, started, stopped or deleted,

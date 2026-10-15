@@ -36,7 +36,8 @@ def view(name: str = "job1", **fields) -> agents.View:
 
 def record(name: str = "job1", **fields) -> dict:
     return {"name": name, "created": core.now_iso(), "phase": "ready", "pending": None, "instance_id": 5001,
-            "repo": {"slug": "ada/proj", "branch": f"agent/{name}", "workspace": False, "dir": "/root/work/proj"},
+            "repo": {"slug": "ada/proj-agents", "source": "ada/proj", "branch": f"agent/{name}",
+                     "dir": "/root/work/proj"},
             "offers": [], "dph": 0.42, "short": "1x RTX 4090 (Quebec, CA)", "mode": "colleague",
             "claude_settings": {}, "idle_minutes": 60, "disk_gb": 64, **fields}  # fmt: skip
 
@@ -369,7 +370,7 @@ def test_list_warns_on_stderr_about_a_machine_that_belongs_to_no_agent(fake_vast
 def test_status_detail_and_a_json_result_line_that_follows_the_state(patched, monkeypatch, capsys):
     rc, out, _ = run(capsys, "status", "job1")
     assert rc == 0 and "job1" in out.splitlines()[0] and "working" in out.splitlines()[0]
-    for part in (view().machine, core.usd(view().spent), "agent/job1", "crab-student open job1",
+    for part in (view().machine, core.usd(view().spent), "agent/job1", "ada/proj-agents", "crab-student open job1",
                  "crab-student report job1", "colleague", "opus", "high"):  # fmt: skip
         assert part in out
     assert "crab-student open job1 --vscode" not in out

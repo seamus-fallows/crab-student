@@ -19,11 +19,12 @@ BOOTING = {"id": 7, "actual_status": "loading", "intended_status": "running", "s
 CLEAN = {"committed": 0, "pushed": True, "dirty": 0, "unpushed": 0, "error": None,
          "outputs": {"files": 0, "bytes": 0, "sample": []}, "large_files": []}  # fmt: skip
 NOTE = "agent-runs/job1/stopped.json"  # where a machine that stopped itself leaves its stop note
+AGENTS = "ada/proj-agents"  # (the agent repo of the user's repo, ada/proj)
 
 
 def record(name: str = "job1", phase: str = "ready", **fields) -> dict:
     """An agent record with the fields agents read."""
-    repo = {"slug": "ada/proj", "branch": f"agent/{name}", "start_sha": None, "deploy_key": None,
+    repo = {"slug": AGENTS, "source": "ada/proj", "branch": f"agent/{name}", "start_sha": None,
             "branch_created": False, "dir": "/root/work/proj"}  # fmt: skip
     return {"name": name, "created": core.now_iso(), "phase": phase, "error": None, "pending": None, "rent": None,
             "rents": [],
@@ -75,23 +76,25 @@ def fails(code: int, fn, *a) -> core.CrabError:
 
 @pytest.fixture
 def repo(fake_github) -> dict:
-    """The record's repo part, with the agent's deploy key and its branch (at the start commit) on GitHub."""
-    bare = fake_github.create_repo("ada/proj")
+    """The record's repo part: the agent's branch (at the start commit) on its agent repo, whose deploy key is on
+    GitHub and here."""
+    bare = fake_github.create_repo(AGENTS, description=f"{github.MARK} for ada/proj")
     sha = git(bare, "rev-parse", "main").strip()
     git(bare, "branch", "agent/job1", sha)
-    key = {"id": 101, "file": "ada--proj-0123abcd", "created": core.now_iso()}
-    fake_github.keys["ada/proj"] = {101: {"title": github.key_title(key)}}
-    github.key_file(key).parent.mkdir(parents=True, exist_ok=True)
-    github.key_file(key).write_text("private\n")
-    Path(f"{github.key_file(key)}.pub").write_text("ssh-ed25519 AAAA shared\n")
-    return {"slug": "ada/proj", "branch": "agent/job1", "start_sha": sha, "deploy_key": key,
+    fake_github.keys[AGENTS] = {
+        101: {"title": github.KEY_TITLE, "key": "ssh-ed25519 AAAA", "read_only": "false"}
+    }
+    github.key_file(AGENTS).parent.mkdir(parents=True, exist_ok=True)
+    github.key_file(AGENTS).write_text("private\n")
+    Path(f"{github.key_file(AGENTS)}.pub").write_text("ssh-ed25519 AAAA crab-student\n")
+    return {"slug": AGENTS, "source": "ada/proj", "branch": "agent/job1", "start_sha": sha,
             "branch_created": True, "dir": "/root/work/proj"}  # fmt: skip
 
 
 def push_to_branch(fake_github, tmp_path, path: str, text: str) -> None:
     """The agent pushes a file to agent/job1."""
     work = tmp_path / "work"
-    git(tmp_path, "clone", "-q", "-b", "agent/job1", str(fake_github.bare("ada/proj")), str(work))
+    git(tmp_path, "clone", "-q", "-b", "agent/job1", str(fake_github.bare(AGENTS)), str(work))
     (work / path).parent.mkdir(parents=True, exist_ok=True)
     (work / path).write_text(text)
     git(work, "add", path)
@@ -390,30 +393,20 @@ def test_delete_refuses_when_work_would_be_lost(problem, named, fake_vast, machi
 
 
 @pytest.mark.parametrize("worked", [False, True])
-def test_a_clean_check_destroys_the_machine_and_keeps_only_a_branch_with_work(
+def test_a_clean_check_destroys_the_machine_and_keeps_the_branch_and_the_deploy_key(
     worked, fake_vast, fake_github, machines, repo, tmp_path
 ):
     agent(fake_vast, repo=repo)
     if worked:
         push_to_branch(fake_github, tmp_path, "result.txt", "42\n")
+    branch = fake_github.branch_sha(AGENTS, "agent/job1")
     machines.replies[("job1", "check")] = CLEAN
     agents.delete("job1", False, out())
     assert [call[1] for call in machines.calls] == [["check"]]
     assert not fake_vast.instances and not core.record_path("job1").exists()
-    assert fake_github.keys["ada/proj"] == {}  # (the deploy key is gone)
-    assert not github.key_file(repo["deploy_key"]).exists()
-    assert (fake_github.branch_sha("ada/proj", "agent/job1") is not None) is worked
-
-
-def test_a_shared_deploy_key_goes_with_the_last_agent_holding_it(fake_vast, fake_github, machines, repo):
-    git(fake_github.bare("ada/proj"), "branch", "agent/job2", repo["start_sha"])
-    agent(fake_vast, repo=repo)
-    agent(fake_vast, "job2", repo={**repo, "branch": "agent/job2"})
-    machines.replies[("job1", "check")] = machines.replies[("job2", "check")] = CLEAN
-    agents.delete("job1", False, out())
-    assert list(fake_github.keys["ada/proj"]) == [101] and github.key_file(repo["deploy_key"]).exists()
-    agents.delete("job2", False, out())
-    assert fake_github.keys["ada/proj"] == {} and not github.key_file(repo["deploy_key"]).exists()
+    assert fake_github.branch_sha(AGENTS, "agent/job1") == branch  # (the agent repo keeps the agents' work)
+    assert list(fake_github.keys[AGENTS]) == [101] and github.key_file(AGENTS).exists()  # (for the next one)
+    assert not [c for c in fake_github.calls if c[:2] == ("api", "-X") and c[2] != "GET"]  # (nothing written)
 
 
 def rent(label: str, instance_id: int | None = None) -> dict:

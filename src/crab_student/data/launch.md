@@ -33,11 +33,11 @@ and then say so in the brief (under Context; for interactive, in a short sentenc
 
 ## 4. Choose the repo
 
-- Default: the current repo. It needs a GitHub remote, and the user needs admin rights on it.
+- Default: the current repo. It needs a GitHub remote.
 - `--no-repo` (the user's private workspace repo) when the task has nothing to do with this repo, or
   there is no GitHub repo.
-- Uncommitted changes to tracked files are carried over to the agent automatically; untracked files are
-  not. If the task needs an untracked file, say so in a warning line; never commit for the user.
+- Uncommitted changes to tracked files are carried over to the agent automatically; untracked files and
+  Git LFS files are not. If the task needs one, say so in a warning line; never commit for the user.
 - `--committed-only` leaves the uncommitted changes behind (the agent starts from the last commit). Use
   it when the user asks for that, or said that other work is going on in this checkout (other agents or
   people editing it): half-finished edits would otherwise become the agent's starting point.

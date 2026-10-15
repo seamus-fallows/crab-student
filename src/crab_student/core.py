@@ -135,7 +135,7 @@ DEFAULTS: dict[str, object] = {
     "model": "",
     "effort": "",
     "fast_mode": "",
-    "workspace_repo": "crab-student-work",
+    "workspace_repo": "agent-workspace",
     "notify_url": "",
     "open_window": "on",
 }

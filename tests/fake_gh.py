@@ -1,5 +1,6 @@
 """A fake GitHub: a folder of bare repos (real git for every clone, push and fetch) and an in-process
-stand-in for the `gh` calls crab-student makes. Tests read `keys` and set `admin[slug]`."""
+stand-in for the `gh` calls crab-student makes (any other call fails the test). Tests read `keys`, `private`
+and `description`."""
 
 from __future__ import annotations
 
@@ -21,8 +22,8 @@ class FakeGitHub:
     def __init__(self, root: Path, login: str = "ada") -> None:
         self.root = root
         self.login = login
-        self.admin: dict[str, bool] = {}
         self.private: dict[str, bool] = {}
+        self.description: dict[str, str] = {}
         self.keys: dict[str, dict[int, dict]] = {}
         self.calls: list[tuple[str, ...]] = []
         self._next_key = 100
@@ -30,7 +31,10 @@ class FakeGitHub:
     def bare(self, slug: str) -> Path:
         return self.root / f"{slug}.git"
 
-    def create_repo(self, slug: str, readme: bool = True) -> Path:
+    def create_repo(
+        self, slug: str, readme: bool = True, description: str = "", private: bool = True
+    ) -> Path:
+        self.description[slug], self.private[slug] = description, private
         path = self.bare(slug)
         path.parent.mkdir(parents=True, exist_ok=True)
         git(path.parent, "init", "-q", "--bare", "-b", "main", path.name)
@@ -76,39 +80,35 @@ class FakeGitHub:
         if path == "user":
             return json.dumps({"login": self.login})
         if path == "user/repos" and method == "POST":
-            self.create_repo(f"{self.login}/{fields['name']}")
-            return json.dumps({"full_name": f"{self.login}/{fields['name']}"})
+            slug = f"{self.login}/{fields['name']}"
+            if self.bare(slug).exists():
+                raise GhError("GitHub: gh: name already exists on this account (HTTP 422)", False)
+            self.create_repo(
+                slug, fields["auto_init"] == "true", fields["description"], fields["private"] == "true"
+            )
+            return json.dumps({"full_name": slug})
         slug = "/".join(parts[1:3])
         if not self.bare(slug).exists():
             raise self._missing()
         tail = parts[3:]
         if not tail:
-            return json.dumps({"full_name": slug, "private": self.private.get(slug, True),
-                               "permissions": {"admin": self.admin.get(slug, True)}})  # fmt: skip
+            return json.dumps({"full_name": slug, "private": self.private[slug],
+                               "description": self.description[slug] or None})  # fmt: skip
         if tail[:3] == ["git", "matching-refs", "heads"]:
             branch = "/".join(tail[3:])
             sha = self.branch_sha(slug, branch)
             return json.dumps([{"ref": f"refs/heads/{branch}", "object": {"sha": sha}}] if sha else [])
         if tail == ["commits", "HEAD"]:
             return json.dumps({"sha": git(self.bare(slug), "rev-parse", "HEAD").strip()})
+        if tail == ["keys"] and method == "GET":
+            return json.dumps([{"id": i, **key} for i, key in self.keys.get(slug, {}).items()])
         if tail == ["keys"] and method == "POST":
             self._next_key += 1
             self.keys.setdefault(slug, {})[self._next_key] = fields
             return json.dumps({"id": self._next_key})
-        if tail[:1] == ["keys"] and len(tail) == 2 and method == "GET":
-            if int(tail[1]) not in self.keys.get(slug, {}):
-                raise self._missing()
-            return json.dumps({"id": int(tail[1]), **self.keys[slug][int(tail[1])]})
-        if tail[:1] == ["keys"] and method == "DELETE":
-            if self.keys.get(slug, {}).pop(int(tail[1]), None) is None:
-                raise self._missing()
-            return ""
         if tail == ["git", "refs"] and method == "POST":
             git(self.bare(slug), "update-ref", fields["ref"], fields["sha"])
             return json.dumps({"ref": fields["ref"]})
-        if tail[:3] == ["git", "refs", "heads"] and method == "DELETE":
-            git(self.bare(slug), "update-ref", "-d", "refs/heads/" + "/".join(tail[3:]))
-            return ""
         if tail[:1] == ["contents"] and raw:
             file, ref = "/".join(tail[1:]), path.split("?ref=")[1]
             p = subprocess.run(["git", "-C", str(self.bare(slug)), "show", f"{ref}:{file}"], capture_output=True,

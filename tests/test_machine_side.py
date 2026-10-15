@@ -1009,7 +1009,8 @@ def test_the_machine_is_set_up_from_the_config_the_local_side_writes(cs, mode):
         "cpu_ram": 16000,
         "geolocation": "Quebec, CA",
     }
-    repo = {"slug": "ada/proj", "branch": "agent/job1", "dir": str(cs.ROOT / "work" / "proj")}
+    repo = {"slug": "ada/proj-agents", "source": "ada/proj", "branch": "agent/job1",
+            "dir": str(cs.ROOT / "work" / "proj")}  # fmt: skip
     a = launch.LaunchArgs("job1", [7], 64, "Train.", None, False, ["HF_TOKEN"], False, False,
                           mode=mode, model="opus", fast=True)  # fmt: skip
     rec = launch.new_record(a, core.load_config(), [offer], repo, None)

@@ -18,6 +18,7 @@ from crab_student import cli, core, github, launch, machine, offers, vast
 
 TOKEN = "sk-ant-oat01-" + "x" * 80  # (the Claude token the ready fixture stores)
 HF = "hf_the-task-secret-0042"
+AGENTS = "ada/proj-agents"  # (the agent repo of the user's repo, ada/proj)
 RESULT_KEYS = {"name", "state", "result_line", "warnings", "needs_approval", "instance_id", "machine", "dph",
                "mode", "repo", "branch"}  # fmt: skip
 
@@ -133,11 +134,6 @@ def test_a_launch_races_two_machines_keeps_the_first_ready_and_sets_it_up(
     assert len(fake_vast.calls("DELETE", "/")) == 1 and set(machines.uploads) == {"job1"}
     assert rec["rent"]["label"] == recorded[0][0] and rec["rents"] == [] == rec["failed_offers"]
     assert rec["last_start"] and rec["disk_gb"] == 64 and "limit_hours" not in rec
-    head = git(user_repo, "rev-parse", "HEAD").strip()
-    assert fake_github.branch_sha("ada/proj", "agent/job1") == rec["repo"]["start_sha"] == head
-    ((key_id, key),) = fake_github.keys["ada/proj"].items()
-    public = Path(f"{github.key_file(rec['repo']['deploy_key'])}.pub").read_text().strip()
-    assert key_id == rec["repo"]["deploy_key"]["id"] and key["key"] == public and key["read_only"] == "false"
     config = json.loads(machines.uploads["job1"]["config.json"][0])
     assert (config["branch"], config["mode"], config["claude_settings"]) == ("agent/job1", "colleague", {})
     assert config["session_id"] == rec["session_id"] and not {"limit_hours", "model"} & config.keys()
@@ -217,7 +213,7 @@ def test_offers_that_can_no_longer_be_rented_are_skipped_and_none_left_is_exit_4
     assert [r[1] for r in rents(fake_vast)] == ["/api/v0/asks/1/"]
     fails(4, go, args("job2", offer_ids=[9, 2]))
     assert not core.record_path("job2").exists() and len(rents(fake_vast)) == 1
-    assert fake_github.branch_sha("ada/proj", "agent/job2") is None
+    assert fake_github.branch_sha(AGENTS, "agent/job2") is None
 
 
 @pytest.mark.parametrize("ids", [[], [1, 1], [1, 2, 3, 4, 5, 6]])
@@ -268,13 +264,33 @@ def test_secrets_reach_the_machine_only_in_private_files(fake_vast, fake_github,
         assert not any(secret.encode() in data for data in local)
 
 
-def test_agents_on_a_repo_share_one_deploy_key(fake_github, machines):
+def test_the_agent_starts_on_its_branch_in_its_agent_repo_and_the_users_repo_is_never_written(
+    fake_github, user_repo, machines
+):
+    theirs = git(fake_github.bare("ada/proj"), "for-each-ref")
+    res, rec = go(args()), core.load("job1")
+    head = git(user_repo, "rev-parse", "HEAD").strip()
+    assert (rec["repo"]["slug"], rec["repo"]["source"], res["repo"]) == (AGENTS, "ada/proj", "ada/proj")
+    assert fake_github.branch_sha(AGENTS, "agent/job1") == rec["repo"]["start_sha"] == head
+    config = json.loads(machines.uploads["job1"]["config.json"][0])
+    assert (config["repo_url"], config["repo_dir"]) == (github.git_url(AGENTS), "/root/work/proj")
+    key = machines.uploads["job1"]["deploy_key"]
+    assert key[0] == github.key_file(AGENTS).read_bytes().replace(b"\r\n", b"\n") and key[1] == 0o600
+    (added,) = fake_github.keys[AGENTS].values()  # (the key works on the agent repo only)
+    assert added["key"].split() == Path(f"{github.key_file(AGENTS)}.pub").read_text().split()[:2]
+    assert not [c for c in gh_writes(fake_github) if c[3].startswith("repos/ada/proj/")]
+    assert git(fake_github.bare("ada/proj"), "for-each-ref") == theirs and "ada/proj" not in fake_github.keys
+
+
+def test_the_first_launch_on_a_repo_makes_its_agent_repo_and_later_ones_reuse_it_and_its_key(
+    fake_github, machines
+):
     go(args("job1"))
     go(args("job2"))
-    key = core.load("job1")["repo"]["deploy_key"]
-    assert core.load("job2")["repo"]["deploy_key"] == key
-    assert list(fake_github.keys["ada/proj"]) == [key["id"]]  # (so GitHub sent one email, not two)
+    assert sum(c[3] == "user/repos" for c in gh_writes(fake_github)) == 1 and fake_github.private[AGENTS]
+    assert len(fake_github.keys[AGENTS]) == 1  # (GitHub emails the user about each key added: once)
     assert machines.uploads["job1"]["deploy_key"] == machines.uploads["job2"]["deploy_key"]
+    assert fake_github.branch_sha(AGENTS, "agent/job1") and fake_github.branch_sha(AGENTS, "agent/job2")
 
 
 def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_github, user_repo):
@@ -282,7 +298,7 @@ def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_githu
     (user_repo / "notes.txt").write_text("mine\n")
     before = user_state(user_repo)
     res = go(args())
-    rec, bare = core.load("job1"), fake_github.bare("ada/proj")
+    rec, bare = core.load("job1"), fake_github.bare(AGENTS)
     assert git(bare, "rev-parse", "agent/job1").strip() == rec["repo"]["start_sha"]
     assert git(bare, "rev-parse", "agent/job1^").strip() == git(user_repo, "rev-parse", "HEAD").strip()
     assert "changed" in git(bare, "show", "agent/job1:README.md")
@@ -295,7 +311,7 @@ def test_uncommitted_changes_are_carried_and_untracked_files_reported(fake_githu
 def test_committed_only_leaves_the_uncommitted_changes_behind(fake_github, user_repo):
     (user_repo / "README.md").write_text("changed\n")
     go(args(committed_only=True))
-    rec, bare = core.load("job1"), fake_github.bare("ada/proj")
+    rec, bare = core.load("job1"), fake_github.bare(AGENTS)
     assert (
         rec["repo"]["start_sha"] == git(user_repo, "rev-parse", "HEAD").strip() and not rec["repo"]["carried"]
     )
@@ -306,13 +322,15 @@ def test_committed_only_leaves_the_uncommitted_changes_behind(fake_github, user_
 def test_no_repo_works_in_a_private_workspace_repo(fake_github, machines, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # (no repo needed)
     go(args(no_repo=True))
-    rec, slug = core.load("job1"), "ada/crab-student-work"
+    rec, slug = core.load("job1"), "ada/agent-workspace"
     main = git(fake_github.bare(slug), "rev-parse", "main").strip()
-    assert rec["phase"] == "ready" and list(fake_github.keys[slug]) == [rec["repo"]["deploy_key"]["id"]]
+    assert rec["phase"] == "ready" and (rec["repo"]["slug"], rec["repo"]["source"]) == (slug, None)
     assert fake_github.branch_sha(slug, "agent/job1") == rec["repo"]["start_sha"] == main
-    assert any(c[3] == "user/repos" and "private=true" in c for c in gh_writes(fake_github))
+    assert fake_github.private[slug] and len(fake_github.keys[slug]) == 1
     config = json.loads(machines.uploads["job1"]["config.json"][0])
-    assert config["repo_dir"] == "/root/work/crab-student-work"
+    assert (config["repo_url"], config["repo_dir"]) == (github.git_url(slug), "/root/work/agent-workspace")
+    go(args("job2", no_repo=True))  # (the workspace and its key are made once)
+    assert sum(c[3] == "user/repos" for c in gh_writes(fake_github)) == 1 and len(fake_github.keys[slug]) == 1
 
 
 # ---- approval by price --------------------------------------------------------------------------
@@ -323,8 +341,7 @@ def test_a_pick_over_the_price_waits_and_approve_rents_up_to_the_highest_price_l
     res, rec = go(args()), core.load("job1")
     assert res["exit_code"] == 3 and res["needs_approval"] and res.keys() >= RESULT_KEYS
     assert rec["phase"] == "pending" and rec["pending"]["max_dph"] == 0.35
-    assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)
-    assert fake_github.branch_sha("ada/proj", "agent/job1") is None
+    assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)  # (nothing on GitHub either)
     # approve looks again: offer 2 now costs more than the $0.35/hr that was approved
     fake_vast.offers = [offer(1, dph_total=0.30), offer(2, dph_total=0.40)]
     res, rec = launch.approve("job1", out()), core.load("job1")
@@ -613,17 +630,21 @@ def test_dry_run_rents_nothing_and_writes_nothing(fake_vast, fake_github, user_r
 
 
 @pytest.mark.parametrize(
-    "case,code", [("bad name", 2), ("taken name", 2), ("branch exists", 2), ("not admin", 1)]
+    "case,code",
+    [("bad name", 2), ("taken name", 2), ("branch exists", 2), ("not an agent repo", 1), ("public", 1)],
 )
 def test_refused_launches_rent_nothing(case, code, fake_vast, fake_github):
+    marked = f"{github.MARK} for ada/proj"
     if case == "taken name":
         core.save({"name": "job1", "phase": "pending"})
-    elif case == "branch exists":
-        git(fake_github.bare("ada/proj"), "branch", "agent/job1", "main")
-    elif case == "not admin":
-        fake_github.admin["ada/proj"] = False
+    elif case == "branch exists":  # (a deleted agent's: the agent repo keeps every branch)
+        git(fake_github.create_repo(AGENTS, description=marked), "branch", "agent/job1", "main")
+    elif case == "not an agent repo":  # (a repo of the user's that happens to have its name)
+        fake_github.create_repo(AGENTS, description="Our agents")
+    elif case == "public":
+        fake_github.create_repo(AGENTS, description=marked, private=False)
     fails(code, go, args(name="Job_1" if case == "bad name" else "job1"))
-    assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github)
+    assert not fake_vast.calls("PUT", "/") and not gh_writes(fake_github) and not fake_github.keys
 
 
 def test_a_name_another_launch_takes_while_this_one_plans_rents_nothing(fake_vast, fake_github, monkeypatch):

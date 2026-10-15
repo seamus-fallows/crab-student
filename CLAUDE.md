@@ -58,7 +58,8 @@ A single-user tool its owner wants simple and fast.
 
 ## Safety rules
 
-IMPORTANT: read SPEC section 1 before changing renting, stopping, `delete`, secrets or the permission rules.
+IMPORTANT: read SPEC section 1 before changing renting, stopping, `delete`, secrets, GitHub access or the
+permission rules.
 
 - Never add a flag, default or retry that rents more, or rents above `approve_above_usd_per_hour` without
   `approve`. The launcher is never told the price; the CLI enforces it.
@@ -67,6 +68,7 @@ IMPORTANT: read SPEC section 1 before changing renting, stopping, `delete`, secr
 - Act only on instance ids in the records or our exact rent labels (the Vast account may be shared).
 - Code destroys a machine by itself only before its upload or after a failed setup.
 - Secrets never go on command lines, into logs, the brief, records or git.
+- crab-student never writes to the user's repo; agents can write only to their agent repo.
 - The remote agent never sees the word "crab-student" in its rules, prompts or command output.
 
 ## Easy to forget
